@@ -5360,6 +5360,14 @@ namespace
 		void LiveApply(int mode, int soloIndex) {
 			g_autoLiveModeOverride = mode;
 			g_autoLiveSoloIndexOverride = soloIndex;
+			if (SoloUnlock::g_lastStartData) {
+				auto k = KlassOf(SoloUnlock::g_lastStartData);
+				auto fm = FieldOf(k, "<VocalSeparatedMode>k__BackingField");
+				auto fs = FieldOf(k, "<VocalSeparatedSoloIndex>k__BackingField");
+				if (fm) { int v = mode; il2cpp_field_set_value(SoloUnlock::g_lastStartData, fm, &v); }
+				if (fs) { int v = soloIndex; il2cpp_field_set_value(SoloUnlock::g_lastStartData, fs, &v); }
+				Log(std::format("[v64] LiveApply startData mode={} solo={}", mode, soloIndex));
+			}
 			bool car = false, voc = false;
 			if (g_liveCarousel) {
 				car |= LiveWriteBool(g_liveCarousel, "<IsActiveVocalSeparate>k__BackingField", true);
