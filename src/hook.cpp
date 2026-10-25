@@ -3172,6 +3172,14 @@ namespace
 			vocalSeparatedMode = g_autoLiveModeOverride;
 		}
 		HOOK_CAST_CALL(void*, LiveMVStartData_ctor)(_this, mvStage, sceneName, onStageIdols, cameraworkConfig, vocalSeparatedMode, vocalSeparatedSoloIndex, renderingDynamicRange, soundEffectMode, isSortIdols);
+		try {
+			auto k = KlassOf(_this);
+			auto fi = FieldOf(k, "<VocalSeparatedMode>k__BackingField");
+			if (!fi) fi = FieldOf(k, "VocalSeparatedMode");
+			int actual = fi ? il2cpp_symbols::read_field<int>(_this, fi) : -999;
+			Log(std::format("[v57] start mode override={} requested={} actual={}",
+				g_autoLiveModeOverride, vocalSeparatedMode, actual));
+		} catch (...) {}
 		if (selectedCharaId >= 0) {
 			try { SoloUnlock::ApplySoloIndexMap(_this, onStageIdols, vocalSeparatedSoloIndex, selectedCharaId, mvSongId); } catch (...) {}
 		}
@@ -5222,6 +5230,8 @@ namespace
 				catch (...) {}
 			}
 			if (g_liveOverlay) {
+				try { RunwayDump::ReflectDump(g_liveOverlay, 3, "OverlaySequencer(v57)", true); }
+				catch (...) {}
 				auto vfi = FieldOf(KlassOf(g_liveOverlay), "view");
 				void* view = nullptr;
 				if (vfi) try { view = il2cpp_symbols::read_field<void*>(g_liveOverlay, vfi); } catch (...) { view = nullptr; }
@@ -5355,6 +5365,16 @@ namespace
 				LiveAck("skip invoked");
 			}
 			catch (...) { LiveAck("skip threw"); }
+		}
+
+		void LiveSkip2() {
+			if (!g_liveOverlay) { LiveAck("skip2 failed: overlay=null"); return; }
+			if (!g_liveSkipMethod) { LiveAck("skip2 failed: method=null"); return; }
+			try {
+				g_liveSkipMethod->InvokeAsVoid((Il2CppObject*)g_liveOverlay, {});
+				LiveAck("skip2 invoked");
+			}
+			catch (...) { LiveAck("skip2 threw"); }
 		}
 
 		void LiveOpenHome() {
@@ -5683,6 +5703,7 @@ namespace
 			else if (verb == "tclick") LiveTitleClick();
 			else if (verb == "watchmv") LiveWatchMv();
 			else if (verb == "skip") LiveSkip();
+			else if (verb == "skip2") LiveSkip2();
 			else if (verb == "quit") LiveQuit();
 			else if (verb == "dump") { LiveDump(); LiveAck("dump"); }
 			else LiveAck("unknown command: " + verb);
