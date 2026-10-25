@@ -3078,6 +3078,7 @@ namespace
 		int g_lastSoloVocalMode = -1;
 		int g_lastSoloVocalIndex = -1;
 		int g_autoLiveModeOverride = -1;
+		int g_autoLiveSoloIndexOverride = -999;
 	int g_lastSoloIsSortIdols = 0;
 	int g_soloPositionLogCalls = 0;
 
@@ -3170,6 +3171,9 @@ namespace
 		}
 		if (g_autoLiveModeOverride >= 0) {
 			vocalSeparatedMode = g_autoLiveModeOverride;
+		}
+		if (g_autoLiveSoloIndexOverride >= -1) {
+			vocalSeparatedSoloIndex = g_autoLiveSoloIndexOverride;
 		}
 		HOOK_CAST_CALL(void*, LiveMVStartData_ctor)(_this, mvStage, sceneName, onStageIdols, cameraworkConfig, vocalSeparatedMode, vocalSeparatedSoloIndex, renderingDynamicRange, soundEffectMode, isSortIdols);
 		if (selectedCharaId >= 0) {
@@ -4721,7 +4725,7 @@ namespace
 				if (!fi) continue;
 				void* value = nullptr;
 				try {
-					il2cpp_field_static_get_value(fi, &value);
+					il2cpp_field_get_value(nullptr, fi, &value);
 					return value;
 				}
 				catch (...) {}
@@ -5355,6 +5359,7 @@ namespace
 
 		void LiveApply(int mode, int soloIndex) {
 			g_autoLiveModeOverride = mode;
+			g_autoLiveSoloIndexOverride = soloIndex;
 			bool car = false, voc = false;
 			if (g_liveCarousel) {
 				car |= LiveWriteBool(g_liveCarousel, "<IsActiveVocalSeparate>k__BackingField", true);
@@ -5809,6 +5814,8 @@ namespace
 			else if (verb == "lipone") LiveLipOne(arg);
 			else if (verb == "lipempty") LiveLipEmpty(arg);
 			else if (verb == "lipdump") LiveLipDump(arg);
+			else if (verb == "full") LiveApply(0, -1);
+			else if (verb == "full1") LiveApply(1, -1);
 			else if (verb == "vocaltoggle") LiveVocalToggle();
 			else if (verb == "vocalsetting") LiveVocalSetting();
 			else if (verb == "quit") LiveQuit();
