@@ -5366,8 +5366,10 @@ namespace
 				float a = -1, o = -1;
 				if (gf) {
 					auto sa = il2cpp_string_new("Mouth_A"); auto so = il2cpp_string_new("Mouth_O");
-					a = gf->Invoke<float>((Il2CppObject*)anim, { (Il2CppObject*)sa });
-					o = gf->Invoke<float>((Il2CppObject*)anim, { (Il2CppObject*)so });
+					using GetFloatFn = float(*)(void*, Il2CppString*);
+					auto fn = (GetFloatFn)gf->methodPointer;
+					a = fn(anim, sa);
+					o = fn(anim, so);
 				}
 				Log(std::format("[v67] lipget ch={} anim={} A={} O={}", idx, ViewDiag::ptr_str(anim), a, o));
 				LiveAck(std::format("lipget A={} O={}", a, o));
