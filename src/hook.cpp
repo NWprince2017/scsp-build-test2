@@ -5342,7 +5342,8 @@ namespace
 			if (!vk) { LiveAck("title-click failed: view class=null"); return; }
 			int found = 0, clicked = 0;
 			void* iter = nullptr;
-			while (auto f = il2cpp_class_get_fields(vk, &iter)) {
+			while (void* fiRaw = RunwayDump::API().class_get_fields(vk, &iter)) {
+				auto f = reinterpret_cast<FieldInfo*>(fiRaw);
 				const char* tn = f->type ? il2cpp_type_get_name(f->type) : "";
 				if (!tn || !strstr(tn, "Button")) continue;
 				const char* fn = f->name ? f->name : "?";
