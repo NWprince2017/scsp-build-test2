@@ -5298,6 +5298,26 @@ namespace
 			LiveAck(std::format("lipone missing idx={} chars={}", idx, (int)chars.size()));
 		}
 
+		void LiveLipDump(int idx) {
+			std::vector<void*> chars;
+			{
+				std::lock_guard<std::mutex> lock(g_lipMutex);
+				chars = g_lipCharacters;
+			}
+			for (void* ch : chars) {
+				if (!ch) continue;
+				if (LipCharaId(ch) != idx) continue;
+				auto controller = LipControllerOf(ch);
+				Log(std::format("[v62] lipdump ch={} controller={} table={} lips={} lip={}",
+					idx, ViewDiag::ptr_str(controller), ViewDiag::ptr_str(LipTableOf(controller)),
+					ViewDiag::ptr_str(LipReadPtr(controller, "_lips")), ViewDiag::ptr_str(LipReadPtr(controller, "lip"))));
+				if (controller) try { RunwayDump::ReflectDump(controller, 3, "LipController(v62)", true); } catch (...) {}
+				LiveAck(std::format("lipdump done idx={}", idx));
+				return;
+			}
+			LiveAck(std::format("lipdump missing idx={}", idx));
+		}
+
 		void LiveLipEmpty(int idx) {
 			g_lipTryEmpty = true;
 			LiveLipOne(idx);
@@ -5788,6 +5808,7 @@ namespace
 			else if (verb == "lipinit") LiveLipInit();
 			else if (verb == "lipone") LiveLipOne(arg);
 			else if (verb == "lipempty") LiveLipEmpty(arg);
+			else if (verb == "lipdump") LiveLipDump(arg);
 			else if (verb == "vocaltoggle") LiveVocalToggle();
 			else if (verb == "vocalsetting") LiveVocalSetting();
 			else if (verb == "quit") LiveQuit();
