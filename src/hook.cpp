@@ -5322,6 +5322,41 @@ namespace
 			LiveAck(std::format("lipdump missing idx={}", idx));
 		}
 
+		void LiveLipAnim(int idx) {
+			std::vector<void*> chars;
+			{
+				std::lock_guard<std::mutex> lock(g_lipMutex);
+				chars = g_lipCharacters;
+			}
+			for (void* ch : chars) {
+				if (!ch) continue;
+				if (LipCharaId(ch) != idx) continue;
+				auto controller = LipControllerOf(ch);
+				void* anim = LipReadPtr(controller, "_animator");
+				if (!anim) anim = LipReadPtr(ch, "_faceAnimator");
+				auto k = anim ? KlassOf(anim) : nullptr;
+				auto get = k ? il2cpp_class_get_method_from_name(k, "get_parameters", 0) : nullptr;
+				if (!get) { LiveAck("lipanim no parameters"); return; }
+				auto arr = get->Invoke<Il2CppObject*>((Il2CppObject*)anim, {});
+				int len = arr ? (int)il2cpp_array_length(arr) : 0;
+				Log(std::format("[v65] lipanim ch={} anim={} params={}", idx, ViewDiag::ptr_str(anim), len));
+				for (int i = 0; i < len; ++i) {
+					auto p = (Il2CppObject*)il2cpp_symbols::array_get_value(arr, i);
+					if (!p) continue;
+					auto pk = KlassOf(p);
+					auto gn = pk ? il2cpp_class_get_method_from_name(pk, "get_name", 0) : nullptr;
+					auto gh = pk ? il2cpp_class_get_method_from_name(pk, "get_nameHash", 0) : nullptr;
+					std::string name;
+					if (gn) { auto s = gn->Invoke<Il2CppString*>((Il2CppObject*)p, {}); if (s) name = s->ToUtf8String(); }
+					int hash = gh ? gh->Invoke<int>((Il2CppObject*)p, {}) : 0;
+					Log(std::format("[v65] param[{}] name={} hash={}", i, name, hash));
+				}
+				LiveAck(std::format("lipanim done idx={} params={}", idx, len));
+				return;
+			}
+			LiveAck("lipanim missing");
+		}
+
 		void LiveLipEmpty(int idx) {
 			g_lipTryEmpty = true;
 			LiveLipOne(idx);
@@ -5822,6 +5857,7 @@ namespace
 			else if (verb == "lipone") LiveLipOne(arg);
 			else if (verb == "lipempty") LiveLipEmpty(arg);
 			else if (verb == "lipdump") LiveLipDump(arg);
+			else if (verb == "lipanim") LiveLipAnim(arg);
 			else if (verb == "full") LiveApply(0, -1);
 			else if (verb == "full1") LiveApply(1, -1);
 			else if (verb == "vocaltoggle") LiveVocalToggle();
