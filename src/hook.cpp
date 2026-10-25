@@ -4721,7 +4721,7 @@ namespace
 				if (!fi) continue;
 				void* value = nullptr;
 				try {
-					il2cpp_field_get_value(nullptr, fi, &value);
+					il2cpp_field_static_get_value(fi, &value);
 					return value;
 				}
 				catch (...) {}
