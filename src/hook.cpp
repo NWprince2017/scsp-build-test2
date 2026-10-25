@@ -3077,6 +3077,7 @@ namespace
 
 		int g_lastSoloVocalMode = -1;
 		int g_lastSoloVocalIndex = -1;
+		int g_lastSoloPostIndex = -1;
 		int g_autoLiveModeOverride = -1;
 		int g_autoLiveSoloIndexOverride = -999;
 	int g_lastSoloIsSortIdols = 0;
@@ -4218,6 +4219,7 @@ namespace
 				il2cpp_field_set_value(_this, fiIdx, &value);
 			}
 			if (fiIdx) try { fieldAfter = il2cpp_symbols::read_field<int>(_this, fiIdx); } catch (...) { fieldAfter = -999; }
+			if (fieldAfter >= 0) g_lastSoloPostIndex = fieldAfter;
 			Log(std::format("[v32] solo-map mode={} song={} chara={} orig={} post={} part={} hash={} new={} field={}->{} post=[{}] hashIds=[{}]",
 				mode, songId, charaId, origIndex, postIdx, partIdx, hashIdx, newIndex,
 				fieldBefore, fieldAfter, JoinIds(postIds), JoinIds(g_soloVoiceIds)));
@@ -4675,6 +4677,7 @@ namespace
 		std::mutex g_lipMutex;
 		std::vector<void*> g_lipCharacters;
 		bool g_lipTryEmpty = false;
+		bool g_lipProcedural = false;
 
 		bool LipReadBool(void* obj, const char* name) {
 			if (!obj) return false;
@@ -5046,12 +5049,36 @@ namespace
 			HOOK_CAST_CALL(void, Character_Update)(_this, mtd);
 		}
 
+		void SetMouthParam(void* anim, const char* name, float value) {
+			if (!anim) return;
+			auto k = KlassOf(anim);
+			auto m = k ? il2cpp_class_get_method_from_name(k, "SetFloat", 2) : nullptr;
+			if (!m || !m->methodPointer) return;
+			auto s = il2cpp_string_new(name);
+			m->InvokeAsVoid((Il2CppObject*)anim, { (Il2CppObject*)s, (Il2CppObject*)&value });
+		}
+
+		void DriveProceduralLip(void* ch) {
+			if (!g_lipProcedural || g_lastSoloVocalMode != 2 || !ch) return;
+			const int cid = LipCharaId(ch);
+			if (g_lastSoloPostIndex >= 0 && cid != g_lastSoloPostIndex) return;
+			void* anim = LipReadPtr(ch, "_faceAnimator");
+			if (!anim) anim = LipReadPtr(LipControllerOf(ch), "_animator");
+			if (!anim) return;
+			static int frame = 0;
+			++frame;
+			const float v = ((frame / 12) % 2) ? 0.9f : 0.1f;
+			SetMouthParam(anim, "Mouth_A", 0.85f * v);
+			SetMouthParam(anim, "Mouth_O", 0.35f * (1.0f - v));
+		}
+
 		HOOK_ORIG_TYPE Character_LateUpdate_orig;
 		void Character_LateUpdate_hook(void* _this, void* mtd) {
 			static int n = 0, lastMode = -2;
 			if (g_lastSoloVocalMode != lastMode) { lastMode = g_lastSoloVocalMode; n = 0; }
 			HOOK_CAST_CALL(void, Character_LateUpdate)(_this, mtd);
 			if (g_lastSoloVocalMode == 2 && _this) {
+				DriveProceduralLip(_this);
 				auto controller = LipControllerOf(_this);
 				if (controller && LipTableOf(controller)) {
 					if (++n <= 10) {
@@ -5071,6 +5098,7 @@ namespace
 				return;
 			}
 			g_lipForceMode = (mode == "force");
+			g_lipProcedural = (mode == "on" || mode == "force");
 			const char* assemblies[] = { "PRISM.Legacy.dll", "PRISM.dll" };
 			for (const char* a : assemblies) {
 				auto ck = il2cpp_symbols_logged::get_class(a, "PRISM", "Character");
