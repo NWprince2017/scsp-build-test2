@@ -29,7 +29,7 @@ bool needPrintStack = false;
 std::vector<std::pair<std::pair<int, int>, int>> replaceDressResIds{};
 std::map<std::string, CharaParam_t> charaParam{};
 CharaParam_t baseParam(0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
-std::vector<std::function<bool()>> mainThreadTasks{};  // 返回 true，执行后移除列表；返�?false，执行后不移�?
+std::vector<std::function<bool()>> mainThreadTasks{};  // 返回 true，执行后移除列表；返�?false，执行后不移�?
 
 std::map<int, CharaSwayStringParam_t> charaSwayStringOffset{};
 std::map<int, std::string> swayTypes{
@@ -555,9 +555,9 @@ namespace
 		{
 			replaceFont = il2cpp_gchandle_get_target(ReplaceFontGcHandle);
 
-			// 加载场景时会�?Resources.UnloadUnusedAssets 干掉，且不受 DontDestroyOnLoad 影响，暂且判断是否存活，并在必要的时候重新加�?
-			// TODO: 考虑挂载�?GameObject �?
-			// AssetBundle 不会被干�?
+			// 加载场景时会�?Resources.UnloadUnusedAssets 干掉，且不受 DontDestroyOnLoad 影响，暂且判断是否存活，并在必要的时候重新加�?
+			// TODO: 考虑挂载�?GameObject �?
+			// AssetBundle 不会被干�?
 			if (Object_IsNativeObjectAlive(replaceFont))
 			{
 				return replaceFont;
@@ -592,7 +592,7 @@ namespace
 
 	std::filesystem::path dumpBasePath("dumps");
 
-	// 调用之前检�?DataFile_IsKeyExist
+	// 调用之前检�?DataFile_IsKeyExist
 	void fmtAndDumpJsonBytesData(const std::wstring& dumpName) {
 		const auto dumpNameIl = il2cpp_symbols::NewWStr(dumpName);
 		auto dataBytes = (reinterpret_cast<void* (*)(Il2CppString*)>HOOK_GET_ORIG(DataFile_GetBytes))(dumpNameIl);
@@ -605,7 +605,7 @@ namespace
 			writeWstr.replace(pos, 1, replaceStr);
 			pos = writeWstr.find(searchStr, pos + replaceStr.length());
 		}
-		if (writeWstr.ends_with(L",]")) {  // 代哥�?Json 就是不一�?
+		if (writeWstr.ends_with(L",]")) {  // 代哥�?Json 就是不一�?
 			writeWstr.erase(writeWstr.length() - 2, 1);
 		}
 		const auto dumpLocalFilePath = dumpBasePath / SCLocal::getFilePathByName(dumpName, true, dumpBasePath);
@@ -679,7 +679,7 @@ namespace
 		catch (std::exception& e) {
 			printf("dumpScenarioFromCatalog error: %s\n", e.what());
 		}
-		// 下方方法已过�?
+		// 下方方法已过�?
 		int totalCount = 0;
 		const auto titleData = nlohmann::json::parse(localizationDataCache);
 		for (auto& it : titleData.items()) {
@@ -2845,7 +2845,7 @@ namespace
 	//	HOOK_CAST_CALL(void, PostProcess_DepthOfFieldClip_CreatePlayable)(retstr, _this, graph, go, mtd);
 	//}
 
-	// 已过�?
+	// 已过�?
 	HOOK_ORIG_TYPE Live_SetEnableDepthOfField_orig;
 	void Live_SetEnableDepthOfField_hook(void* _this, bool isEnable) {
 		if (g_enable_free_camera) {
@@ -3013,7 +3013,7 @@ namespace
 	std::map<int, void*> cacheAccessoryMap{};
 
 	HOOK_ORIG_TYPE LiveCostumeChangeModel_ctor_orig;
-	void LiveCostumeChangeModel_ctor_hook(void* _this, void* reply, void* idol, int costumeType, bool forceDressOrdered) {  // 添加服装�?dressDic
+	void LiveCostumeChangeModel_ctor_hook(void* _this, void* reply, void* idol, int costumeType, bool forceDressOrdered) {  // 添加服装�?dressDic
 		/*
 		static auto iidol_klass = il2cpp_symbols::get_class_from_instance(idol);
 		static auto get_CharacterId_mtd = il2cpp_class_get_method_from_name(iidol_klass, "get_CharacterId", 0);
@@ -4429,7 +4429,7 @@ namespace
 		// [v25] the real gate for songs like "Dye the sky." (#37, 037_DyeSky):
 		//   MstSong #37  IsSongParts = true,  IsSongPartsSolo = false
 		// so the 歌唱設定 panel greys out ソロ with
-		//   "この楽曲では対応していません�?
+		//   "この楽曲では対応していません�?
 		// The master row is immutable, so only the *getter* is overridden:
 		// songs that already report IsSongParts=true are told solo is
 		// supported; songs without the part feature keep their value.
@@ -4735,7 +4735,6 @@ namespace
 				std::lock_guard<std::mutex> lock(g_lipMutex);
 				if (g_lipCachedHandle) table = il2cpp_gchandle_get_target(g_lipCachedHandle);
 			}
-			if (!table) table = EmptyLipTable();
 			Log(std::format("[v58] manual SetupLip begin ch={} table={}", cid, ViewDiag::ptr_str(table)));
 			float zero = 0.0f;
 			try {
@@ -5277,6 +5276,26 @@ namespace
 			return TryClickUnityButton(btn, 1);
 		}
 
+		void LiveLipOne(int idx) {
+			std::vector<void*> chars;
+			{
+				std::lock_guard<std::mutex> lock(g_lipMutex);
+				chars = g_lipCharacters;
+			}
+			void* cached = nullptr;
+			if (g_lipCachedHandle) cached = il2cpp_gchandle_get_target(g_lipCachedHandle);
+			Log(std::format("[v60] lipone idx={} chars={} vmMode={} soloIndex={} cached={}",
+				idx, (int)chars.size(), g_lastSoloVocalMode, g_lastSoloVocalIndex, ViewDiag::ptr_str(cached)));
+			for (void* ch : chars) {
+				if (!ch) continue;
+				if (LipCharaId(ch) != idx) continue;
+				TryManualSetupLip(ch, idx);
+				LiveAck(std::format("lipone done idx={}", idx));
+				return;
+			}
+			LiveAck(std::format("lipone missing idx={} chars={}", idx, (int)chars.size()));
+		}
+
 		void LiveLipInit() {
 			std::vector<void*> chars;
 			{
@@ -5749,6 +5768,7 @@ namespace
 			else if (verb == "skip") LiveSkip();
 			else if (verb == "skip2") LiveSkip2();
 			else if (verb == "lipinit") LiveLipInit();
+			else if (verb == "lipone") LiveLipOne(arg);
 			else if (verb == "quit") LiveQuit();
 			else if (verb == "dump") { LiveDump(); LiveAck("dump"); }
 			else LiveAck("unknown command: " + verb);
