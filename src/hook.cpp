@@ -4669,6 +4669,7 @@ namespace
 		MethodInfo* g_setupLipMethod = nullptr;
 		MethodInfo* g_lipUpdateMethod = nullptr;
 		std::mutex g_lipMutex;
+		std::vector<void*> g_lipCharacters;
 
 		bool LipReadBool(void* obj, const char* name) {
 			if (!obj) return false;
@@ -4746,6 +4747,11 @@ namespace
 				return;
 			}
 			void* controller = LipControllerOf(ch);
+			if (!controller) {
+				Log(std::format("[v58] manual SetupLip result ch={} controller=null tableIn={}",
+					cid, ViewDiag::ptr_str(table)));
+				return;
+			}
 			void* faceAnim = LipReadPtr(ch, "_faceAnimator");
 			void* myAnim = LipReadPtr(ch, "_myAnimator");
 			void* lipAnim = LipReadPtr(controller, "_animator");
@@ -4776,6 +4782,9 @@ namespace
 				ViewDiag::ptr_str(faceAnim), ViewDiag::ptr_str(myAnim), ViewDiag::ptr_str(lipAnim),
 				patchedAnimator ? 1 : 0, ViewDiag::ptr_str(lips), lipsClass ? lipsClass : "?",
 				lastFrame, ViewDiag::ptr_str(datas), dataCount));
+			Log(std::format("[v58] manual SetupLip result ch={} controller={} table={} lips={} lip={}",
+				cid, ViewDiag::ptr_str(controller), ViewDiag::ptr_str(table2),
+				ViewDiag::ptr_str(lips), ViewDiag::ptr_str(LipReadPtr(controller, "lip"))));
 			if (patchedAnimator && g_setupLipMethod) {
 				try {
 					g_setupLipMethod->InvokeAsVoid((Il2CppObject*)ch,
@@ -4996,6 +5005,12 @@ namespace
 		void Character_Update_hook(void* _this, void* mtd) {
 			static int lastMode = -2, n = 0;
 			static std::unordered_set<uintptr_t> setupAttempted;
+			if (_this) {
+				std::lock_guard<std::mutex> lock(g_lipMutex);
+				bool known = false;
+				for (void* p : g_lipCharacters) if (p == _this) { known = true; break; }
+				if (!known) g_lipCharacters.push_back(_this);
+			}
 			if (g_lastSoloVocalMode != lastMode) {
 				lastMode = g_lastSoloVocalMode;
 				n = 0;
@@ -5260,6 +5275,25 @@ namespace
 			try { btn = il2cpp_symbols::read_field<void*>(g_liveVocalPresenter, fi); } catch (...) { return false; }
 			if (!btn) return false;
 			return TryClickUnityButton(btn, 1);
+		}
+
+		void LiveLipInit() {
+			std::vector<void*> chars;
+			{
+				std::lock_guard<std::mutex> lock(g_lipMutex);
+				chars = g_lipCharacters;
+			}
+			void* cached = nullptr;
+			if (g_lipCachedHandle) cached = il2cpp_gchandle_get_target(g_lipCachedHandle);
+			Log(std::format("[v59] lipinit chars={} vmMode={} soloIndex={} cached={}",
+				(int)chars.size(), g_lastSoloVocalMode, g_lastSoloVocalIndex, ViewDiag::ptr_str(cached)));
+			int n = 0;
+			for (void* ch : chars) {
+				if (!ch) continue;
+				TryManualSetupLip(ch, LipCharaId(ch));
+				++n;
+			}
+			LiveAck(std::format("lipinit done chars={}", n));
 		}
 
 		void LiveApply(int mode, int soloIndex) {
@@ -5714,6 +5748,7 @@ namespace
 			else if (verb == "watchmv") LiveWatchMv();
 			else if (verb == "skip") LiveSkip();
 			else if (verb == "skip2") LiveSkip2();
+			else if (verb == "lipinit") LiveLipInit();
 			else if (verb == "quit") LiveQuit();
 			else if (verb == "dump") { LiveDump(); LiveAck("dump"); }
 			else LiveAck("unknown command: " + verb);
