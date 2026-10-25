@@ -3172,14 +3172,6 @@ namespace
 			vocalSeparatedMode = g_autoLiveModeOverride;
 		}
 		HOOK_CAST_CALL(void*, LiveMVStartData_ctor)(_this, mvStage, sceneName, onStageIdols, cameraworkConfig, vocalSeparatedMode, vocalSeparatedSoloIndex, renderingDynamicRange, soundEffectMode, isSortIdols);
-		try {
-			auto k = KlassOf(_this);
-			auto fi = FieldOf(k, "<VocalSeparatedMode>k__BackingField");
-			if (!fi) fi = FieldOf(k, "VocalSeparatedMode");
-			int actual = fi ? il2cpp_symbols::read_field<int>(_this, fi) : -999;
-			Log(std::format("[v57] start mode override={} requested={} actual={}",
-				g_autoLiveModeOverride, vocalSeparatedMode, actual));
-		} catch (...) {}
 		if (selectedCharaId >= 0) {
 			try { SoloUnlock::ApplySoloIndexMap(_this, onStageIdols, vocalSeparatedSoloIndex, selectedCharaId, mvSongId); } catch (...) {}
 		}
