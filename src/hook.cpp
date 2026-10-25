@@ -5350,6 +5350,32 @@ namespace
 			LiveAck(std::format("lipdump missing idx={}", idx));
 		}
 
+		void LiveLipGet(int idx) {
+			std::vector<void*> chars;
+			{
+				std::lock_guard<std::mutex> lock(g_lipMutex);
+				chars = g_lipCharacters;
+			}
+			for (void* ch : chars) {
+				if (!ch) continue;
+				if (LipCharaId(ch) != idx) continue;
+				void* anim = LipReadPtr(ch, "_faceAnimator");
+				if (!anim) anim = LipReadPtr(LipControllerOf(ch), "_animator");
+				auto k = anim ? KlassOf(anim) : nullptr;
+				auto gf = k ? il2cpp_class_get_method_from_name(k, "GetFloat", 1) : nullptr;
+				float a = -1, o = -1;
+				if (gf) {
+					auto sa = il2cpp_string_new("Mouth_A"); auto so = il2cpp_string_new("Mouth_O");
+					a = gf->Invoke<float>((Il2CppObject*)anim, { (Il2CppObject*)sa });
+					o = gf->Invoke<float>((Il2CppObject*)anim, { (Il2CppObject*)so });
+				}
+				Log(std::format("[v67] lipget ch={} anim={} A={} O={}", idx, ViewDiag::ptr_str(anim), a, o));
+				LiveAck(std::format("lipget A={} O={}", a, o));
+				return;
+			}
+			LiveAck("lipget missing");
+		}
+
 		void LiveLipAnim(int idx) {
 			std::vector<void*> chars;
 			{
@@ -5886,6 +5912,7 @@ namespace
 			else if (verb == "lipempty") LiveLipEmpty(arg);
 			else if (verb == "lipdump") LiveLipDump(arg);
 			else if (verb == "lipanim") LiveLipAnim(arg);
+			else if (verb == "lipget") LiveLipGet(arg);
 			else if (verb == "full") LiveApply(0, -1);
 			else if (verb == "full1") LiveApply(1, -1);
 			else if (verb == "vocaltoggle") LiveVocalToggle();
