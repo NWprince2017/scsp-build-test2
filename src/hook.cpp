@@ -5311,6 +5311,16 @@ namespace
 
 		void LiveSkip() {
 			if (!g_liveOverlay) { LiveAck("skip failed: overlay=null"); return; }
+			auto vfi = FieldOf(KlassOf(g_liveOverlay), "view");
+			void* view = nullptr;
+			if (vfi) try { view = il2cpp_symbols::read_field<void*>(g_liveOverlay, vfi); } catch (...) { view = nullptr; }
+			if (view) {
+				auto finish = il2cpp_class_get_method_from_name(KlassOf(view), "Finish", 0);
+				if (finish && finish->methodPointer) {
+					try { finish->InvokeAsVoid((Il2CppObject*)view, {}); LiveAck("skip finish invoked"); return; }
+					catch (...) { Log("[v54] view Finish threw"); }
+				}
+			}
 			if (!g_liveSkipMethod) { LiveAck("skip failed: method=null"); return; }
 			try {
 				g_liveSkipMethod->InvokeAsVoid((Il2CppObject*)g_liveOverlay, {});
