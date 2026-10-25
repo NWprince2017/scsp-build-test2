@@ -5124,6 +5124,7 @@ namespace
 
 		bool g_liveAutoInstalled = false;
 		void* g_livePresenter = nullptr;
+		void* g_musicSelectionPresenter = nullptr;
 		void* g_liveButtonsPresenter = nullptr;
 		void* g_liveCarousel = nullptr;
 		void* g_liveVocalVm = nullptr;
@@ -5382,6 +5383,29 @@ namespace
 			return false;
 		}
 
+		void LiveWatchMv() {
+			if (!g_musicSelectionPresenter) { LiveAck("watchmv failed: presenter=null"); return; }
+			auto fi = FieldOf(KlassOf(g_musicSelectionPresenter), "view");
+			if (!fi) { LiveAck("watchmv failed: view-field=null"); return; }
+			void* view = nullptr;
+			try { view = il2cpp_symbols::read_field<void*>(g_musicSelectionPresenter, fi); }
+			catch (...) { view = nullptr; }
+			if (!view) { LiveAck("watchmv failed: view=null"); return; }
+			auto getButtons = il2cpp_class_get_method_from_name(KlassOf(view), "get_Buttons", 0);
+			if (!getButtons || !getButtons->methodPointer) { LiveAck("watchmv failed: get_Buttons=null"); return; }
+			try {
+				auto buttons = getButtons->Invoke<Il2CppObject*>((Il2CppObject*)view, {});
+				if (!buttons) { LiveAck("watchmv failed: buttons=null"); return; }
+				auto getPlay = il2cpp_class_get_method_from_name(KlassOf(buttons), "get_OnClickPlayMvButton", 0);
+				if (!getPlay || !getPlay->methodPointer) { LiveAck("watchmv failed: get_OnClickPlayMvButton=null"); return; }
+				auto subject = getPlay->Invoke<Il2CppObject*>((Il2CppObject*)buttons, {});
+				if (!subject) { LiveAck("watchmv failed: subject=null"); return; }
+				if (TryClickUnityButton(subject, 0)) LiveAck("watchmv invoked");
+				else LiveAck("watchmv failed: subject not fired");
+			}
+			catch (...) { LiveAck("watchmv threw"); }
+		}
+
 		void LiveTitleClick() {
 			if (!g_titlePresenter) { LiveAck("title-click failed: presenter=null"); return; }
 			auto fi = FieldOf(KlassOf(g_titlePresenter), "view");
@@ -5414,6 +5438,13 @@ namespace
 				}
 			}
 			LiveAck(std::format("title-click found={} clicked={}", found, clicked));
+		}
+
+		HOOK_ORIG_TYPE LiveMusicSelectionPresenter_ctor_orig;
+		void LiveMusicSelectionPresenter_ctor_hook(void* _this, void* a1, void* a2, void* a3, void* mtd) {
+			HOOK_CAST_CALL(void, LiveMusicSelectionPresenter_ctor)(_this, a1, a2, a3, mtd);
+			g_musicSelectionPresenter = _this;
+			Log(std::format("[v53] music selection presenter captured {}", ViewDiag::ptr_str(_this)));
 		}
 
 		HOOK_ORIG_TYPE TitlePresenter_ctor_orig;
@@ -5554,6 +5585,11 @@ namespace
 					(void*)init->methodPointer, (void*)LiveVocalPresenter_Initialize_hook, LiveVocalPresenter_Initialize_orig))
 					++installed;
 			}
+			auto mk = LiveClass("LiveMusicSelectionPresenter");
+			if (mk) {
+				auto ctor = il2cpp_class_get_method_from_name(mk, ".ctor", 3);
+				if (ctor && HookAt("LiveMusicSelectionPresenter.ctor", (void*)ctor->methodPointer, (void*)LiveMusicSelectionPresenter_ctor_hook, LiveMusicSelectionPresenter_ctor_orig)) ++installed;
+			}
 			auto tk = LiveClassNs("PRISM.Adapters.Title", "TitlePresenter");
 			if (tk) {
 				auto ctor = il2cpp_class_get_method_from_name(tk, ".ctor", 5);
@@ -5607,6 +5643,7 @@ namespace
 			else if (verb == "confirm") LiveOpenConfirm();
 			else if (verb == "home") LiveOpenHome();
 			else if (verb == "tclick") LiveTitleClick();
+			else if (verb == "watchmv") LiveWatchMv();
 			else if (verb == "skip") LiveSkip();
 			else if (verb == "quit") LiveQuit();
 			else if (verb == "dump") { LiveDump(); LiveAck("dump"); }
