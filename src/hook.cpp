@@ -4670,6 +4670,7 @@ namespace
 		MethodInfo* g_lipUpdateMethod = nullptr;
 		std::mutex g_lipMutex;
 		std::vector<void*> g_lipCharacters;
+		bool g_lipTryEmpty = false;
 
 		bool LipReadBool(void* obj, const char* name) {
 			if (!obj) return false;
@@ -4735,6 +4736,7 @@ namespace
 				std::lock_guard<std::mutex> lock(g_lipMutex);
 				if (g_lipCachedHandle) table = il2cpp_gchandle_get_target(g_lipCachedHandle);
 			}
+			if (!table && g_lipTryEmpty) table = EmptyLipTable();
 			Log(std::format("[v58] manual SetupLip begin ch={} table={}", cid, ViewDiag::ptr_str(table)));
 			float zero = 0.0f;
 			try {
@@ -5296,6 +5298,12 @@ namespace
 			LiveAck(std::format("lipone missing idx={} chars={}", idx, (int)chars.size()));
 		}
 
+		void LiveLipEmpty(int idx) {
+			g_lipTryEmpty = true;
+			LiveLipOne(idx);
+			g_lipTryEmpty = false;
+		}
+
 		void LiveLipInit() {
 			std::vector<void*> chars;
 			{
@@ -5313,6 +5321,16 @@ namespace
 				++n;
 			}
 			LiveAck(std::format("lipinit done chars={}", n));
+		}
+
+		void LiveVocalToggle() {
+			bool ok = LiveClickVocal("toggle");
+			LiveAck(std::format("vocal toggle clicked={}", ok ? 1 : 0));
+		}
+
+		void LiveVocalSetting() {
+			bool ok = LiveClickVocal("settingButton");
+			LiveAck(std::format("vocal setting clicked={}", ok ? 1 : 0));
 		}
 
 		void LiveApply(int mode, int soloIndex) {
@@ -5769,6 +5787,9 @@ namespace
 			else if (verb == "skip2") LiveSkip2();
 			else if (verb == "lipinit") LiveLipInit();
 			else if (verb == "lipone") LiveLipOne(arg);
+			else if (verb == "lipempty") LiveLipEmpty(arg);
+			else if (verb == "vocaltoggle") LiveVocalToggle();
+			else if (verb == "vocalsetting") LiveVocalSetting();
 			else if (verb == "quit") LiveQuit();
 			else if (verb == "dump") { LiveDump(); LiveAck("dump"); }
 			else LiveAck("unknown command: " + verb);
