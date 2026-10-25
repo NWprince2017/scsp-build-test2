@@ -3075,8 +3075,9 @@ namespace
 		void RemapAtPreLoad(void* data, void* onStageIdols);
 	}
 
-	int g_lastSoloVocalMode = -1;
-	int g_lastSoloVocalIndex = -1;
+		int g_lastSoloVocalMode = -1;
+		int g_lastSoloVocalIndex = -1;
+		int g_autoLiveModeOverride = -1;
 	int g_lastSoloIsSortIdols = 0;
 	int g_soloPositionLogCalls = 0;
 
@@ -3166,6 +3167,9 @@ namespace
 		}
 		if (g_override_isVocalSeparatedOn) {
 			vocalSeparatedMode = 1;
+		}
+		if (g_autoLiveModeOverride >= 0) {
+			vocalSeparatedMode = g_autoLiveModeOverride;
 		}
 		HOOK_CAST_CALL(void*, LiveMVStartData_ctor)(_this, mvStage, sceneName, onStageIdols, cameraworkConfig, vocalSeparatedMode, vocalSeparatedSoloIndex, renderingDynamicRange, soundEffectMode, isSortIdols);
 		if (selectedCharaId >= 0) {
@@ -5217,6 +5221,15 @@ namespace
 				try { RunwayDump::ReflectDump(g_liveVocalPresenter, 2, "VocalSeparatePresenter(v43)", true); }
 				catch (...) {}
 			}
+			if (g_liveOverlay) {
+				auto vfi = FieldOf(KlassOf(g_liveOverlay), "view");
+				void* view = nullptr;
+				if (vfi) try { view = il2cpp_symbols::read_field<void*>(g_liveOverlay, vfi); } catch (...) { view = nullptr; }
+				if (view) {
+					try { RunwayDump::ReflectDump(view, 3, "OverlayView(v56)", true); }
+					catch (...) {}
+				}
+			}
 		}
 
 		bool LiveClickVocal(const char* field) {
@@ -5230,6 +5243,7 @@ namespace
 		}
 
 		void LiveApply(int mode, int soloIndex) {
+			g_autoLiveModeOverride = mode;
 			bool car = false, voc = false;
 			if (g_liveCarousel) {
 				car |= LiveWriteBool(g_liveCarousel, "<IsActiveVocalSeparate>k__BackingField", true);
@@ -5242,13 +5256,8 @@ namespace
 				voc |= LiveWriteBool(g_liveVocalVm, "<IsSatisfy>k__BackingField", true);
 				voc |= LiveWriteBool(g_liveVocalVm, "<IsLimited>k__BackingField", false);
 			}
-			bool clicked = false;
-			if (g_liveVocalPresenter) {
-				clicked = LiveClickVocal("toggle");
-				if (!clicked) clicked = LiveClickVocal("button");
-			}
-			LiveAck(std::format("mode={} solo={} carousel={} vocal={} toggle={}",
-				mode, soloIndex, car ? 1 : 0, voc ? 1 : 0, clicked ? 1 : 0));
+			LiveAck(std::format("mode={} solo={} carousel={} vocal={} override={}",
+				mode, soloIndex, car ? 1 : 0, voc ? 1 : 0, g_autoLiveModeOverride));
 		}
 
 		void LiveStart() {
