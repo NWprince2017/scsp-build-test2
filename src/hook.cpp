@@ -4710,6 +4710,23 @@ namespace
 			catch (...) { return nullptr; }
 		}
 
+		void* EmptyLipTable() {
+			const char* assemblies[] = { "PRISM.Legacy.dll", "PRISM.dll" };
+			for (const char* a : assemblies) {
+				auto k = il2cpp_symbols_logged::get_class(a, "PRISM", "LipSyncController");
+				if (!k) continue;
+				auto fi = il2cpp_class_get_field_from_name(k, "EmptyTable");
+				if (!fi) continue;
+				void* value = nullptr;
+				try {
+					il2cpp_field_get_value(nullptr, fi, &value);
+					return value;
+				}
+				catch (...) {}
+			}
+			return nullptr;
+		}
+
 		void TryManualSetupLip(void* ch, int cid) {
 			if (!ch || !g_setupLipMethod || !g_setupLipMethod->methodPointer) return;
 			void* table = nullptr;
@@ -4717,7 +4734,8 @@ namespace
 				std::lock_guard<std::mutex> lock(g_lipMutex);
 				if (g_lipCachedHandle) table = il2cpp_gchandle_get_target(g_lipCachedHandle);
 			}
-			if (!table) return;
+			if (!table) table = EmptyLipTable();
+			Log(std::format("[v58] manual SetupLip begin ch={} table={}", cid, ViewDiag::ptr_str(table)));
 			float zero = 0.0f;
 			try {
 				g_setupLipMethod->InvokeAsVoid((Il2CppObject*)ch,
