@@ -29,7 +29,7 @@ bool needPrintStack = false;
 std::vector<std::pair<std::pair<int, int>, int>> replaceDressResIds{};
 std::map<std::string, CharaParam_t> charaParam{};
 CharaParam_t baseParam(0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
-std::vector<std::function<bool()>> mainThreadTasks{};  // 返回 true，执行后移除列表；返�?false，执行后不移�?
+std::vector<std::function<bool()>> mainThreadTasks{};  // 返回 true，执行后移除列表；返�?false，执行后不移�?
 
 std::map<int, CharaSwayStringParam_t> charaSwayStringOffset{};
 std::map<int, std::string> swayTypes{
@@ -555,9 +555,9 @@ namespace
 		{
 			replaceFont = il2cpp_gchandle_get_target(ReplaceFontGcHandle);
 
-			// 加载场景时会�?Resources.UnloadUnusedAssets 干掉，且不受 DontDestroyOnLoad 影响，暂且判断是否存活，并在必要的时候重新加�?
-			// TODO: 考虑挂载�?GameObject �?
-			// AssetBundle 不会被干�?
+			// 加载场景时会�?Resources.UnloadUnusedAssets 干掉，且不受 DontDestroyOnLoad 影响，暂且判断是否存活，并在必要的时候重新加�?
+			// TODO: 考虑挂载�?GameObject �?
+			// AssetBundle 不会被干�?
 			if (Object_IsNativeObjectAlive(replaceFont))
 			{
 				return replaceFont;
@@ -592,7 +592,7 @@ namespace
 
 	std::filesystem::path dumpBasePath("dumps");
 
-	// 调用之前检�?DataFile_IsKeyExist
+	// 调用之前检�?DataFile_IsKeyExist
 	void fmtAndDumpJsonBytesData(const std::wstring& dumpName) {
 		const auto dumpNameIl = il2cpp_symbols::NewWStr(dumpName);
 		auto dataBytes = (reinterpret_cast<void* (*)(Il2CppString*)>HOOK_GET_ORIG(DataFile_GetBytes))(dumpNameIl);
@@ -605,7 +605,7 @@ namespace
 			writeWstr.replace(pos, 1, replaceStr);
 			pos = writeWstr.find(searchStr, pos + replaceStr.length());
 		}
-		if (writeWstr.ends_with(L",]")) {  // 代哥�?Json 就是不一�?
+		if (writeWstr.ends_with(L",]")) {  // 代哥�?Json 就是不一�?
 			writeWstr.erase(writeWstr.length() - 2, 1);
 		}
 		const auto dumpLocalFilePath = dumpBasePath / SCLocal::getFilePathByName(dumpName, true, dumpBasePath);
@@ -679,7 +679,7 @@ namespace
 		catch (std::exception& e) {
 			printf("dumpScenarioFromCatalog error: %s\n", e.what());
 		}
-		// 下方方法已过�?
+		// 下方方法已过�?
 		int totalCount = 0;
 		const auto titleData = nlohmann::json::parse(localizationDataCache);
 		for (auto& it : titleData.items()) {
@@ -2845,7 +2845,7 @@ namespace
 	//	HOOK_CAST_CALL(void, PostProcess_DepthOfFieldClip_CreatePlayable)(retstr, _this, graph, go, mtd);
 	//}
 
-	// 已过�?
+	// 已过�?
 	HOOK_ORIG_TYPE Live_SetEnableDepthOfField_orig;
 	void Live_SetEnableDepthOfField_hook(void* _this, bool isEnable) {
 		if (g_enable_free_camera) {
@@ -3013,7 +3013,7 @@ namespace
 	std::map<int, void*> cacheAccessoryMap{};
 
 	HOOK_ORIG_TYPE LiveCostumeChangeModel_ctor_orig;
-	void LiveCostumeChangeModel_ctor_hook(void* _this, void* reply, void* idol, int costumeType, bool forceDressOrdered) {  // 添加服装�?dressDic
+	void LiveCostumeChangeModel_ctor_hook(void* _this, void* reply, void* idol, int costumeType, bool forceDressOrdered) {  // 添加服装�?dressDic
 		/*
 		static auto iidol_klass = il2cpp_symbols::get_class_from_instance(idol);
 		static auto get_CharacterId_mtd = il2cpp_class_get_method_from_name(iidol_klass, "get_CharacterId", 0);
@@ -4435,7 +4435,7 @@ namespace
 		// [v25] the real gate for songs like "Dye the sky." (#37, 037_DyeSky):
 		//   MstSong #37  IsSongParts = true,  IsSongPartsSolo = false
 		// so the 歌唱設定 panel greys out ソロ with
-		//   "この楽曲では対応していません�?
+		//   "この楽曲では対応していません�?
 		// The master row is immutable, so only the *getter* is overridden:
 		// songs that already report IsSongParts=true are told solo is
 		// supported; songs without the part feature keep their value.
@@ -4663,21 +4663,11 @@ namespace
 			return s;
 		}
 
-		void* g_lipCachedHandle = nullptr;
-		int g_lipCachedSong = -1;
-		void* g_lipLipsHandle = nullptr;
-		void* g_lipLipsSource = nullptr;
-		int g_lipLipsSong = -1;
 		int g_lipHookCalls = 0;
-		int g_lipHookSubs = 0;
 		int g_lipFlagLogs = 0;
-		bool g_lipForceMode = false;
-		MethodInfo* g_setupLipMethod = nullptr;
 		MethodInfo* g_lipUpdateMethod = nullptr;
 		std::mutex g_lipMutex;
 		std::vector<void*> g_lipCharacters;
-		bool g_lipTryEmpty = false;
-		bool g_lipProcedural = false;
 
 		bool LipReadBool(void* obj, const char* name) {
 			if (!obj) return false;
@@ -4719,129 +4709,7 @@ namespace
 			catch (...) { return nullptr; }
 		}
 
-		void* EmptyLipTable() {
-			const char* assemblies[] = { "PRISM.Legacy.dll", "PRISM.dll" };
-			for (const char* a : assemblies) {
-				auto k = il2cpp_symbols_logged::get_class(a, "PRISM", "LipSyncController");
-				if (!k) continue;
-				auto fi = il2cpp_class_get_field_from_name(k, "EmptyTable");
-				if (!fi) continue;
-				void* value = nullptr;
-				try {
-					il2cpp_field_get_value(nullptr, fi, &value);
-					return value;
-				}
-				catch (...) {}
-			}
-			return nullptr;
-		}
-
-		void TryManualSetupLip(void* ch, int cid) {
-			if (!ch || !g_setupLipMethod || !g_setupLipMethod->methodPointer) return;
-			void* table = nullptr;
-			{
-				std::lock_guard<std::mutex> lock(g_lipMutex);
-				if (g_lipCachedHandle) table = il2cpp_gchandle_get_target(g_lipCachedHandle);
-			}
-			if (!table && g_lipTryEmpty) table = EmptyLipTable();
-			Log(std::format("[v58] manual SetupLip begin ch={} table={}", cid, ViewDiag::ptr_str(table)));
-			float zero = 0.0f;
-			try {
-				g_setupLipMethod->InvokeAsVoid((Il2CppObject*)ch,
-					{ (Il2CppObject*)table, (Il2CppObject*)&zero, (Il2CppObject*)&zero });
-			}
-			catch (...) {
-				Log(std::format("[v37] manual SetupLip ch={} threw", cid));
-				return;
-			}
-			void* controller = LipControllerOf(ch);
-			if (!controller) {
-				Log(std::format("[v58] manual SetupLip result ch={} controller=null tableIn={}",
-					cid, ViewDiag::ptr_str(table)));
-				return;
-			}
-			void* faceAnim = LipReadPtr(ch, "_faceAnimator");
-			void* myAnim = LipReadPtr(ch, "_myAnimator");
-			void* lipAnim = LipReadPtr(controller, "_animator");
-			void* lips = LipReadPtr(controller, "_lips");
-			const char* lipsClass = lips ? RunwayDump::ClassNameOf(lips) : nullptr;
-			bool patchedAnimator = false;
-			auto animField = FieldOf(KlassOf(controller), "_animator");
-			if (!lipAnim && animField && (faceAnim || myAnim)) {
-				void* value = faceAnim ? faceAnim : myAnim;
-				il2cpp_field_set_value(controller, animField, &value);
-				lipAnim = value;
-				patchedAnimator = true;
-			}
-			void* table2 = LipTableOf(controller);
-			int lastFrame = -1;
-			void* datas = nullptr;
-			int dataCount = -1;
-			if (table2) {
-				auto tk = KlassOf(table2);
-				auto ff = FieldOf(tk, "lastFrame");
-				if (ff) try { lastFrame = il2cpp_symbols::read_field<int>(table2, ff); } catch (...) {}
-				auto fd = FieldOf(tk, "datas");
-				if (fd) try { datas = il2cpp_symbols::read_field<void*>(table2, fd); } catch (...) {}
-				if (datas) try { dataCount = (int)il2cpp_array_length(datas); } catch (...) {}
-			}
-			Log(std::format("[v40] SetupLip fields ch={} table={} ctrl={} faceAnim={} myAnim={} lipAnim={} patchedAnim={} lips={} lipsClass={} lastFrame={} datas={} dataCount={}",
-				cid, ViewDiag::ptr_str(table2), ViewDiag::ptr_str(controller),
-				ViewDiag::ptr_str(faceAnim), ViewDiag::ptr_str(myAnim), ViewDiag::ptr_str(lipAnim),
-				patchedAnimator ? 1 : 0, ViewDiag::ptr_str(lips), lipsClass ? lipsClass : "?",
-				lastFrame, ViewDiag::ptr_str(datas), dataCount));
-			Log(std::format("[v58] manual SetupLip result ch={} controller={} table={} lips={} lip={}",
-				cid, ViewDiag::ptr_str(controller), ViewDiag::ptr_str(table2),
-				ViewDiag::ptr_str(lips), ViewDiag::ptr_str(LipReadPtr(controller, "lip"))));
-			if (patchedAnimator && g_setupLipMethod) {
-				try {
-					g_setupLipMethod->InvokeAsVoid((Il2CppObject*)ch,
-						{ (Il2CppObject*)table, (Il2CppObject*)&zero, (Il2CppObject*)&zero });
-				}
-				catch (...) {}
-				controller = LipControllerOf(ch);
-				Log(std::format("[v40] SetupLip re-run ch={} ctrl={} animator={} table={}",
-					cid, ViewDiag::ptr_str(controller), ViewDiag::ptr_str(LipReadPtr(controller, "_animator")),
-					ViewDiag::ptr_str(LipTableOf(controller))));
-			}
-		}
-
 		HOOK_ORIG_TYPE Character_SetupLip_orig;
-		void Character_SetupLip_hook(void* _this, void* lipTable, float arg1, float arg2, void* mtd) {
-			const std::string lipMode = ReadLipMode();
-			void* useTable = lipTable;
-			bool reused = false;
-			if (lipMode == "on" || lipMode == "force") {
-				std::lock_guard<std::mutex> lock(g_lipMutex);
-				const bool valid = lipTable && RunwayDump::PlausiblePtr((uintptr_t)lipTable);
-				// Prefer a table captured outside solo mode; only fall back to
-				// caching a solo table when this song has no cached table yet.
-				// Never overwrite a good normal-mode table with a solo one.
-				const bool haveForSong = g_lipCachedHandle && g_lipCachedSong == g_lastSongId;
-				if (valid && (g_lastSoloVocalMode != 2 || !haveForSong)) {
-					if (g_lipCachedHandle) il2cpp_gchandle_free(g_lipCachedHandle);
-					g_lipCachedHandle = il2cpp_gchandle_new((Il2CppObject*)lipTable, false);
-					g_lipCachedSong = g_lastSongId;
-				}
-				else if (!lipTable && g_lipCachedHandle && g_lastSongId > 0 &&
-					g_lipCachedSong == g_lastSongId) {
-					void* cached = il2cpp_gchandle_get_target(g_lipCachedHandle);
-					if (cached && RunwayDump::PlausiblePtr((uintptr_t)cached)) {
-						useTable = cached;
-						reused = true;
-						++g_lipHookSubs;
-					}
-				}
-			}
-			const int call = ++g_lipHookCalls;
-			if (call <= 200) {
-				Log(std::format("[v33] SetupLip song={} vmMode={} lip={} this={} in={} use={} inputNull={} reused={} a1={} a2={}",
-					g_lastSongId, g_lastSoloVocalMode, lipMode, ViewDiag::ptr_str(_this),
-					ViewDiag::ptr_str((void*)lipTable), ViewDiag::ptr_str(useTable),
-					lipTable ? 0 : 1, reused ? 1 : 0, arg1, arg2));
-			}
-			return HOOK_CAST_CALL(void, Character_SetupLip)(_this, useTable, arg1, arg2, mtd);
-		}
 
 		HOOK_ORIG_TYPE Character_UpdateLip_orig;
 		HOOK_ORIG_TYPE LipSyncController_UpdateLip_orig;
@@ -4862,59 +4730,13 @@ namespace
 			catch (...) { lips = nullptr; }
 
 			const int call = ++g_lipUpdateCalls;
-			static std::string cachedMode;
-			static int modeReadAt = -1000;
-			if (call - modeReadAt >= 30) {
-				modeReadAt = call;
-				cachedMode = ReadLipMode();
-			}
-			const std::string& mode = cachedMode;
-			bool patched = false;
-			if (mode == "on" || mode == "force") {
-				std::lock_guard<std::mutex> lock(g_lipMutex);
-				const bool valid = table && RunwayDump::PlausiblePtr((uintptr_t)table);
-				const bool haveForSong = g_lipCachedHandle && g_lipCachedSong == g_lastSongId;
-				if (valid && (g_lastSoloVocalMode != 2 || !haveForSong)) {
-					if (g_lipCachedHandle) il2cpp_gchandle_free(g_lipCachedHandle);
-					g_lipCachedHandle = il2cpp_gchandle_new((Il2CppObject*)table, false);
-					g_lipCachedSong = g_lastSongId;
-				}
-				if (lips && g_lastSoloVocalMode != 2 &&
-					(g_lipLipsSource != lips || g_lipLipsSong != g_lastSongId)) {
-					if (g_lipLipsHandle) il2cpp_gchandle_free(g_lipLipsHandle);
-					g_lipLipsHandle = il2cpp_gchandle_new((Il2CppObject*)lips, false);
-					g_lipLipsSource = lips;
-					g_lipLipsSong = g_lastSongId;
-					Log(std::format("[v41] cached lips song={} lips={} class={}",
-						g_lastSongId, ViewDiag::ptr_str(lips),
-						RunwayDump::ClassNameOf(lips) ? RunwayDump::ClassNameOf(lips) : "?"));
-				}
-				if (!table && g_lipCachedHandle && g_lastSongId > 0 &&
-					g_lipCachedSong == g_lastSongId) {
-					void* cached = il2cpp_gchandle_get_target(g_lipCachedHandle);
-					if (cached && RunwayDump::PlausiblePtr((uintptr_t)cached)) {
-						void* value = cached;
-						il2cpp_field_set_value(controller, fi, &value);
-						patched = true;
-					}
-				}
-				if (!lips && fiLips && g_lipLipsHandle && g_lastSongId > 0 &&
-					g_lipLipsSong == g_lastSongId) {
-					void* cachedLips = il2cpp_gchandle_get_target(g_lipLipsHandle);
-					if (cachedLips && RunwayDump::PlausiblePtr((uintptr_t)cachedLips)) {
-						il2cpp_field_set_value(controller, fiLips, &cachedLips);
-						lips = cachedLips;
-						patched = true;
-					}
-				}
-			}
-			if (call <= 40 || patched) {
-				Log(std::format("[v34] LipUpdate src={} song={} vmMode={} lip={} this={} table={} lips={} patched={}",
-					source, g_lastSongId, g_lastSoloVocalMode, mode,
+			if (call <= 80) {
+				Log(std::format("[v68] native LipUpdate src={} song={} vmMode={} this={} table={} lips={}",
+					source, g_lastSongId, g_lastSoloVocalMode,
 					ViewDiag::ptr_str(controller), ViewDiag::ptr_str(table),
-					ViewDiag::ptr_str(lips), patched ? 1 : 0));
+					ViewDiag::ptr_str(lips)));
 			}
-			return patched || table != nullptr;
+			return table != nullptr;
 		}
 
 		void Character_UpdateLip_hook(void* _this, float dt, void* mtd) {
@@ -4938,60 +4760,44 @@ namespace
 			return HOOK_CAST_CALL(void, LipSyncController_UpdateLip)(_this, dt, mtd);
 		}
 
-		int g_manualLipCalls = 0;
-		void ManualUpdateLip(void* controller, int cid) {
-			if (!controller || !g_lipUpdateMethod) return;
-			if (!LipTableOf(controller)) return;
-			const int call = ++g_manualLipCalls;
-			if (call <= 20) {
-				Log(std::format("[v38] manual UpdateLip ch={} controller={} table={}",
-					cid, ViewDiag::ptr_str(controller), ViewDiag::ptr_str(LipTableOf(controller))));
-			}
-			HOOK_CAST_CALL(void, LipSyncController_UpdateLip)(controller, 0.016f, g_lipUpdateMethod);
-		}
-
 		HOOK_ORIG_TYPE Character_SetAutoUpdateStop_orig;
 		void Character_SetAutoUpdateStop_hook(void* _this, bool stop, void* mtd) {
-			const bool use = g_lipForceMode ? false : stop;
 			if (g_lipFlagLogs++ < 160) {
-				Log(std::format("[v35] SetAutoUpdateStop ch={} in={} use={} force={} field={}",
-					LipCharaId(_this), stop ? 1 : 0, use ? 1 : 0, g_lipForceMode ? 1 : 0,
+				Log(std::format("[v68] native SetAutoUpdateStop ch={} stop={} field={}",
+					LipCharaId(_this), stop ? 1 : 0,
 					LipReadBool(_this, "isStopUpdate") ? 1 : 0));
 			}
-			return HOOK_CAST_CALL(void, Character_SetAutoUpdateStop)(_this, use, mtd);
+			return HOOK_CAST_CALL(void, Character_SetAutoUpdateStop)(_this, stop, mtd);
 		}
 
 		HOOK_ORIG_TYPE Character_SetOverwriteFlag_orig;
 		void Character_SetOverwriteFlag_hook(void* _this, bool flag, void* mtd) {
-			const bool use = g_lipForceMode ? true : flag;
 			if (g_lipFlagLogs++ < 160) {
-				Log(std::format("[v35] SetOverwriteFlag ch={} in={} use={} force={} field={}",
-					LipCharaId(_this), flag ? 1 : 0, use ? 1 : 0, g_lipForceMode ? 1 : 0,
+				Log(std::format("[v68] native SetOverwriteFlag ch={} flag={} field={}",
+					LipCharaId(_this), flag ? 1 : 0,
 					LipReadBool(_this, "animationOverwrite") ? 1 : 0));
 			}
-			return HOOK_CAST_CALL(void, Character_SetOverwriteFlag)(_this, use, mtd);
+			return HOOK_CAST_CALL(void, Character_SetOverwriteFlag)(_this, flag, mtd);
 		}
 
 		HOOK_ORIG_TYPE LipSyncController_SetSerious_orig;
 		void LipSyncController_SetSerious_hook(void* _this, bool serious, void* mtd) {
-			const bool use = g_lipForceMode ? true : serious;
 			if (g_lipFlagLogs++ < 160) {
-				Log(std::format("[v35] SetSerious in={} use={} force={} field={}",
-					serious ? 1 : 0, use ? 1 : 0, g_lipForceMode ? 1 : 0,
+				Log(std::format("[v68] native SetSerious value={} field={}",
+					serious ? 1 : 0,
 					LipReadBool(_this, "isSerious") ? 1 : 0));
 			}
-			return HOOK_CAST_CALL(void, LipSyncController_SetSerious)(_this, use, mtd);
+			return HOOK_CAST_CALL(void, LipSyncController_SetSerious)(_this, serious, mtd);
 		}
 
 		HOOK_ORIG_TYPE LipSyncController_SetOverwrite_orig;
 		void LipSyncController_SetOverwrite_hook(void* _this, bool overwrite, void* mtd) {
-			const bool use = g_lipForceMode ? true : overwrite;
 			if (g_lipFlagLogs++ < 160) {
-				Log(std::format("[v35] SetOverwrite in={} use={} force={} field={}",
-					overwrite ? 1 : 0, use ? 1 : 0, g_lipForceMode ? 1 : 0,
+				Log(std::format("[v68] native SetOverwrite value={} field={}",
+					overwrite ? 1 : 0,
 					LipReadBool(_this, "isOverwrite") ? 1 : 0));
 			}
-			return HOOK_CAST_CALL(void, LipSyncController_SetOverwrite)(_this, use, mtd);
+			return HOOK_CAST_CALL(void, LipSyncController_SetOverwrite)(_this, overwrite, mtd);
 		}
 
 		HOOK_ORIG_TYPE Character_ResetLipSync_orig;
@@ -5038,61 +4844,20 @@ namespace
 			HOOK_CAST_CALL(void, Character_Update)(_this, mtd);
 		}
 
-		void SetMouthParam(void* anim, const char* name, float value) {
-			if (!anim) return;
-			auto k = KlassOf(anim);
-			auto m = k ? il2cpp_class_get_method_from_name(k, "SetFloat", 2) : nullptr;
-			if (!m || !m->methodPointer) return;
-			auto s = il2cpp_string_new(name);
-			m->InvokeAsVoid((Il2CppObject*)anim, { (Il2CppObject*)s, (Il2CppObject*)&value });
-		}
-
-		extern void* g_liveOverlay;
-
-		void DriveProceduralLip(void* ch) {
-			if (!g_lipProcedural || g_lastSoloVocalMode != 2 || !ch) return;
-			if (!g_liveOverlay) return;
-			const int cid = LipCharaId(ch);
-			if (g_lastSoloPostIndex >= 0 && cid != g_lastSoloPostIndex) return;
-			void* anim = LipReadPtr(ch, "_faceAnimator");
-			if (!anim) anim = LipReadPtr(LipControllerOf(ch), "_animator");
-			if (!anim) return;
-			static int frame = 0;
-			++frame;
-			const float v = ((frame / 12) % 2) ? 0.9f : 0.1f;
-			SetMouthParam(anim, "Mouth_A", 0.85f * v);
-			SetMouthParam(anim, "Mouth_O", 0.35f * (1.0f - v));
-		}
-
 		HOOK_ORIG_TYPE Character_LateUpdate_orig;
 		void Character_LateUpdate_hook(void* _this, void* mtd) {
 			static int n = 0, lastMode = -2;
 			if (g_lastSoloVocalMode != lastMode) { lastMode = g_lastSoloVocalMode; n = 0; }
 			HOOK_CAST_CALL(void, Character_LateUpdate)(_this, mtd);
-			if (g_lastSoloVocalMode == 2 && _this) {
-				DriveProceduralLip(_this);
-			}
 		}
 
 		void InstallLipHook(int& installed) {
 			const std::string mode = ReadLipMode();
-			if (mode != "diag" && mode != "on" && mode != "force") {
+			if (mode != "diag" && mode != "on") {
 				Log(std::format("[v34] lip hook off (lip.txt='{}')", mode));
 				return;
 			}
-			g_lipForceMode = (mode == "force");
-			g_lipProcedural = (mode == "on" || mode == "force");
 			const char* assemblies[] = { "PRISM.Legacy.dll", "PRISM.dll" };
-			for (const char* a : assemblies) {
-				auto ck = il2cpp_symbols_logged::get_class(a, "PRISM", "Character");
-				auto sl = ck ? il2cpp_class_get_method_from_name(ck, "SetupLip", 3) : nullptr;
-				if (sl && sl->methodPointer) {
-					g_setupLipMethod = sl;
-					Log(std::format("[v37] cached Character.SetupLip method @ {}",
-						ViewDiag::ptr_str((void*)sl->methodPointer)));
-					break;
-				}
-			}
 			bool charDone = false, ctrlDone = false;
 			for (const char* a : assemblies) {
 				if (!charDone) {
@@ -5168,8 +4933,7 @@ namespace
 			addFlagHook("LiveCharacterController", "ResetLipSync", 0,
 				(void*)LiveCharacterController_ResetLipSync_hook, LiveCharacterController_ResetLipSync_orig,
 				"LiveCharacterController.ResetLipSync");
-			Log(std::format("[v35] lip flag hooks={} force={} mode={}",
-				flagHooks, g_lipForceMode ? 1 : 0, mode));
+			Log(std::format("[v68] native lip flag hooks={} mode={}", flagHooks, mode));
 			Log(std::format("[v34] lip update hooks installed: Character={} Controller={} mode={}",
 				charDone ? 1 : 0, ctrlDone ? 1 : 0, mode));
 		}
@@ -5293,26 +5057,6 @@ namespace
 			return TryClickUnityButton(btn, 1);
 		}
 
-		void LiveLipOne(int idx) {
-			std::vector<void*> chars;
-			{
-				std::lock_guard<std::mutex> lock(g_lipMutex);
-				chars = g_lipCharacters;
-			}
-			void* cached = nullptr;
-			if (g_lipCachedHandle) cached = il2cpp_gchandle_get_target(g_lipCachedHandle);
-			Log(std::format("[v60] lipone idx={} chars={} vmMode={} soloIndex={} cached={}",
-				idx, (int)chars.size(), g_lastSoloVocalMode, g_lastSoloVocalIndex, ViewDiag::ptr_str(cached)));
-			for (void* ch : chars) {
-				if (!ch) continue;
-				if (LipCharaId(ch) != idx) continue;
-				TryManualSetupLip(ch, idx);
-				LiveAck(std::format("lipone done idx={}", idx));
-				return;
-			}
-			LiveAck(std::format("lipone missing idx={} chars={}", idx, (int)chars.size()));
-		}
-
 		void LiveLipDump(int idx) {
 			std::vector<void*> chars;
 			{
@@ -5394,31 +5138,6 @@ namespace
 				return;
 			}
 			LiveAck("lipanim missing");
-		}
-
-		void LiveLipEmpty(int idx) {
-			g_lipTryEmpty = true;
-			LiveLipOne(idx);
-			g_lipTryEmpty = false;
-		}
-
-		void LiveLipInit() {
-			std::vector<void*> chars;
-			{
-				std::lock_guard<std::mutex> lock(g_lipMutex);
-				chars = g_lipCharacters;
-			}
-			void* cached = nullptr;
-			if (g_lipCachedHandle) cached = il2cpp_gchandle_get_target(g_lipCachedHandle);
-			Log(std::format("[v59] lipinit chars={} vmMode={} soloIndex={} cached={}",
-				(int)chars.size(), g_lastSoloVocalMode, g_lastSoloVocalIndex, ViewDiag::ptr_str(cached)));
-			int n = 0;
-			for (void* ch : chars) {
-				if (!ch) continue;
-				TryManualSetupLip(ch, LipCharaId(ch));
-				++n;
-			}
-			LiveAck(std::format("lipinit done chars={}", n));
 		}
 
 		void LiveVocalToggle() {
@@ -5892,9 +5611,6 @@ namespace
 			else if (verb == "watchmv") LiveWatchMv();
 			else if (verb == "skip") LiveSkip();
 			else if (verb == "skip2") LiveSkip2();
-			else if (verb == "lipinit") LiveLipInit();
-			else if (verb == "lipone") LiveLipOne(arg);
-			else if (verb == "lipempty") LiveLipEmpty(arg);
 			else if (verb == "lipdump") LiveLipDump(arg);
 			else if (verb == "lipanim") LiveLipAnim(arg);
 			else if (verb == "lipget") LiveLipGet(arg);
