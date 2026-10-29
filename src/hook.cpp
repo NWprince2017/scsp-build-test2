@@ -5203,6 +5203,19 @@ namespace
 			catch (...) { return false; }
 		}
 
+		// [v74] strict string reader: only touch the object when its class really
+		// is System.String.  A blind ToUtf8String() on a mistyped argument is an
+		// instant crash, and we cannot afford crashes while probing.
+		std::string LipStrOf(void* s) {
+			if (!s || !RunwayDump::PlausiblePtr((uintptr_t)s)) return "";
+			void* k = KlassOf(s);
+			if (!k || !RunwayDump::PlausiblePtr((uintptr_t)k)) return "";
+			const char* cn = il2cpp_class_get_name(k);
+			if (!cn || strcmp(cn, "String") != 0) return "";
+			try { return reinterpret_cast<Il2CppString*>(s)->ToUtf8String(); }
+			catch (...) { return ""; }
+		}
+
 		std::string CutSceneInfo(void* cs) {
 			if (!cs || !RunwayDump::PlausiblePtr((uintptr_t)cs)) return "cs=null";
 			return std::format("forcedLipSolo={} mode={} movieOnly={} endFrame={}",
@@ -5232,7 +5245,8 @@ namespace
 				CutSceneForceLip(_this);
 			}
 			catch (...) {}
-			return HOOK_CAST_CALL(void, CutScene_SetupControllers)(_this, mtd);
+			HOOK_CAST_CALL(void, CutScene_SetupControllers)(_this, mtd);
+			Log("[v74] < CutScene.SetupControllers done");
 		}
 
 		HOOK_ORIG_TYPE CutScene_OnEnable_orig;
@@ -5243,7 +5257,8 @@ namespace
 				CutSceneForceLip(_this);
 			}
 			catch (...) {}
-			return HOOK_CAST_CALL(void, CutScene_OnEnable)(_this, mtd);
+			HOOK_CAST_CALL(void, CutScene_OnEnable)(_this, mtd);
+			Log("[v74] < CutScene.OnEnable done");
 		}
 
 		HOOK_ORIG_TYPE CutScene_ResetLipSync_orig;
@@ -5254,14 +5269,17 @@ namespace
 				CutSceneForceLip(_this);
 			}
 			catch (...) {}
-			return HOOK_CAST_CALL(void, CutScene_ResetLipSync)(_this, mtd);
+			HOOK_CAST_CALL(void, CutScene_ResetLipSync)(_this, mtd);
+			Log("[v74] < CutScene.ResetLipSync done");
 		}
 
 		HOOK_ORIG_TYPE CutScene_SetLipSync_orig;
 		void CutScene_SetLipSync_hook(void* _this, int mode, int soloIndex, void* name, float startTime, void* mtd) {
 			void* useName = name;
+			Log(std::format("[v74] > CutScene.SetLipSync enter this={} nameRaw={}",
+				ViewDiag::ptr_str(_this), ViewDiag::ptr_str(name)));
 			try {
-				const std::string nm = Il2CppStrOf(name);
+				const std::string nm = LipStrOf(name);
 				if (g_lipStateLogs++ < 500) {
 					Log(std::format("[v73] CutScene.SetLipSync mode={} soloIndex={} name=\"{}\" startTime={:.3f} {}",
 						mode, soloIndex, nm, startTime, CutSceneInfo(_this)));
@@ -5281,7 +5299,9 @@ namespace
 				}
 			}
 			catch (...) { useName = name; }
-			return HOOK_CAST_CALL(void, CutScene_SetLipSync)(_this, mode, soloIndex, useName, startTime, mtd);
+			Log(std::format("[v74] > CutScene.SetLipSync calling orig name={}", ViewDiag::ptr_str(useName)));
+			HOOK_CAST_CALL(void, CutScene_SetLipSync)(_this, mode, soloIndex, useName, startTime, mtd);
+			Log("[v74] < CutScene.SetLipSync done");
 		}
 
 
