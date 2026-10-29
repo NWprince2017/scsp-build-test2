@@ -5060,7 +5060,7 @@ namespace
 
 		// find one specific SetupLip overload by the type name of its first parameter
 		void* FindSetupLipOverload(const char* wantFirstParam) {
-			auto* k = (Il2CppClass*)find_class_anywhere("PRISM", "Character");
+			auto* k = (Il2CppClass*)ViewDiag::find_class_anywhere("PRISM", "Character");
 			if (!k) { Log("[v71] PRISM.Character not found"); return nullptr; }
 			void* iter = nullptr;
 			while (auto* mi = il2cpp_class_get_methods(k, &iter)) {
@@ -5126,22 +5126,22 @@ namespace
 				(void*)Character_SetupLipDiag_hook, Character_SetupLipDiag_orig);
 			add("Character.SetupLip(String)", FindSetupLipOverload("String"),
 				(void*)Character_SetupLipName_hook, Character_SetupLipName_orig);
-			add("LipSyncController.Setup", find_method_anywhere("PRISM", "LipSyncController", "Setup", 3),
+			add("LipSyncController.Setup", ViewDiag::find_method_anywhere("PRISM", "LipSyncController", "Setup", 3),
 				(void*)LipSyncController_SetupDiag_hook, LipSyncController_SetupDiag_orig);
 			add("ExpressionAndIkController.SetOverwriteLip",
-				find_method_anywhere("", "ExpressionAndIkController", "SetOverwriteLip", 2),
+				ViewDiag::find_method_anywhere("", "ExpressionAndIkController", "SetOverwriteLip", 2),
 				(void*)ExpIk_SetOverwriteLip_hook, ExpIk_SetOverwriteLip_orig);
 			add("ExpressionAndIkController.SetResetLip",
-				find_method_anywhere("", "ExpressionAndIkController", "SetResetLip", 2),
+				ViewDiag::find_method_anywhere("", "ExpressionAndIkController", "SetResetLip", 2),
 				(void*)ExpIk_SetResetLip_hook, ExpIk_SetResetLip_orig);
 			add("LiveSubSequence.<AllocateAsync>d__20.MoveNext",
-				find_nested_move_next("PRISM", "LiveSubSequence", "<AllocateAsync>d__20"),
+				ViewDiag::find_nested_move_next("PRISM", "LiveSubSequence", "<AllocateAsync>d__20"),
 				(void*)AllocateAsync_MoveNext_hook, AllocateAsync_MoveNext_orig);
 			add("LiveSubSequence.<_setupAsync>d__33.MoveNext",
-				find_nested_move_next("PRISM", "LiveSubSequence", "<_setupAsync>d__33"),
+				ViewDiag::find_nested_move_next("PRISM", "LiveSubSequence", "<_setupAsync>d__33"),
 				(void*)SetupAsync_MoveNext_hook, SetupAsync_MoveNext_orig);
 			add("LiveSubSequence.<_setupCutSceneAsync>d__37.MoveNext",
-				find_nested_move_next("PRISM", "LiveSubSequence", "<_setupCutSceneAsync>d__37"),
+				ViewDiag::find_nested_move_next("PRISM", "LiveSubSequence", "<_setupCutSceneAsync>d__37"),
 				(void*)SetupCutSceneAsync_MoveNext_hook, SetupCutSceneAsync_MoveNext_orig);
 		}
 
