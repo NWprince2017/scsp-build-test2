@@ -4740,7 +4740,7 @@ namespace
 				if (g_lipStateLogs++ < 500)
 					Log(std::format("[v71] LipUpdate src={} mode={} song={} ctrl={} table={} lips={}",
 						source, g_lastSoloVocalMode, g_lastSongId,
-						ViewDiag::ptr_str(controller), LipTableInfo(table), LipValues(lips)));
+						ViewDiag::ptr_str(controller), LipTableInfo(table), LipListInfo(lips)));
 			}
 			return table != nullptr;
 		}
@@ -4880,6 +4880,28 @@ namespace
 		// ---------------------------------------------------------------
 		int g_lipSetupLogs = 0;
 		std::string g_lipMode = "off";
+		// hook groups - lip.txt may name a subset so a crash can be bisected
+		// without rebuilding:   diag,setup   diag,update   on,expik   ...
+		bool g_lipGroupSetup = true;
+		bool g_lipGroupUpdate = true;
+		bool g_lipGroupAsync = true;
+		bool g_lipGroupExpIk = true;
+
+		void ParseLipGroups(const std::string& raw) {
+			if (raw.find(',') == std::string::npos) return;   // no group list -> keep all
+			g_lipGroupSetup = g_lipGroupUpdate = g_lipGroupAsync = g_lipGroupExpIk = false;
+			size_t pos = 0;
+			for (;;) {
+				const size_t comma = raw.find(',', pos);
+				const std::string tok = raw.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+				if (tok == "setup") g_lipGroupSetup = true;
+				else if (tok == "update") g_lipGroupUpdate = true;
+				else if (tok == "async") g_lipGroupAsync = true;
+				else if (tok == "expik") g_lipGroupExpIk = true;
+				if (comma == std::string::npos) break;
+				pos = comma + 1;
+			}
+		}
 		std::unordered_map<std::string, void*> g_lipTableBySongChara;
 		std::unordered_map<std::string, std::string> g_lipNameBySongChara;
 		std::unordered_map<std::string, std::string> g_lipGoodNameBySongChara;
@@ -5070,25 +5092,25 @@ namespace
 		}
 
 		HOOK_ORIG_TYPE ExpIk_SetOverwriteLip_orig;
-		void ExpIk_SetOverwriteLip_hook(void* _this, bool a, bool b, void* mtd) {
+		void ExpIk_SetOverwriteLip_hook(void* _this, int idx, float rate, void* mtd) {
 			try {
 				if (g_lipStateLogs++ < 80)
-					Log(std::format("[v71] SetOverwriteLip ch={} a={} b={} mode={}",
-						LipCharacterOf(_this), a ? 1 : 0, b ? 1 : 0, g_lastSoloVocalMode));
+					Log(std::format("[v71] SetOverwriteLip ch={} idx={} rate={:.3f} mode={}",
+						LipCharacterOf(_this), idx, rate, g_lastSoloVocalMode));
 			}
 			catch (...) {}
-			return HOOK_CAST_CALL(void, ExpIk_SetOverwriteLip)(_this, a, b, mtd);
+			return HOOK_CAST_CALL(void, ExpIk_SetOverwriteLip)(_this, idx, rate, mtd);
 		}
 
 		HOOK_ORIG_TYPE ExpIk_SetResetLip_orig;
-		void ExpIk_SetResetLip_hook(void* _this, bool a, bool b, void* mtd) {
+		void ExpIk_SetResetLip_hook(void* _this, int idx, float rate, void* mtd) {
 			try {
 				if (g_lipStateLogs++ < 80)
-					Log(std::format("[v71] SetResetLip ch={} a={} b={} mode={}",
-						LipCharacterOf(_this), a ? 1 : 0, b ? 1 : 0, g_lastSoloVocalMode));
+					Log(std::format("[v71] SetResetLip ch={} idx={} rate={:.3f} mode={}",
+						LipCharacterOf(_this), idx, rate, g_lastSoloVocalMode));
 			}
 			catch (...) {}
-			return HOOK_CAST_CALL(void, ExpIk_SetResetLip)(_this, a, b, mtd);
+			return HOOK_CAST_CALL(void, ExpIk_SetResetLip)(_this, idx, rate, mtd);
 		}
 
 		// find one specific SetupLip overload by the type name of its first parameter
@@ -5155,40 +5177,53 @@ namespace
 					Log(std::format("[v71] {} hooked @ {}", label, ViewDiag::ptr_str(addr)));
 				}
 			};
-			add("Character.SetupLip(LipSyncTable)", FindSetupLipOverload("LipSyncTable"),
-				(void*)Character_SetupLipDiag_hook, Character_SetupLipDiag_orig);
-			add("Character.SetupLip(String)", FindSetupLipOverload("String"),
-				(void*)Character_SetupLipName_hook, Character_SetupLipName_orig);
-			add("LipSyncController.Setup", ViewDiag::find_method_anywhere("PRISM", "LipSyncController", "Setup", 3),
-				(void*)LipSyncController_SetupDiag_hook, LipSyncController_SetupDiag_orig);
-			add("ExpressionAndIkController.SetOverwriteLip",
-				ViewDiag::find_method_anywhere("", "ExpressionAndIkController", "SetOverwriteLip", 2),
-				(void*)ExpIk_SetOverwriteLip_hook, ExpIk_SetOverwriteLip_orig);
-			add("ExpressionAndIkController.SetResetLip",
-				ViewDiag::find_method_anywhere("", "ExpressionAndIkController", "SetResetLip", 2),
-				(void*)ExpIk_SetResetLip_hook, ExpIk_SetResetLip_orig);
-			add("LiveSubSequence.<AllocateAsync>d__20.MoveNext",
-				ViewDiag::find_nested_move_next("PRISM", "LiveSubSequence", "<AllocateAsync>d__20"),
-				(void*)AllocateAsync_MoveNext_hook, AllocateAsync_MoveNext_orig);
-			add("LiveSubSequence.<_setupAsync>d__33.MoveNext",
-				ViewDiag::find_nested_move_next("PRISM", "LiveSubSequence", "<_setupAsync>d__33"),
-				(void*)SetupAsync_MoveNext_hook, SetupAsync_MoveNext_orig);
-			add("LiveSubSequence.<_setupCutSceneAsync>d__37.MoveNext",
-				ViewDiag::find_nested_move_next("PRISM", "LiveSubSequence", "<_setupCutSceneAsync>d__37"),
-				(void*)SetupCutSceneAsync_MoveNext_hook, SetupCutSceneAsync_MoveNext_orig);
+			if (g_lipGroupSetup) {
+				add("Character.SetupLip(LipSyncTable)", FindSetupLipOverload("LipSyncTable"),
+					(void*)Character_SetupLipDiag_hook, Character_SetupLipDiag_orig);
+				add("Character.SetupLip(String)", FindSetupLipOverload("String"),
+					(void*)Character_SetupLipName_hook, Character_SetupLipName_orig);
+				add("LipSyncController.Setup", ViewDiag::find_method_anywhere("PRISM", "LipSyncController", "Setup", 3),
+					(void*)LipSyncController_SetupDiag_hook, LipSyncController_SetupDiag_orig);
+			}
+			if (g_lipGroupExpIk) {
+				add("ExpressionAndIkController.SetOverwriteLip",
+					ViewDiag::find_method_anywhere("", "ExpressionAndIkController", "SetOverwriteLip", 2),
+					(void*)ExpIk_SetOverwriteLip_hook, ExpIk_SetOverwriteLip_orig);
+				add("ExpressionAndIkController.SetResetLip",
+					ViewDiag::find_method_anywhere("", "ExpressionAndIkController", "SetResetLip", 2),
+					(void*)ExpIk_SetResetLip_hook, ExpIk_SetResetLip_orig);
+			}
+			if (g_lipGroupAsync) {
+				add("LiveSubSequence.<AllocateAsync>d__20.MoveNext",
+					ViewDiag::find_nested_move_next("PRISM", "LiveSubSequence", "<AllocateAsync>d__20"),
+					(void*)AllocateAsync_MoveNext_hook, AllocateAsync_MoveNext_orig);
+				add("LiveSubSequence.<_setupAsync>d__33.MoveNext",
+					ViewDiag::find_nested_move_next("PRISM", "LiveSubSequence", "<_setupAsync>d__33"),
+					(void*)SetupAsync_MoveNext_hook, SetupAsync_MoveNext_orig);
+				add("LiveSubSequence.<_setupCutSceneAsync>d__37.MoveNext",
+					ViewDiag::find_nested_move_next("PRISM", "LiveSubSequence", "<_setupCutSceneAsync>d__37"),
+					(void*)SetupCutSceneAsync_MoveNext_hook, SetupCutSceneAsync_MoveNext_orig);
+			}
 		}
 
 		void InstallLipHook(int& installed) {
-			const std::string mode = ReadLipMode();
+			const std::string raw = ReadLipMode();
+			std::string mode = raw;
+			const size_t comma0 = mode.find(',');
+			if (comma0 != std::string::npos) mode = mode.substr(0, comma0);
 			g_lipMode = mode;
-			Log(std::format("[v71] lip mode='{}'", mode));
+			ParseLipGroups(raw);
+			Log(std::format("[v71] lip mode='{}' raw='{}' groups setup={} update={} async={} expik={}",
+				mode, raw, g_lipGroupSetup ? 1 : 0, g_lipGroupUpdate ? 1 : 0,
+				g_lipGroupAsync ? 1 : 0, g_lipGroupExpIk ? 1 : 0));
 
 			if (mode != "diag" && mode != "on") {
-				Log(std::format("[v34] lip hook off (lip.txt='{}')", mode));
+				Log(std::format("[v34] lip hook off (lip.txt='{}')", raw));
 				return;
 			}
 			const char* assemblies[] = { "PRISM.Legacy.dll", "PRISM.dll" };
 			bool charDone = false, ctrlDone = false;
+			if (g_lipGroupUpdate)
 			for (const char* a : assemblies) {
 				if (!charDone) {
 					auto k = il2cpp_symbols_logged::get_class(a, "PRISM", "Character");
