@@ -4715,6 +4715,10 @@ namespace
 		HOOK_ORIG_TYPE LipSyncController_UpdateLip_orig;
 		int g_lipUpdateCalls = 0;
 
+		std::string Il2CppStrOf(void* s);
+		std::string LipTableInfo(void* table);
+		std::string LipListInfo(void* lips);
+
 		bool LipPatchController(void* controller, const char* source) {
 			if (!controller) return false;
 			auto k = KlassOf(controller);
@@ -4731,10 +4735,9 @@ namespace
 
 			const int call = ++g_lipUpdateCalls;
 			if (call <= 80) {
-				Log(std::format("[v68] native LipUpdate src={} song={} vmMode={} this={} table={} lips={}",
-					source, g_lastSongId, g_lastSoloVocalMode,
-					ViewDiag::ptr_str(controller), ViewDiag::ptr_str(table),
-					ViewDiag::ptr_str(lips)));
+				Log(std::format("[v71] LipUpdate src={} mode={} song={} ctrl={} table={} lips={}",
+					source, g_lastSoloVocalMode, g_lastSongId,
+					ViewDiag::ptr_str(controller), LipTableInfo(table), LipListInfo(lips)));
 			}
 			return table != nullptr;
 		}
@@ -4851,8 +4854,302 @@ namespace
 			HOOK_CAST_CALL(void, Character_LateUpdate)(_this, mtd);
 		}
 
+		// ---------------------------------------------------------------
+		// [v71] lip diagnostics (read-only) + optional native-table fallback.
+		//
+		//   lip.txt = diag : log what the game itself does, change nothing.
+		//   lip.txt = on   : diag + when a character's solo setup receives a
+		//                    missing/empty LipSyncTable, hand it the last
+		//                    usable native table cached for the same
+		//                    CharacterID (the game's own data drives the
+		//                    mouth - nothing is forced open/closed).
+		//
+		// Field names below were verified against global-metadata.dat:
+		//   PRISM.Character  _lipSyncController lipSyncOffsetTime lipSyncAddTime
+		//                    isStopUpdate isRecordedAnimation animationOverwrite
+		//   PRISM.LipSyncController  _lipSyncTable _lips _charaID isSerious
+		//                    isAlwaysSerious isSeriousCloseReverse isOverwrite
+		//   PRISM.LipSyncTable  frameRate offsetFrame lastFrame datas curveData
+		//   PRISM.LipData  tongue a i u e o
+		//   <AllocateAsync>d__20 / <_setupAsync>d__33 / <_setupCutSceneAsync>d__37
+		//                    soloLipSyncName vocalSeparatedMode
+		//                    vocalSeparatedSoloIndex
+		// ---------------------------------------------------------------
+		int g_lipSetupLogs = 0;
+		int g_lipStateLogs = 0;
+		std::string g_lipMode = "off";
+		std::unordered_map<int, void*> g_lipTableByChara;
+		std::unordered_map<int, std::string> g_lipNameByChara;
+		std::unordered_map<int, std::string> g_lipGoodNameByChara;
+
+		std::string Il2CppStrOf(void* s) {
+			if (!s || !RunwayDump::PlausiblePtr((uintptr_t)s)) return "(null)";
+			try { return reinterpret_cast<Il2CppString*>(s)->ToUtf8String(); }
+			catch (...) { return "(err)"; }
+		}
+
+		std::string LipTableInfo(void* table) {
+			if (!table) return "null";
+			if (!RunwayDump::PlausiblePtr((uintptr_t)table)) return "badptr";
+			const char* cn = RunwayDump::ClassNameOf(table);
+			std::string s = std::string(cn ? cn : "?") + "@" + ViewDiag::ptr_str(table);
+			if (!cn || std::string(cn) != "LipSyncTable") return s;
+			int fr = RunwayDump::ReadInt(table, "frameRate");
+			int off = RunwayDump::ReadInt(table, "offsetFrame");
+			int last = RunwayDump::ReadInt(table, "lastFrame");
+			void* datas = RunwayDump::ReadPtr(table, "datas");
+			void* curve = RunwayDump::ReadPtr(table, "curveData");
+			s += std::format(" fr={} off={} last={} datas={} curve={}",
+				fr, off, last, RunwayDump::ArrayLength(datas), RunwayDump::ArrayLength(curve));
+			return s;
+		}
+
+		// LipSyncTable usable == it is the real class and carries frame data
+		bool LipTableUsable(void* table) {
+			if (!table || !RunwayDump::PlausiblePtr((uintptr_t)table)) return false;
+			const char* cn = RunwayDump::ClassNameOf(table);
+			if (!cn || std::string(cn) != "LipSyncTable") return false;
+			void* datas = RunwayDump::ReadPtr(table, "datas");
+			void* curve = RunwayDump::ReadPtr(table, "curveData");
+			return RunwayDump::ArrayLength(datas) > 0 || RunwayDump::ArrayLength(curve) > 0;
+		}
+
+		// true only when the argument really is a LipSyncTable that carries no
+		// frame data - never for a string/other overload's argument.
+		bool LipArgIsEmptyTable(void* table) {
+			if (!table) return true;
+			if (!RunwayDump::PlausiblePtr((uintptr_t)table)) return false;
+			const char* cn = RunwayDump::ClassNameOf(table);
+			if (!cn || std::string(cn) != "LipSyncTable") return false;
+			return !LipTableUsable(table);
+		}
+
+		std::string LipListInfo(void* lips) {
+			if (!lips) return "null";
+			if (!RunwayDump::PlausiblePtr((uintptr_t)lips)) return "badptr";
+			const char* cn = RunwayDump::ClassNameOf(lips);
+			int n = RunwayDump::ArrayLength(lips);
+			int size = RunwayDump::ReadInt(lips, "_size");
+			if (n <= 0) {
+				void* items = RunwayDump::ReadPtr(lips, "_items");
+				if (items) n = RunwayDump::ArrayLength(items);
+			}
+			return std::format("{}@{} len={} size={}", cn ? cn : "?", ViewDiag::ptr_str(lips), n, size);
+		}
+
+		std::string LipControllerState(void* controller) {
+			if (!controller || !RunwayDump::PlausiblePtr((uintptr_t)controller)) return "ctrl=null";
+			return std::format("charaId={} table={} lips={} serious={} alwaysSerious={} closeReverse={} overwrite={}",
+				RunwayDump::ReadInt(controller, "_charaID"),
+				LipTableInfo(RunwayDump::ReadPtr(controller, "_lipSyncTable")),
+				LipListInfo(RunwayDump::ReadPtr(controller, "_lips")),
+				LipReadBool(controller, "isSerious") ? 1 : 0,
+				LipReadBool(controller, "isAlwaysSerious") ? 1 : 0,
+				LipReadBool(controller, "isSeriousCloseReverse") ? 1 : 0,
+				LipReadBool(controller, "isOverwrite") ? 1 : 0);
+		}
+
+		HOOK_ORIG_TYPE Character_SetupLipDiag_orig;
+		void Character_SetupLipDiag_hook(void* _this, void* table, float offsetTime, float addTime, void* mtd) {
+			void* use = table;
+			try {
+				const int cid = LipCharaId(_this);
+				if (LipTableUsable(table)) {
+					std::lock_guard<std::mutex> lock(g_lipMutex);
+					g_lipTableByChara[cid] = table;
+				} else if (g_lipMode == "on" && LipArgIsEmptyTable(table)) {
+					std::lock_guard<std::mutex> lock(g_lipMutex);
+					auto it = g_lipTableByChara.find(cid);
+					if (it != g_lipTableByChara.end() && LipTableUsable(it->second)) use = it->second;
+				}
+				if (g_lipSetupLogs++ < 120) {
+					Log(std::format("[v71] SetupLip ch={} mode={} song={} in={} use={} offset={:.3f} add={:.3f}",
+						cid, g_lastSoloVocalMode, g_lastSongId, LipTableInfo(table), LipTableInfo(use),
+						offsetTime, addTime));
+				}
+			}
+			catch (...) { use = table; }
+			return HOOK_CAST_CALL(void, Character_SetupLipDiag)(_this, use, offsetTime, addTime, mtd);
+		}
+
+		HOOK_ORIG_TYPE LipSyncController_SetupDiag_orig;
+		void LipSyncController_SetupDiag_hook(void* _this, void* table, float a, float b, void* mtd) {
+			try {
+				if (g_lipSetupLogs++ < 120) {
+					Log(std::format("[v71] Controller.Setup mode={} song={} in={} a={:.3f} b={:.3f}",
+						g_lastSoloVocalMode, g_lastSongId, LipTableInfo(table), a, b));
+				}
+			}
+			catch (...) {}
+			HOOK_CAST_CALL(void, LipSyncController_SetupDiag)(_this, table, a, b, mtd);
+			try {
+				if (g_lipSetupLogs <= 121)
+					Log(std::format("[v71] Controller.Setup done -> {}", LipControllerState(_this)));
+			}
+			catch (...) {}
+		}
+
+		std::mutex g_lipSmMutex;
+		std::unordered_set<std::string> g_lipSmSeen;
+
+		void LogSoloLipName(void* sm, const char* who) {
+			try {
+				if (!sm || !RunwayDump::PlausiblePtr((uintptr_t)sm)) return;
+				auto fName = FieldOf(KlassOf(sm), "soloLipSyncName");
+				if (!fName) return;
+				void* s = nullptr;
+				try { s = il2cpp_symbols::read_field<void*>(sm, fName); } catch (...) { return; }
+				const int mode = RunwayDump::ReadInt(sm, "vocalSeparatedMode");
+				const int idx = RunwayDump::ReadInt(sm, "vocalSeparatedSoloIndex");
+				const std::string name = Il2CppStrOf(s);
+				const std::string key = std::format("{}|{}|{}|{}", who, name, mode, idx);
+				{
+					std::lock_guard<std::mutex> lock(g_lipSmMutex);
+					if (!g_lipSmSeen.insert(key).second) return;
+				}
+				Log(std::format("[v71] {} soloLipSyncName=\"{}\" mode={} soloIndex={} song={}",
+					who, name, mode, idx, g_lastSongId));
+			}
+			catch (...) {}
+		}
+
+		HOOK_ORIG_TYPE AllocateAsync_MoveNext_orig;
+		void AllocateAsync_MoveNext_hook(void* _this, void* mtd) {
+			LogSoloLipName(_this, "AllocateAsync");
+			return HOOK_CAST_CALL(void, AllocateAsync_MoveNext)(_this, mtd);
+		}
+
+		HOOK_ORIG_TYPE SetupAsync_MoveNext_orig;
+		void SetupAsync_MoveNext_hook(void* _this, void* mtd) {
+			LogSoloLipName(_this, "_setupAsync");
+			return HOOK_CAST_CALL(void, SetupAsync_MoveNext)(_this, mtd);
+		}
+
+		HOOK_ORIG_TYPE SetupCutSceneAsync_MoveNext_orig;
+		void SetupCutSceneAsync_MoveNext_hook(void* _this, void* mtd) {
+			LogSoloLipName(_this, "_setupCutSceneAsync");
+			return HOOK_CAST_CALL(void, SetupCutSceneAsync_MoveNext)(_this, mtd);
+		}
+
+		int LipCharacterOf(void* expressionAndIkController) {
+			void* ch = RunwayDump::ReadPtr(expressionAndIkController, "_character");
+			return ch ? LipCharaId(ch) : -1;
+		}
+
+		HOOK_ORIG_TYPE ExpIk_SetOverwriteLip_orig;
+		void ExpIk_SetOverwriteLip_hook(void* _this, bool a, bool b, void* mtd) {
+			try {
+				if (g_lipStateLogs++ < 80)
+					Log(std::format("[v71] SetOverwriteLip ch={} a={} b={} mode={}",
+						LipCharacterOf(_this), a ? 1 : 0, b ? 1 : 0, g_lastSoloVocalMode));
+			}
+			catch (...) {}
+			return HOOK_CAST_CALL(void, ExpIk_SetOverwriteLip)(_this, a, b, mtd);
+		}
+
+		HOOK_ORIG_TYPE ExpIk_SetResetLip_orig;
+		void ExpIk_SetResetLip_hook(void* _this, bool a, bool b, void* mtd) {
+			try {
+				if (g_lipStateLogs++ < 80)
+					Log(std::format("[v71] SetResetLip ch={} a={} b={} mode={}",
+						LipCharacterOf(_this), a ? 1 : 0, b ? 1 : 0, g_lastSoloVocalMode));
+			}
+			catch (...) {}
+			return HOOK_CAST_CALL(void, ExpIk_SetResetLip)(_this, a, b, mtd);
+		}
+
+		// find one specific SetupLip overload by the type name of its first parameter
+		void* FindSetupLipOverload(const char* wantFirstParam) {
+			auto* k = (Il2CppClass*)find_class_anywhere("PRISM", "Character");
+			if (!k) { Log("[v71] PRISM.Character not found"); return nullptr; }
+			void* iter = nullptr;
+			while (auto* mi = il2cpp_class_get_methods(k, &iter)) {
+				const char* mn = il2cpp_method_get_name(mi);
+				if (!mn || strcmp(mn, "SetupLip") != 0) continue;
+				if (il2cpp_method_get_param_count(mi) != 3) continue;
+				const char* t0 = il2cpp_symbols::il2cpp_method_get_param_type_name(mi, 0);
+				Log(std::format("[v71] SetupLip overload param0='{}' @ {}",
+					t0 ? t0 : "?", ViewDiag::ptr_str((void*)mi->methodPointer)));
+				if (t0 && strstr(t0, wantFirstParam)) return (void*)mi->methodPointer;
+			}
+			return nullptr;
+		}
+
+		HOOK_ORIG_TYPE Character_SetupLipName_orig;
+		void Character_SetupLipName_hook(void* _this, void* name, float offsetTime, float addTime, void* mtd) {
+			const int cid = _this ? LipCharaId(_this) : -1;
+			const std::string nm = Il2CppStrOf(name);
+			try {
+				if (g_lipSetupLogs++ < 120) {
+					Log(std::format("[v71] SetupLip(name) ch={} mode={} song={} name=\"{}\" offset={:.3f} add={:.3f}",
+						cid, g_lastSoloVocalMode, g_lastSongId, nm, offsetTime, addTime));
+				}
+				std::lock_guard<std::mutex> lock(g_lipMutex);
+				g_lipNameByChara[cid] = nm;
+			}
+			catch (...) {}
+			HOOK_CAST_CALL(void, Character_SetupLipName)(_this, name, offsetTime, addTime, mtd);
+			try {
+				void* ctrl = LipControllerOf(_this);
+				void* table = ctrl ? RunwayDump::ReadPtr(ctrl, "_lipSyncTable") : nullptr;
+				if (LipTableUsable(table)) {
+					std::lock_guard<std::mutex> lock(g_lipMutex);
+					g_lipGoodNameByChara[cid] = nm;
+				} else if (g_lipMode == "on" && !nm.empty()) {
+					std::string good;
+					{
+						std::lock_guard<std::mutex> lock(g_lipMutex);
+						auto it = g_lipGoodNameByChara.find(cid);
+						if (it != g_lipGoodNameByChara.end()) good = it->second;
+					}
+					if (!good.empty() && good != nm) {
+						Log(std::format("[v71] SetupLip(name) fallback ch={} '{}' -> '{}'", cid, nm, good));
+						HOOK_CAST_CALL(void, Character_SetupLipName)(_this, il2cpp_string_new(good.c_str()),
+							offsetTime, addTime, mtd);
+					}
+				}
+				if (g_lipSetupLogs <= 121)
+					Log(std::format("[v71] SetupLip(name) done -> {}", LipControllerState(LipControllerOf(_this))));
+			}
+			catch (...) {}
+		}
+
+		void InstallLipDiag(int& installed) {
+			auto add = [&](const char* label, void* addr, void* detour, HOOK_ORIG_TYPE& orig) {
+				if (!addr) { Log(std::format("[v71] {} not found", label)); return; }
+				if (HookAt(label, addr, detour, orig)) {
+					++installed;
+					Log(std::format("[v71] {} hooked @ {}", label, ViewDiag::ptr_str(addr)));
+				}
+			};
+			add("Character.SetupLip(LipSyncTable)", FindSetupLipOverload("LipSyncTable"),
+				(void*)Character_SetupLipDiag_hook, Character_SetupLipDiag_orig);
+			add("Character.SetupLip(String)", FindSetupLipOverload("String"),
+				(void*)Character_SetupLipName_hook, Character_SetupLipName_orig);
+			add("LipSyncController.Setup", find_method_anywhere("PRISM", "LipSyncController", "Setup", 3),
+				(void*)LipSyncController_SetupDiag_hook, LipSyncController_SetupDiag_orig);
+			add("ExpressionAndIkController.SetOverwriteLip",
+				find_method_anywhere("", "ExpressionAndIkController", "SetOverwriteLip", 2),
+				(void*)ExpIk_SetOverwriteLip_hook, ExpIk_SetOverwriteLip_orig);
+			add("ExpressionAndIkController.SetResetLip",
+				find_method_anywhere("", "ExpressionAndIkController", "SetResetLip", 2),
+				(void*)ExpIk_SetResetLip_hook, ExpIk_SetResetLip_orig);
+			add("LiveSubSequence.<AllocateAsync>d__20.MoveNext",
+				find_nested_move_next("PRISM", "LiveSubSequence", "<AllocateAsync>d__20"),
+				(void*)AllocateAsync_MoveNext_hook, AllocateAsync_MoveNext_orig);
+			add("LiveSubSequence.<_setupAsync>d__33.MoveNext",
+				find_nested_move_next("PRISM", "LiveSubSequence", "<_setupAsync>d__33"),
+				(void*)SetupAsync_MoveNext_hook, SetupAsync_MoveNext_orig);
+			add("LiveSubSequence.<_setupCutSceneAsync>d__37.MoveNext",
+				find_nested_move_next("PRISM", "LiveSubSequence", "<_setupCutSceneAsync>d__37"),
+				(void*)SetupCutSceneAsync_MoveNext_hook, SetupCutSceneAsync_MoveNext_orig);
+		}
+
 		void InstallLipHook(int& installed) {
 			const std::string mode = ReadLipMode();
+			g_lipMode = mode;
+			Log(std::format("[v71] lip mode='{}'", mode));
+
 			if (mode != "diag" && mode != "on") {
 				Log(std::format("[v34] lip hook off (lip.txt='{}')", mode));
 				return;
@@ -4893,47 +5190,7 @@ namespace
 				}
 				if (charDone && ctrlDone) break;
 			}
-			int flagHooks = 0;
-			auto addFlagHook = [&](const char* cls, const char* name, int argc,
-				void* detour, HOOK_ORIG_TYPE& orig, const char* label) {
-				auto k = il2cpp_symbols_logged::get_class("PRISM.Legacy.dll", "PRISM", cls);
-				if (!k) { Log(std::format("[v35] class {} not found", cls)); return; }
-				auto mi = il2cpp_class_get_method_from_name(k, name, argc);
-				if (!mi || !mi->methodPointer) {
-					Log(std::format("[v35] {}::{}({}) not found", cls, name, argc));
-					return;
-				}
-				if (HookAt(label, (void*)mi->methodPointer, detour, orig)) {
-					++installed;
-					++flagHooks;
-					Log(std::format("[v35] {}::{}({}) hooked", cls, name, argc));
-				}
-			};
-			addFlagHook("Character", "SetAutoUpdateStop", 1,
-				(void*)Character_SetAutoUpdateStop_hook, Character_SetAutoUpdateStop_orig,
-				"Character.SetAutoUpdateStop");
-			addFlagHook("Character", "SetOverwriteFlag", 1,
-				(void*)Character_SetOverwriteFlag_hook, Character_SetOverwriteFlag_orig,
-				"Character.SetOverwriteFlag");
-			addFlagHook("Character", "ResetLipSync", 0,
-				(void*)Character_ResetLipSync_hook, Character_ResetLipSync_orig,
-				"Character.ResetLipSync");
-			addFlagHook("Character", "Update", 0,
-				(void*)Character_Update_hook, Character_Update_orig,
-				"Character.Update");
-			addFlagHook("Character", "LateUpdate", 0,
-				(void*)Character_LateUpdate_hook, Character_LateUpdate_orig,
-				"Character.LateUpdate");
-			addFlagHook("LipSyncController", "SetSerious", 1,
-				(void*)LipSyncController_SetSerious_hook, LipSyncController_SetSerious_orig,
-				"LipSyncController.SetSerious");
-			addFlagHook("LipSyncController", "SetOverwrite", 1,
-				(void*)LipSyncController_SetOverwrite_hook, LipSyncController_SetOverwrite_orig,
-				"LipSyncController.SetOverwrite");
-			addFlagHook("LiveCharacterController", "ResetLipSync", 0,
-				(void*)LiveCharacterController_ResetLipSync_hook, LiveCharacterController_ResetLipSync_orig,
-				"LiveCharacterController.ResetLipSync");
-			Log(std::format("[v68] native lip flag hooks={} mode={}", flagHooks, mode));
+			InstallLipDiag(installed);
 			Log(std::format("[v34] lip update hooks installed: Character={} Controller={} mode={}",
 				charDone ? 1 : 0, ctrlDone ? 1 : 0, mode));
 		}
