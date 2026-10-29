@@ -4890,11 +4890,13 @@ namespace
 		// Animator object, and the real type of `id` is still unknown, so this group
 		// stays OFF unless lip.txt names it explicitly.
 		bool g_lipGroupCtrlSetup = false;
+		bool g_lipGroupCutScene = true;
 
 		void ParseLipGroups(const std::string& raw) {
 			if (raw.find(',') == std::string::npos) return;   // no group list -> default set
 			g_lipGroupSetup = g_lipGroupUpdate = g_lipGroupAsync = g_lipGroupExpIk = false;
 			g_lipGroupCtrlSetup = false;
+			g_lipGroupCutScene = false;
 			size_t pos = 0;
 			for (;;) {
 				const size_t comma = raw.find(',', pos);
@@ -4904,6 +4906,7 @@ namespace
 				else if (tok == "async") g_lipGroupAsync = true;
 				else if (tok == "expik") g_lipGroupExpIk = true;
 				else if (tok == "ctrlsetup") g_lipGroupCtrlSetup = true;
+				else if (tok == "cutscene") g_lipGroupCutScene = true;
 				if (comma == std::string::npos) break;
 				pos = comma + 1;
 			}
@@ -4911,6 +4914,7 @@ namespace
 		std::unordered_map<std::string, void*> g_lipTableBySongChara;
 		std::unordered_map<std::string, std::string> g_lipNameBySongChara;
 		std::unordered_map<std::string, std::string> g_lipGoodNameBySongChara;
+		std::unordered_map<int, std::string> g_lipGoodNameBySong;
 
 		// cache key: one entry per (song, character) pair so a fallback can never
 		// borrow another song's lip table
@@ -5158,6 +5162,7 @@ namespace
 				if (LipTableUsable(table)) {
 					std::lock_guard<std::mutex> lock(g_lipMutex);
 					g_lipGoodNameBySongChara[LipKey(cid)] = nm;
+					g_lipGoodNameBySong[g_lastSongId] = nm;
 				} else if (g_lipMode == "on" && !nm.empty()) {
 					std::string good;
 					{
@@ -5177,6 +5182,109 @@ namespace
 			catch (...) {}
 		}
 
+		// ---------------------------------------------------------------
+		// [v73] cut scene (= special performance) lip diagnostics.
+		//
+		//   Special-performance MVs run their featured segment as a CutScene.
+		//   PRISM.CutScene drives lips from its own timeline clips, gated by
+		//     forcedCutSceneLipSyncWithSolo (bool, per cut scene asset)
+		//   and it can also be handed a table by name:
+		//     CutScene.SetLipSync(vocalSeparatedMode, vocalSeparatedSoloIndex,
+		//                         soloLipSyncName, startTime)
+		//   param types verified from global-metadata.dat:
+		//     mode=int, soloIndex=int, name=String, startTime=Single
+		// ---------------------------------------------------------------
+
+		bool LipWriteBool(void* obj, const char* name, bool value) {
+			if (!obj) return false;
+			auto fi = FieldOf(KlassOf(obj), name);
+			if (!fi) return false;
+			try { il2cpp_field_set_value(obj, fi, &value); return true; }
+			catch (...) { return false; }
+		}
+
+		std::string CutSceneInfo(void* cs) {
+			if (!cs || !RunwayDump::PlausiblePtr((uintptr_t)cs)) return "cs=null";
+			return std::format("forcedLipSolo={} mode={} movieOnly={} endFrame={}",
+				LipReadBool(cs, "forcedCutSceneLipSyncWithSolo") ? 1 : 0,
+				RunwayDump::ReadInt(cs, "vocalSeparatedMode"),
+				LipReadBool(cs, "movieOnly") ? 1 : 0,
+				RunwayDump::ReadInt(cs, "endFrame"));
+		}
+
+		// "on" only: let the cut scene use the character lip data the same way a
+		// normal MV does.  The data is still the game's own table - nothing is
+		// opened/closed by hand.
+		void CutSceneForceLip(void* cs) {
+			if (g_lipMode != "on" || !cs || !RunwayDump::PlausiblePtr((uintptr_t)cs)) return;
+			if (LipReadBool(cs, "forcedCutSceneLipSyncWithSolo")) return;
+			if (LipWriteBool(cs, "forcedCutSceneLipSyncWithSolo", true))
+				Log("[v73] forcedCutSceneLipSyncWithSolo -> true");
+			else
+				Log("[v73] forcedCutSceneLipSyncWithSolo write failed");
+		}
+
+		HOOK_ORIG_TYPE CutScene_SetupControllers_orig;
+		void CutScene_SetupControllers_hook(void* _this, void* mtd) {
+			try {
+				if (g_lipStateLogs++ < 500)
+					Log(std::format("[v73] CutScene.SetupControllers {}", CutSceneInfo(_this)));
+				CutSceneForceLip(_this);
+			}
+			catch (...) {}
+			return HOOK_CAST_CALL(void, CutScene_SetupControllers)(_this, mtd);
+		}
+
+		HOOK_ORIG_TYPE CutScene_OnEnable_orig;
+		void CutScene_OnEnable_hook(void* _this, void* mtd) {
+			try {
+				if (g_lipStateLogs++ < 500)
+					Log(std::format("[v73] CutScene.OnEnable {}", CutSceneInfo(_this)));
+				CutSceneForceLip(_this);
+			}
+			catch (...) {}
+			return HOOK_CAST_CALL(void, CutScene_OnEnable)(_this, mtd);
+		}
+
+		HOOK_ORIG_TYPE CutScene_ResetLipSync_orig;
+		void CutScene_ResetLipSync_hook(void* _this, void* mtd) {
+			try {
+				if (g_lipStateLogs++ < 500)
+					Log(std::format("[v73] CutScene.ResetLipSync {}", CutSceneInfo(_this)));
+				CutSceneForceLip(_this);
+			}
+			catch (...) {}
+			return HOOK_CAST_CALL(void, CutScene_ResetLipSync)(_this, mtd);
+		}
+
+		HOOK_ORIG_TYPE CutScene_SetLipSync_orig;
+		void CutScene_SetLipSync_hook(void* _this, int mode, int soloIndex, void* name, float startTime, void* mtd) {
+			void* useName = name;
+			try {
+				const std::string nm = Il2CppStrOf(name);
+				if (g_lipStateLogs++ < 500) {
+					Log(std::format("[v73] CutScene.SetLipSync mode={} soloIndex={} name=\"{}\" startTime={:.3f} {}",
+						mode, soloIndex, nm, startTime, CutSceneInfo(_this)));
+				}
+				CutSceneForceLip(_this);
+				if (g_lipMode == "on" && nm.empty()) {
+					std::string good;
+					{
+						std::lock_guard<std::mutex> lock(g_lipMutex);
+						auto it = g_lipGoodNameBySong.find(g_lastSongId);
+						if (it != g_lipGoodNameBySong.end()) good = it->second;
+					}
+					if (!good.empty()) {
+						useName = il2cpp_string_new(good.c_str());
+						Log(std::format("[v73] CutScene.SetLipSync name fallback -> \"{}\"", good));
+					}
+				}
+			}
+			catch (...) { useName = name; }
+			return HOOK_CAST_CALL(void, CutScene_SetLipSync)(_this, mode, soloIndex, useName, startTime, mtd);
+		}
+
+
 		void InstallLipDiag(int& installed) {
 			auto add = [&](const char* label, void* addr, void* detour, HOOK_ORIG_TYPE& orig) {
 				if (!addr) { Log(std::format("[v71] {} not found", label)); return; }
@@ -5185,6 +5293,16 @@ namespace
 					Log(std::format("[v71] {} hooked @ {}", label, ViewDiag::ptr_str(addr)));
 				}
 			};
+			if (g_lipGroupCutScene) {
+				add("CutScene.SetupControllers", ViewDiag::find_method_anywhere("PRISM", "CutScene", "SetupControllers", 0),
+					(void*)CutScene_SetupControllers_hook, CutScene_SetupControllers_orig);
+				add("CutScene.OnEnable", ViewDiag::find_method_anywhere("PRISM", "CutScene", "OnEnable", 0),
+					(void*)CutScene_OnEnable_hook, CutScene_OnEnable_orig);
+				add("CutScene.ResetLipSync", ViewDiag::find_method_anywhere("PRISM", "CutScene", "ResetLipSync", 0),
+					(void*)CutScene_ResetLipSync_hook, CutScene_ResetLipSync_orig);
+				add("CutScene.SetLipSync", ViewDiag::find_method_anywhere("PRISM", "CutScene", "SetLipSync", 4),
+					(void*)CutScene_SetLipSync_hook, CutScene_SetLipSync_orig);
+			}
 			if (g_lipGroupSetup) {
 				add("Character.SetupLip(LipSyncTable)", FindSetupLipOverload("LipSyncTable"),
 					(void*)Character_SetupLipDiag_hook, Character_SetupLipDiag_orig);
@@ -5226,7 +5344,7 @@ namespace
 			Log(std::format("[v71] lip mode='{}' raw='{}' groups setup={} update={} async={} expik={}",
 				mode, raw, g_lipGroupSetup ? 1 : 0, g_lipGroupUpdate ? 1 : 0,
 				g_lipGroupAsync ? 1 : 0, g_lipGroupExpIk ? 1 : 0));
-			Log(std::format("[v71] lip group ctrlsetup={}", g_lipGroupCtrlSetup ? 1 : 0));
+			Log(std::format("[v71] lip group ctrlsetup={} cutscene={}", g_lipGroupCtrlSetup ? 1 : 0, g_lipGroupCutScene ? 1 : 0));
 
 			if (mode != "diag" && mode != "on") {
 				Log(std::format("[v34] lip hook off (lip.txt='{}')", raw));
