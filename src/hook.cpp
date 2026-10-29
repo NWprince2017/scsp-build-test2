@@ -4714,10 +4714,12 @@ namespace
 		HOOK_ORIG_TYPE Character_UpdateLip_orig;
 		HOOK_ORIG_TYPE LipSyncController_UpdateLip_orig;
 		int g_lipUpdateCalls = 0;
+		int g_lipStateLogs = 0;
 
 		std::string Il2CppStrOf(void* s);
 		std::string LipTableInfo(void* table);
 		std::string LipListInfo(void* lips);
+		std::string LipValues(void* lips);
 
 		bool LipPatchController(void* controller, const char* source) {
 			if (!controller) return false;
@@ -4734,10 +4736,11 @@ namespace
 			catch (...) { lips = nullptr; }
 
 			const int call = ++g_lipUpdateCalls;
-			if (call <= 80) {
-				Log(std::format("[v71] LipUpdate src={} mode={} song={} ctrl={} table={} lips={}",
-					source, g_lastSoloVocalMode, g_lastSongId,
-					ViewDiag::ptr_str(controller), LipTableInfo(table), LipListInfo(lips)));
+			if (call <= 40 || (call % 240) == 0) {
+				if (g_lipStateLogs++ < 500)
+					Log(std::format("[v71] LipUpdate src={} mode={} song={} ctrl={} table={} lips={}",
+						source, g_lastSoloVocalMode, g_lastSongId,
+						ViewDiag::ptr_str(controller), LipTableInfo(table), LipValues(lips)));
 			}
 			return table != nullptr;
 		}
@@ -4876,11 +4879,16 @@ namespace
 		//                    vocalSeparatedSoloIndex
 		// ---------------------------------------------------------------
 		int g_lipSetupLogs = 0;
-		int g_lipStateLogs = 0;
 		std::string g_lipMode = "off";
-		std::unordered_map<int, void*> g_lipTableByChara;
-		std::unordered_map<int, std::string> g_lipNameByChara;
-		std::unordered_map<int, std::string> g_lipGoodNameByChara;
+		std::unordered_map<std::string, void*> g_lipTableBySongChara;
+		std::unordered_map<std::string, std::string> g_lipNameBySongChara;
+		std::unordered_map<std::string, std::string> g_lipGoodNameBySongChara;
+
+		// cache key: one entry per (song, character) pair so a fallback can never
+		// borrow another song's lip table
+		std::string LipKey(int charaId) {
+			return std::format("{}|{}", g_lastSongId, charaId);
+		}
 
 		std::string Il2CppStrOf(void* s) {
 			if (!s || !RunwayDump::PlausiblePtr((uintptr_t)s)) return "(null)";
@@ -4924,6 +4932,31 @@ namespace
 			return !LipTableUsable(table);
 		}
 
+		float LipReadFloat(void* obj, const char* name) {
+			const int v = obj ? RunwayDump::ReadInt(obj, name) : 0;
+			union { int i; float f; } u;
+			u.i = v;
+			return u.f;
+		}
+
+		// current viseme values actually held in _lips (proves whether the native
+		// update loop is driving the mouth at all)
+		std::string LipValues(void* lips) {
+			if (!lips || !RunwayDump::PlausiblePtr((uintptr_t)lips)) return "null";
+			void* items = lips;
+			int n = RunwayDump::ArrayLength(items);
+			if (n <= 0) {
+				items = RunwayDump::ReadPtr(lips, "_items");
+				n = RunwayDump::ArrayLength(items);
+			}
+			if (!items || n <= 0) return "len=0";
+			void* e0 = *(void**)(uintptr_t)RunwayDump::ArrayElem(items, 0, (int)sizeof(void*));
+			if (!e0 || !RunwayDump::PlausiblePtr((uintptr_t)e0)) return std::format("len={} e0=null", n);
+			return std::format("len={} a={:.2f} i={:.2f} u={:.2f} e={:.2f} o={:.2f}",
+				n, LipReadFloat(e0, "a"), LipReadFloat(e0, "i"), LipReadFloat(e0, "u"),
+				LipReadFloat(e0, "e"), LipReadFloat(e0, "o"));
+		}
+
 		std::string LipListInfo(void* lips) {
 			if (!lips) return "null";
 			if (!RunwayDump::PlausiblePtr((uintptr_t)lips)) return "badptr";
@@ -4956,11 +4989,11 @@ namespace
 				const int cid = LipCharaId(_this);
 				if (LipTableUsable(table)) {
 					std::lock_guard<std::mutex> lock(g_lipMutex);
-					g_lipTableByChara[cid] = table;
+					g_lipTableBySongChara[LipKey(cid)] = table;
 				} else if (g_lipMode == "on" && LipArgIsEmptyTable(table)) {
 					std::lock_guard<std::mutex> lock(g_lipMutex);
-					auto it = g_lipTableByChara.find(cid);
-					if (it != g_lipTableByChara.end() && LipTableUsable(it->second)) use = it->second;
+					auto it = g_lipTableBySongChara.find(LipKey(cid));
+					if (it != g_lipTableBySongChara.end() && LipTableUsable(it->second)) use = it->second;
 				}
 				if (g_lipSetupLogs++ < 120) {
 					Log(std::format("[v71] SetupLip ch={} mode={} song={} in={} use={} offset={:.3f} add={:.3f}",
@@ -5085,7 +5118,7 @@ namespace
 						cid, g_lastSoloVocalMode, g_lastSongId, nm, offsetTime, addTime));
 				}
 				std::lock_guard<std::mutex> lock(g_lipMutex);
-				g_lipNameByChara[cid] = nm;
+				g_lipNameBySongChara[LipKey(cid)] = nm;
 			}
 			catch (...) {}
 			HOOK_CAST_CALL(void, Character_SetupLipName)(_this, name, offsetTime, addTime, mtd);
@@ -5094,13 +5127,13 @@ namespace
 				void* table = ctrl ? RunwayDump::ReadPtr(ctrl, "_lipSyncTable") : nullptr;
 				if (LipTableUsable(table)) {
 					std::lock_guard<std::mutex> lock(g_lipMutex);
-					g_lipGoodNameByChara[cid] = nm;
+					g_lipGoodNameBySongChara[LipKey(cid)] = nm;
 				} else if (g_lipMode == "on" && !nm.empty()) {
 					std::string good;
 					{
 						std::lock_guard<std::mutex> lock(g_lipMutex);
-						auto it = g_lipGoodNameByChara.find(cid);
-						if (it != g_lipGoodNameByChara.end()) good = it->second;
+						auto it = g_lipGoodNameBySongChara.find(LipKey(cid));
+						if (it != g_lipGoodNameBySongChara.end()) good = it->second;
 					}
 					if (!good.empty() && good != nm) {
 						Log(std::format("[v71] SetupLip(name) fallback ch={} '{}' -> '{}'", cid, nm, good));
