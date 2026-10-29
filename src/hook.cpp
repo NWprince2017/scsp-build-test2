@@ -4886,10 +4886,15 @@ namespace
 		bool g_lipGroupUpdate = true;
 		bool g_lipGroupAsync = true;
 		bool g_lipGroupExpIk = true;
+		// LipSyncController.Setup(table, id, _faceAnimator) - the third argument is an
+		// Animator object, and the real type of `id` is still unknown, so this group
+		// stays OFF unless lip.txt names it explicitly.
+		bool g_lipGroupCtrlSetup = false;
 
 		void ParseLipGroups(const std::string& raw) {
-			if (raw.find(',') == std::string::npos) return;   // no group list -> keep all
+			if (raw.find(',') == std::string::npos) return;   // no group list -> default set
 			g_lipGroupSetup = g_lipGroupUpdate = g_lipGroupAsync = g_lipGroupExpIk = false;
+			g_lipGroupCtrlSetup = false;
 			size_t pos = 0;
 			for (;;) {
 				const size_t comma = raw.find(',', pos);
@@ -4898,6 +4903,7 @@ namespace
 				else if (tok == "update") g_lipGroupUpdate = true;
 				else if (tok == "async") g_lipGroupAsync = true;
 				else if (tok == "expik") g_lipGroupExpIk = true;
+				else if (tok == "ctrlsetup") g_lipGroupCtrlSetup = true;
 				if (comma == std::string::npos) break;
 				pos = comma + 1;
 			}
@@ -5028,15 +5034,17 @@ namespace
 		}
 
 		HOOK_ORIG_TYPE LipSyncController_SetupDiag_orig;
-		void LipSyncController_SetupDiag_hook(void* _this, void* table, float a, float b, void* mtd) {
+		// real signature: Setup(LipSyncTable table, <id>, Animator _faceAnimator)
+		void LipSyncController_SetupDiag_hook(void* _this, void* table, int id, void* faceAnimator, void* mtd) {
 			try {
 				if (g_lipSetupLogs++ < 120) {
-					Log(std::format("[v71] Controller.Setup mode={} song={} in={} a={:.3f} b={:.3f}",
-						g_lastSoloVocalMode, g_lastSongId, LipTableInfo(table), a, b));
+					Log(std::format("[v71] Controller.Setup mode={} song={} in={} id={} animator={}",
+						g_lastSoloVocalMode, g_lastSongId, LipTableInfo(table), id,
+						ViewDiag::ptr_str(faceAnimator)));
 				}
 			}
 			catch (...) {}
-			HOOK_CAST_CALL(void, LipSyncController_SetupDiag)(_this, table, a, b, mtd);
+			HOOK_CAST_CALL(void, LipSyncController_SetupDiag)(_this, table, id, faceAnimator, mtd);
 			try {
 				if (g_lipSetupLogs <= 121)
 					Log(std::format("[v71] Controller.Setup done -> {}", LipControllerState(_this)));
@@ -5182,6 +5190,8 @@ namespace
 					(void*)Character_SetupLipDiag_hook, Character_SetupLipDiag_orig);
 				add("Character.SetupLip(String)", FindSetupLipOverload("String"),
 					(void*)Character_SetupLipName_hook, Character_SetupLipName_orig);
+			}
+			if (g_lipGroupCtrlSetup) {
 				add("LipSyncController.Setup", ViewDiag::find_method_anywhere("PRISM", "LipSyncController", "Setup", 3),
 					(void*)LipSyncController_SetupDiag_hook, LipSyncController_SetupDiag_orig);
 			}
@@ -5216,6 +5226,7 @@ namespace
 			Log(std::format("[v71] lip mode='{}' raw='{}' groups setup={} update={} async={} expik={}",
 				mode, raw, g_lipGroupSetup ? 1 : 0, g_lipGroupUpdate ? 1 : 0,
 				g_lipGroupAsync ? 1 : 0, g_lipGroupExpIk ? 1 : 0));
+			Log(std::format("[v71] lip group ctrlsetup={}", g_lipGroupCtrlSetup ? 1 : 0));
 
 			if (mode != "diag" && mode != "on") {
 				Log(std::format("[v34] lip hook off (lip.txt='{}')", raw));
