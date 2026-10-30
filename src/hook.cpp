@@ -3078,6 +3078,10 @@ namespace
 		int g_lastSoloVocalMode = -1;
 		int g_lastSoloVocalIndex = -1;
 		int g_lastSoloPostIndex = -1;
+		// [v77] character id at each slot of the sorted on-stage lineup, so a
+		// cut-scene SetLipSync(soloIndex) can be resolved back to a character and
+		// then to the lip table that the MV already loaded for it.
+		std::vector<int> g_lastPostIds;
 		int g_autoLiveModeOverride = -1;
 		int g_autoLiveSoloIndexOverride = -999;
 	int g_lastSoloIsSortIdols = 0;
@@ -4220,6 +4224,7 @@ namespace
 			}
 			if (fiIdx) try { fieldAfter = il2cpp_symbols::read_field<int>(_this, fiIdx); } catch (...) { fieldAfter = -999; }
 			if (fieldAfter >= 0) g_lastSoloPostIndex = fieldAfter;
+			g_lastPostIds = postIds;
 			Log(std::format("[v32] solo-map mode={} song={} chara={} orig={} post={} part={} hash={} new={} field={}->{} post=[{}] hashIds=[{}]",
 				mode, songId, charaId, origIndex, postIdx, partIdx, hashIdx, newIndex,
 				fieldBefore, fieldAfter, JoinIds(postIds), JoinIds(g_soloVoiceIds)));
@@ -5363,7 +5368,22 @@ namespace
 				CutSceneForceLip(_this);
 				CutSceneDataForceSolo(_this);
 				if (g_lipMode == "on" && nm.empty()) {
-					std::string good = CutSceneDataName(_this);
+					// [v77] the cut scene has no name of its own (data shared="" solo=""),
+					// but the MV already loaded one table per character.  soloIndex is a
+					// slot in the sorted on-stage lineup, so map it back to the character
+					// and reuse that character's own table - the game's own data.
+					int cid = -1;
+					std::string good;
+					{
+						std::lock_guard<std::mutex> lock(g_lipMutex);
+						if (soloIndex >= 0 && soloIndex < (int)g_lastPostIds.size())
+							cid = g_lastPostIds[soloIndex];
+						if (cid > 0) {
+							auto it = g_lipNameBySongChara.find(LipKey(cid));
+							if (it != g_lipNameBySongChara.end()) good = it->second;
+						}
+					}
+					if (good.empty()) good = CutSceneDataName(_this);
 					if (good.empty()) {
 						std::lock_guard<std::mutex> lock(g_lipMutex);
 						auto it = g_lipGoodNameBySong.find(g_lastSongId);
@@ -5371,7 +5391,12 @@ namespace
 					}
 					if (!good.empty()) {
 						useName = il2cpp_string_new(good.c_str());
-						Log(std::format("[v73] CutScene.SetLipSync name fallback -> \"{}\"", good));
+						Log(std::format("[v77] CutScene.SetLipSync name <- \"{}\" (soloIndex={} chara={})",
+							good, soloIndex, cid));
+					}
+					else {
+						Log(std::format("[v77] CutScene.SetLipSync no name (soloIndex={} chara={} lineup={})",
+							soloIndex, cid, (int)g_lastPostIds.size()));
 					}
 				}
 			}
