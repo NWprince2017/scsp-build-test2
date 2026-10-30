@@ -5330,6 +5330,70 @@ namespace
 		// [v76] CutScene.sceneCreateData -> Data { sharedLipSyncName, soloLipSyncName,
 		// cueSheetList, characterCreateData } - the cut scene asset carries its own
 		// lip table names, so nothing has to be invented.
+		// [v79] helpers: address a cut scene character directly.
+		//   CutScene.liveCharacterController._characters  -> Character[]
+		//   CutScene.sceneCreateData.characterCreateData  -> List<CharacterCreateData>
+		//     (each entry carries its own lipSyncName / animName)
+		int CsNameCharaId(const std::string& nm) {
+			if (nm.empty()) return -1;
+			const size_t slash = nm.rfind('/');
+			std::string base = (slash == std::string::npos) ? nm : nm.substr(slash + 1);
+			const size_t us = base.rfind('_');
+			if (us != std::string::npos && base.size() - us <= 3) base = base.substr(0, us);
+			auto isAlpha = [](char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); };
+			auto isDigit = [](char c) { return c >= '0' && c <= '9'; };
+			size_t p = base.size();
+			while (p > 0 && isAlpha(base[p - 1])) --p;
+			size_t q = p;
+			while (q > 0 && isDigit(base[q - 1])) --q;
+			if (q == p || q == 0) return -1;
+			try { return std::stoi(base.substr(q, p - q)); } catch (...) { return -1; }
+		}
+
+		std::string CsDataLipNameFor(void* cs, int wantCharaId, bool logAll) {
+			if (!cs || !RunwayDump::PlausiblePtr((uintptr_t)cs)) return "";
+			void* data = RunwayDump::ReadPtr(cs, "sceneCreateData");
+			if (!data || !RunwayDump::PlausiblePtr((uintptr_t)data)) return "";
+			void* list = RunwayDump::ReadPtr(data, "characterCreateData");
+			if (!list || !RunwayDump::PlausiblePtr((uintptr_t)list)) return "";
+			const int size = RunwayDump::ReadInt(list, "_size");
+			void* items = RunwayDump::ReadPtr(list, "_items");
+			if (size <= 0 || size > 64 || !items) return "";
+			std::string found;
+			for (int i = 0; i < size; ++i) {
+				void* ccd = nullptr;
+				try { ccd = il2cpp_symbols::array_get_value(items, i); } catch (...) { ccd = nullptr; }
+				if (!ccd || !RunwayDump::PlausiblePtr((uintptr_t)ccd)) continue;
+				const std::string ln = LipStrOf(RunwayDump::ReadPtr(ccd, "lipSyncName"));
+				if (logAll)
+					Log(std::format("[v79] ccd[{}] lip=\"{}\" anim=\"{}\"", i, ln,
+						LipStrOf(RunwayDump::ReadPtr(ccd, "animName"))));
+				if (ln.empty()) continue;
+				if (CsNameCharaId(ln) == wantCharaId) found = ln;
+			}
+			return found;
+		}
+
+		void* CsCharacterFor(void* cs, int charaId, std::string* dump) {
+			if (!cs || !RunwayDump::PlausiblePtr((uintptr_t)cs)) return nullptr;
+			void* lcc = RunwayDump::ReadPtr(cs, "liveCharacterController");
+			if (!lcc || !RunwayDump::PlausiblePtr((uintptr_t)lcc)) return nullptr;
+			void* arr = RunwayDump::ReadPtr(lcc, "_characters");
+			if (!arr || !RunwayDump::PlausiblePtr((uintptr_t)arr)) return nullptr;
+			int n = 0;
+			try { n = (int)il2cpp_array_length(arr); } catch (...) { return nullptr; }
+			void* hit = nullptr;
+			for (int i = 0; i < n && i < 32; ++i) {
+				void* ch = nullptr;
+				try { ch = il2cpp_symbols::array_get_value(arr, i); } catch (...) { ch = nullptr; }
+				if (!ch || !RunwayDump::PlausiblePtr((uintptr_t)ch)) continue;
+				const int cid = LipCharaId(ch);
+				if (dump) *dump += std::format("{}{}:{}", dump->empty() ? "" : ",", i, cid);
+				if (cid == charaId && !hit) hit = ch;
+			}
+			return hit;
+		}
+
 		std::string CutSceneDataInfo(void* cs) {
 			if (!cs || !RunwayDump::PlausiblePtr((uintptr_t)cs)) return "data=null";
 			void* data = RunwayDump::ReadPtr(cs, "sceneCreateData");
@@ -5486,6 +5550,28 @@ namespace
 			catch (...) { useName = name; }
 			Log(std::format("[v74] > CutScene.SetLipSync calling orig name={}", ViewDiag::ptr_str(useName)));
 			HOOK_CAST_CALL(void, CutScene_SetLipSync)(_this, mode, soloIndex, useName, startTime, mtd);
+			// [v79] the cut scene only ever lip-syncs its centre character.  Find the
+			// character that actually sings and give it the same cut-scene table, so
+			// the mouth that moves belongs to the voice that is heard.
+			if (g_lipMode == "on") {
+				try {
+					const int singer = LipSingerChara();
+					std::string chars;
+					void* ch = CsCharacterFor(_this, singer, &chars);
+					if (!chars.empty() && g_lipStateLogs < 500)
+						Log(std::format("[v79] cut-scene characters [{}] singer={}", chars, singer));
+					std::string csName = CsDataLipNameFor(_this, singer, g_lipStateLogs < 400);
+					if (csName.empty()) csName = CutSceneDataName(_this);
+					if (ch && !csName.empty()) {
+						HOOK_CAST_CALL(void, Character_SetupLipName)(ch, il2cpp_string_new(csName.c_str()), 0.0f, 0.0f);
+						Log(std::format("[v79] singer SetupLip \"{}\" -> ch={}", csName, singer));
+					}
+					else if (!ch) {
+						Log(std::format("[v79] singer character not found (singer={} chars=[{}])", singer, chars));
+					}
+				}
+				catch (...) {}
+			}
 			Log("[v74] < CutScene.SetLipSync done");
 		}
 
