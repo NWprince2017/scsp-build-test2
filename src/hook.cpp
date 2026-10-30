@@ -5170,6 +5170,57 @@ namespace
 			return nullptr;
 		}
 
+		// [v78] cut-scene lip tables are stored per character:
+		//   Summer/CS_118Summer_UCS_01_03meguru_01
+		//                 ^scene ^cutScene  ^^charaId(3=meguru) ^take
+		// The game always loads the "first slot" one, so swap that segment for the
+		// character that actually sings.  If the swapped table does not exist the
+		// caller reverts to the original name.
+		std::string LipIdolToken(int cid) {
+			if (cid <= 0) return "";
+			std::string nm;
+			{
+				std::lock_guard<std::mutex> lock(g_lipMutex);
+				auto it = g_lipNameBySongChara.find(LipKey(cid));
+				if (it != g_lipNameBySongChara.end()) nm = it->second;
+			}
+			if (nm.empty()) return "";
+			const size_t slash = nm.rfind('/');
+			std::string base = (slash == std::string::npos) ? nm : nm.substr(slash + 1);
+			const size_t us = base.rfind('_');
+			if (us != std::string::npos) base = base.substr(us + 1);
+			return base;
+		}
+
+		std::string SwapCsLipName(const std::string& nm, int cid, const std::string& token) {
+			if (nm.empty() || token.empty() || cid <= 0) return "";
+			const size_t slash = nm.rfind('/');
+			const std::string dir = (slash == std::string::npos) ? std::string() : nm.substr(0, slash + 1);
+			std::string base = (slash == std::string::npos) ? nm : nm.substr(slash + 1);
+			std::string tail;
+			const size_t us = base.rfind('_');
+			if (us != std::string::npos && base.size() - us == 3) {
+				tail = base.substr(us);
+				base = base.substr(0, us);
+			}
+			auto isAlpha = [](char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); };
+			auto isDigit = [](char c) { return c >= '0' && c <= '9'; };
+			size_t p = base.size();
+			while (p > 0 && isAlpha(base[p - 1])) --p;
+			if (p == base.size()) return "";
+			size_t q = p;
+			while (q > 0 && isDigit(base[q - 1])) --q;
+			return dir + base.substr(0, q) + std::format("{:02d}", cid) + token + tail;
+		}
+
+		// character that is currently singing (slot -> charaId via the lineup)
+		int LipSingerChara() {
+			std::lock_guard<std::mutex> lock(g_lipMutex);
+			const int idx = g_lastSoloPostIndex;
+			if (idx >= 0 && idx < (int)g_lastPostIds.size()) return g_lastPostIds[idx];
+			return -1;
+		}
+
 		HOOK_ORIG_TYPE Character_SetupLipName_orig;
 		void Character_SetupLipName_hook(void* _this, void* name, float offsetTime, float addTime, void* mtd) {
 			const int cid = _this ? LipCharaId(_this) : -1;
@@ -5183,7 +5234,39 @@ namespace
 				g_lipNameBySongChara[LipKey(cid)] = nm;
 			}
 			catch (...) {}
-			HOOK_CAST_CALL(void, Character_SetupLipName)(_this, name, offsetTime, addTime, mtd);
+			// [v78] a cut-scene table is baked per character; swap it for the singer.
+			void* useName = name;
+			std::string swapped;
+			try {
+				if (g_lipMode == "on" && nm.find("CS_") != std::string::npos) {
+					const int singer = LipSingerChara();
+					const std::string token = LipIdolToken(singer);
+					swapped = SwapCsLipName(nm, singer, token);
+					if (!swapped.empty() && swapped != nm) {
+						useName = il2cpp_string_new(swapped.c_str());
+						Log(std::format("[v78] cut-scene lip table \"{}\" -> \"{}\" (singer={})",
+							nm, swapped, singer));
+					}
+					else {
+						swapped.clear();
+						Log(std::format("[v78] cut-scene lip table kept \"{}\" (singer={} token=\"{}\")",
+							nm, singer, token));
+					}
+				}
+			}
+			catch (...) { useName = name; swapped.clear(); }
+			HOOK_CAST_CALL(void, Character_SetupLipName)(_this, useName, offsetTime, addTime, mtd);
+			if (!swapped.empty()) {
+				try {
+					void* ctrl = LipControllerOf(_this);
+					void* tbl = ctrl ? RunwayDump::ReadPtr(ctrl, "_lipSyncTable") : nullptr;
+					if (!LipTableUsable(tbl)) {
+						Log(std::format("[v78] swapped table missing -> revert to \"{}\"", nm));
+						HOOK_CAST_CALL(void, Character_SetupLipName)(_this, name, offsetTime, addTime, mtd);
+					}
+				}
+				catch (...) {}
+			}
 			try {
 				void* ctrl = LipControllerOf(_this);
 				void* table = ctrl ? RunwayDump::ReadPtr(ctrl, "_lipSyncTable") : nullptr;
