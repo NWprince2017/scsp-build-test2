@@ -5378,6 +5378,24 @@ namespace
 			return found;
 		}
 
+		// [v80] cut-scene characters carry their SLOT number in <CharacterID> (0..7),
+		// not the idol id, and the slot order matches the sorted on-stage lineup.
+		// `soloIndex` from SetLipSync is exactly such a slot, so this is the singer.
+		void* CsCharacterAt(void* cs, int slot) {
+			if (!cs || slot < 0 || !RunwayDump::PlausiblePtr((uintptr_t)cs)) return nullptr;
+			void* lcc = RunwayDump::ReadPtr(cs, "liveCharacterController");
+			if (!lcc || !RunwayDump::PlausiblePtr((uintptr_t)lcc)) return nullptr;
+			void* arr = RunwayDump::ReadPtr(lcc, "_characters");
+			if (!arr || !RunwayDump::PlausiblePtr((uintptr_t)arr)) return nullptr;
+			int n = 0;
+			try { n = (int)il2cpp_array_length(arr); } catch (...) { return nullptr; }
+			if (slot >= n) return nullptr;
+			void* ch = nullptr;
+			try { ch = il2cpp_symbols::array_get_value(arr, slot); } catch (...) { ch = nullptr; }
+			if (!ch || !RunwayDump::PlausiblePtr((uintptr_t)ch)) return nullptr;
+			return ch;
+		}
+
 		void* CsCharacterFor(void* cs, int charaId, std::string* dump) {
 			if (!cs || !RunwayDump::PlausiblePtr((uintptr_t)cs)) return nullptr;
 			void* lcc = RunwayDump::ReadPtr(cs, "liveCharacterController");
@@ -5561,17 +5579,20 @@ namespace
 				try {
 					const int singer = LipSingerChara();
 					std::string chars;
-					void* ch = CsCharacterFor(_this, singer, &chars);
+					(void)CsCharacterFor(_this, -999, &chars);   // dump slots only
+					void* ch = CsCharacterAt(_this, soloIndex);
+					if (!ch) ch = CsCharacterFor(_this, singer, nullptr);
 					if (!chars.empty() && g_lipStateLogs < 500)
-						Log(std::format("[v79] cut-scene characters [{}] singer={}", chars, singer));
+						Log(std::format("[v80] cut-scene characters [{}] singer={} slot={}", chars, singer, soloIndex));
 					std::string csName = CsDataLipNameFor(_this, singer, g_lipStateLogs < 400);
 					if (csName.empty()) csName = CutSceneDataName(_this);
 					if (ch && !csName.empty()) {
 						HOOK_CAST_CALL(void, Character_SetupLipName)(ch, il2cpp_string_new(csName.c_str()), 0.0f, 0.0f, g_setupLipStringMi);
-						Log(std::format("[v79] singer SetupLip \"{}\" -> ch={}", csName, singer));
+						Log(std::format("[v80] singer SetupLip \"{}\" -> slot={} (chara={})", csName, soloIndex, singer));
+						Log(std::format("[v80] slot {} controller {}", soloIndex, LipControllerState(LipControllerOf(ch))));
 					}
 					else if (!ch) {
-						Log(std::format("[v79] singer character not found (singer={} chars=[{}])", singer, chars));
+						Log(std::format("[v80] cut-scene slot {} missing (count={})", soloIndex, (int)chars.size()));
 					}
 				}
 				catch (...) {}
