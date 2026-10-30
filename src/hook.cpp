@@ -4215,6 +4215,32 @@ namespace
 			else if (mode == "next" && origIndex + 1 < (int)postIds.size()) newIndex = origIndex + 1;
 			auto fiIdx = FieldOf(k, "<VocalSeparatedSoloIndex>k__BackingField");
 			if (!fiIdx) fiIdx = FieldOf(k, "VocalSeparatedSoloIndex");
+			// [v81] "center": the cut-scene special performance only ever plays for
+			// the character in stage slot 0, so put the actual singer there instead of
+			// forcing a lip table onto someone else's slot.
+			if (mode == "center" && postArr && postIdx > 0) {
+				try {
+					const int n = (int)il2cpp_array_length(postArr);
+					if (postIdx < n) {
+						auto slots = (uintptr_t*)((uint8_t*)postArr + 32);   // SZARRAY data
+						const uintptr_t a = slots[0];
+						const uintptr_t b = slots[postIdx];
+						if (a && b) {
+							slots[0] = b;
+							slots[postIdx] = a;
+							newIndex = 0;
+							if ((int)postIds.size() > postIdx) {
+								const int tmp = postIds[0];
+								postIds[0] = postIds[postIdx];
+								postIds[postIdx] = tmp;
+								g_lastPostIds = postIds;
+							}
+							Log(std::format("[v81] center: stage slot 0 <-> {} (chara={} moved to front)", postIdx, charaId));
+						}
+					}
+				}
+				catch (...) {}
+			}
 			int fieldBefore = -999, fieldAfter = -999;
 			if (fiIdx) try { fieldBefore = il2cpp_symbols::read_field<int>(_this, fiIdx); } catch (...) { fieldBefore = -999; }
 			if (fiIdx && newIndex != origIndex && newIndex >= 0 &&
