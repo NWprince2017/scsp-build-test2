@@ -5154,6 +5154,7 @@ namespace
 		}
 
 		// find one specific SetupLip overload by the type name of its first parameter
+		void* g_setupLipStringMi = nullptr;   // [v79] MethodInfo of SetupLip(String, float, float)
 		void* FindSetupLipOverload(const char* wantFirstParam) {
 			auto* k = (Il2CppClass*)ViewDiag::find_class_anywhere("PRISM", "Character");
 			if (!k) { Log("[v71] PRISM.Character not found"); return nullptr; }
@@ -5165,7 +5166,10 @@ namespace
 				const char* t0 = il2cpp_symbols::il2cpp_method_get_param_type_name(mi, 0);
 				Log(std::format("[v71] SetupLip overload param0='{}' @ {}",
 					t0 ? t0 : "?", ViewDiag::ptr_str((void*)mi->methodPointer)));
-				if (t0 && strstr(t0, wantFirstParam)) return (void*)mi->methodPointer;
+				if (t0 && strstr(t0, wantFirstParam)) {
+					if (strcmp(wantFirstParam, "String") == 0) g_setupLipStringMi = mi;
+					return (void*)mi->methodPointer;
+				}
 			}
 			return nullptr;
 		}
@@ -5563,7 +5567,7 @@ namespace
 					std::string csName = CsDataLipNameFor(_this, singer, g_lipStateLogs < 400);
 					if (csName.empty()) csName = CutSceneDataName(_this);
 					if (ch && !csName.empty()) {
-						HOOK_CAST_CALL(void, Character_SetupLipName)(ch, il2cpp_string_new(csName.c_str()), 0.0f, 0.0f);
+						HOOK_CAST_CALL(void, Character_SetupLipName)(ch, il2cpp_string_new(csName.c_str()), 0.0f, 0.0f, g_setupLipStringMi);
 						Log(std::format("[v79] singer SetupLip \"{}\" -> ch={}", csName, singer));
 					}
 					else if (!ch) {
