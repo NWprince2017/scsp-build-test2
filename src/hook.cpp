@@ -4890,13 +4890,22 @@ namespace
 		// Animator object, and the real type of `id` is still unknown, so this group
 		// stays OFF unless lip.txt names it explicitly.
 		bool g_lipGroupCtrlSetup = false;
-		bool g_lipGroupCutScene = true;
+		// [v75] the cut-scene hook group is split per method: hooking all four at
+		// once made MV load crash with no hook ever firing (an inline patch next
+		// to another function is the classic cause), so each one is opt-in and
+		// only SetLipSync - the one that carries the real information - is on.
+		bool g_lipGroupCutScene = false;
+		bool g_lipCsSetup = false;
+		bool g_lipCsEnable = false;
+		bool g_lipCsReset = false;
+		bool g_lipCsSet = true;
 
 		void ParseLipGroups(const std::string& raw) {
 			if (raw.find(',') == std::string::npos) return;   // no group list -> default set
 			g_lipGroupSetup = g_lipGroupUpdate = g_lipGroupAsync = g_lipGroupExpIk = false;
 			g_lipGroupCtrlSetup = false;
 			g_lipGroupCutScene = false;
+			g_lipCsSetup = g_lipCsEnable = g_lipCsReset = g_lipCsSet = false;
 			size_t pos = 0;
 			for (;;) {
 				const size_t comma = raw.find(',', pos);
@@ -4906,10 +4915,17 @@ namespace
 				else if (tok == "async") g_lipGroupAsync = true;
 				else if (tok == "expik") g_lipGroupExpIk = true;
 				else if (tok == "ctrlsetup") g_lipGroupCtrlSetup = true;
-				else if (tok == "cutscene") g_lipGroupCutScene = true;
+				else if (tok == "cutscene") { g_lipGroupCutScene = true; g_lipCsSetup = g_lipCsEnable = g_lipCsReset = g_lipCsSet = true; }
+				else if (tok == "cs-setup") g_lipCsSetup = true;
+				else if (tok == "cs-enable") g_lipCsEnable = true;
+				else if (tok == "cs-reset") g_lipCsReset = true;
+				else if (tok == "cs-setslip") g_lipCsSet = true;
+				else if (tok == "diag" || tok == "on") g_lipCsSet = true;   // safe default: SetLipSync only
+				else if (tok == "nocutscene") { g_lipCsSetup = g_lipCsEnable = g_lipCsReset = g_lipCsSet = false; }
 				if (comma == std::string::npos) break;
 				pos = comma + 1;
 			}
+			g_lipGroupCutScene = g_lipCsSetup || g_lipCsEnable || g_lipCsReset || g_lipCsSet;
 		}
 		std::unordered_map<std::string, void*> g_lipTableBySongChara;
 		std::unordered_map<std::string, std::string> g_lipNameBySongChara;
@@ -5313,13 +5329,19 @@ namespace
 					Log(std::format("[v71] {} hooked @ {}", label, ViewDiag::ptr_str(addr)));
 				}
 			};
-			if (g_lipGroupCutScene) {
+			if (g_lipCsSetup) {
 				add("CutScene.SetupControllers", ViewDiag::find_method_anywhere("PRISM", "CutScene", "SetupControllers", 0),
 					(void*)CutScene_SetupControllers_hook, CutScene_SetupControllers_orig);
+			}
+			if (g_lipCsEnable) {
 				add("CutScene.OnEnable", ViewDiag::find_method_anywhere("PRISM", "CutScene", "OnEnable", 0),
 					(void*)CutScene_OnEnable_hook, CutScene_OnEnable_orig);
+			}
+			if (g_lipCsReset) {
 				add("CutScene.ResetLipSync", ViewDiag::find_method_anywhere("PRISM", "CutScene", "ResetLipSync", 0),
 					(void*)CutScene_ResetLipSync_hook, CutScene_ResetLipSync_orig);
+			}
+			if (g_lipCsSet) {
 				add("CutScene.SetLipSync", ViewDiag::find_method_anywhere("PRISM", "CutScene", "SetLipSync", 4),
 					(void*)CutScene_SetLipSync_hook, CutScene_SetLipSync_orig);
 			}
@@ -5364,7 +5386,7 @@ namespace
 			Log(std::format("[v71] lip mode='{}' raw='{}' groups setup={} update={} async={} expik={}",
 				mode, raw, g_lipGroupSetup ? 1 : 0, g_lipGroupUpdate ? 1 : 0,
 				g_lipGroupAsync ? 1 : 0, g_lipGroupExpIk ? 1 : 0));
-			Log(std::format("[v71] lip group ctrlsetup={} cutscene={}", g_lipGroupCtrlSetup ? 1 : 0, g_lipGroupCutScene ? 1 : 0));
+			Log(std::format("[v71] lip group ctrlsetup={} cutscene={} cs[setup={} enable={} reset={} setslip={}]", g_lipGroupCtrlSetup ? 1 : 0, g_lipGroupCutScene ? 1 : 0, g_lipCsSetup ? 1 : 0, g_lipCsEnable ? 1 : 0, g_lipCsReset ? 1 : 0, g_lipCsSet ? 1 : 0));
 
 			if (mode != "diag" && mode != "on") {
 				Log(std::format("[v34] lip hook off (lip.txt='{}')", raw));
