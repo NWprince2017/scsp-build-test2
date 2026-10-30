@@ -4883,9 +4883,13 @@ namespace
 		// hook groups - lip.txt may name a subset so a crash can be bisected
 		// without rebuilding:   diag,setup   diag,update   on,expik   ...
 		bool g_lipGroupSetup = true;
-		bool g_lipGroupUpdate = true;
-		bool g_lipGroupAsync = true;
-		bool g_lipGroupExpIk = true;
+		bool g_lipGroupUpdate = false;
+		// [v76] the three LiveSubSequence.<*Async>d__*.MoveNext detours are the
+		// proven crasher for cut-scene MVs: with only those three installed (and
+		// not a single one of them ever firing) song 118 dies during MV load.
+		// They stay available for bisecting but are OFF by default now.
+		bool g_lipGroupAsync = false;
+		bool g_lipGroupExpIk = false;
 		// LipSyncController.Setup(table, id, _faceAnimator) - the third argument is an
 		// Animator object, and the real type of `id` is still unknown, so this group
 		// stays OFF unless lip.txt names it explicitly.
@@ -4896,7 +4900,10 @@ namespace
 		// only SetLipSync - the one that carries the real information - is on.
 		bool g_lipGroupCutScene = false;
 		bool g_lipCsSetup = false;
-		bool g_lipCsEnable = false;
+		// [v76] OnEnable is now proven safe (installed together with SetLipSync it
+		// never crashed), and it is where the cut scene hands out sceneCreateData -
+		// the Data object that carries sharedLipSyncName / soloLipSyncName.
+		bool g_lipCsEnable = true;
 		bool g_lipCsReset = false;
 		bool g_lipCsSet = true;
 
@@ -5232,6 +5239,53 @@ namespace
 			catch (...) { return ""; }
 		}
 
+		// [v76] CutScene.sceneCreateData -> Data { sharedLipSyncName, soloLipSyncName,
+		// cueSheetList, characterCreateData } - the cut scene asset carries its own
+		// lip table names, so nothing has to be invented.
+		std::string CutSceneDataInfo(void* cs) {
+			if (!cs || !RunwayDump::PlausiblePtr((uintptr_t)cs)) return "data=null";
+			void* data = RunwayDump::ReadPtr(cs, "sceneCreateData");
+			if (!data || !RunwayDump::PlausiblePtr((uintptr_t)data)) return "data=null";
+			const std::string shared = LipStrOf(RunwayDump::ReadPtr(data, "sharedLipSyncName"));
+			const std::string solo = LipStrOf(RunwayDump::ReadPtr(data, "soloLipSyncName"));
+			int cues = -1;
+			void* cue = RunwayDump::ReadPtr(data, "cueSheetList");
+			if (cue && RunwayDump::PlausiblePtr((uintptr_t)cue)) {
+				cues = RunwayDump::ReadInt(cue, "_size");
+				if (cues < 0) { try { cues = (int)il2cpp_array_length(cue); } catch (...) { cues = -1; } }
+			}
+			return std::format("shared=\"{}\" solo=\"{}\" cues={}", shared, solo, cues);
+		}
+
+		// "on" only: a cut scene in solo/part mode is driven by soloLipSyncName.
+		// When that one is empty but the shared name is not, hand the shared table
+		// over instead - still the game's own data, just reused.
+		void CutSceneDataForceSolo(void* cs) {
+			if (g_lipMode != "on" || !cs || !RunwayDump::PlausiblePtr((uintptr_t)cs)) return;
+			void* data = RunwayDump::ReadPtr(cs, "sceneCreateData");
+			if (!data || !RunwayDump::PlausiblePtr((uintptr_t)data)) return;
+			if (!LipStrOf(RunwayDump::ReadPtr(data, "soloLipSyncName")).empty()) return;
+			const std::string shared = LipStrOf(RunwayDump::ReadPtr(data, "sharedLipSyncName"));
+			if (shared.empty()) return;
+			auto fi = FieldOf(KlassOf(data), "soloLipSyncName");
+			if (!fi) return;
+			try {
+				il2cpp_field_set_value(data, fi, il2cpp_string_new(shared.c_str()));
+				Log(std::format("[v76] cut-scene soloLipSyncName <- shared \"{}\"", shared));
+			}
+			catch (...) {}
+		}
+
+		// best lip table name the cut scene itself carries (solo first, then shared)
+		std::string CutSceneDataName(void* cs) {
+			if (!cs || !RunwayDump::PlausiblePtr((uintptr_t)cs)) return "";
+			void* data = RunwayDump::ReadPtr(cs, "sceneCreateData");
+			if (!data || !RunwayDump::PlausiblePtr((uintptr_t)data)) return "";
+			std::string s = LipStrOf(RunwayDump::ReadPtr(data, "soloLipSyncName"));
+			if (s.empty()) s = LipStrOf(RunwayDump::ReadPtr(data, "sharedLipSyncName"));
+			return s;
+		}
+
 		std::string CutSceneInfo(void* cs) {
 			if (!cs || !RunwayDump::PlausiblePtr((uintptr_t)cs)) return "cs=null";
 			return std::format("forcedLipSolo={} mode={} movieOnly={} endFrame={}",
@@ -5256,9 +5310,12 @@ namespace
 		HOOK_ORIG_TYPE CutScene_SetupControllers_orig;
 		void CutScene_SetupControllers_hook(void* _this, void* mtd) {
 			try {
-				if (g_lipStateLogs++ < 500)
+				if (g_lipStateLogs++ < 500) {
 					Log(std::format("[v73] CutScene.SetupControllers {}", CutSceneInfo(_this)));
+					Log(std::format("[v76] CutScene.SetupControllers data {}", CutSceneDataInfo(_this)));
+				}
 				CutSceneForceLip(_this);
+				CutSceneDataForceSolo(_this);
 			}
 			catch (...) {}
 			HOOK_CAST_CALL(void, CutScene_SetupControllers)(_this, mtd);
@@ -5268,9 +5325,12 @@ namespace
 		HOOK_ORIG_TYPE CutScene_OnEnable_orig;
 		void CutScene_OnEnable_hook(void* _this, void* mtd) {
 			try {
-				if (g_lipStateLogs++ < 500)
+				if (g_lipStateLogs++ < 500) {
 					Log(std::format("[v73] CutScene.OnEnable {}", CutSceneInfo(_this)));
+					Log(std::format("[v76] CutScene.OnEnable data {}", CutSceneDataInfo(_this)));
+				}
 				CutSceneForceLip(_this);
+				CutSceneDataForceSolo(_this);
 			}
 			catch (...) {}
 			HOOK_CAST_CALL(void, CutScene_OnEnable)(_this, mtd);
@@ -5301,9 +5361,10 @@ namespace
 						mode, soloIndex, nm, startTime, CutSceneInfo(_this)));
 				}
 				CutSceneForceLip(_this);
+				CutSceneDataForceSolo(_this);
 				if (g_lipMode == "on" && nm.empty()) {
-					std::string good;
-					{
+					std::string good = CutSceneDataName(_this);
+					if (good.empty()) {
 						std::lock_guard<std::mutex> lock(g_lipMutex);
 						auto it = g_lipGoodNameBySong.find(g_lastSongId);
 						if (it != g_lipGoodNameBySong.end()) good = it->second;
