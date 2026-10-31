@@ -4785,7 +4785,7 @@ namespace
 
 		void Character_UpdateLip_hook(void* _this, float dt, void* mtd) {
 			try {
-				if (_this && g_lipMode == "on") LipTryInjectMvTable(_this);
+				if (_this) LipTryInjectMvTable(_this);
 			}
 			catch (...) {}
 			return HOOK_CAST_CALL(void, Character_UpdateLip)(_this, dt, mtd);
@@ -5338,7 +5338,7 @@ namespace
 		std::unordered_set<void*> g_mvInjected;
 
 		void LipTryInjectMvTable(void* character) {
-			if (!character || !g_setupLipStringMi) return;
+			if (!character || !g_setupLipStringMi || g_lipMode != "on") return;
 			void* controller = LipControllerOf(character);
 			if (!controller) return;
 			if (LipTableOf(controller)) return;
@@ -5352,11 +5352,18 @@ namespace
 				if (!g_mvInjected.insert(character).second) return;
 			}
 			Log(std::format("[v82] normal-part lip table \"{}\" -> chara={}", name, cid));
-			HOOK_CAST_CALL(void, Character_SetupLipName)(character, il2cpp_string_new(name.c_str()), 0.0f, 0.0f, g_setupLipStringMi);
+			// call through the MethodInfo so this does not depend on where the
+			// string-overload detour happens to be declared in this file
+			auto* mi = (MethodInfo*)g_setupLipStringMi;
+			if (mi && mi->methodPointer) {
+				auto fn = (void(*)(void*, void*, float, float, void*))mi->methodPointer;
+				fn(character, il2cpp_string_new(name.c_str()), 0.0f, 0.0f, g_setupLipStringMi);
+			}
 			try { Log(std::format("[v82] after inject {}", LipControllerState(LipControllerOf(character)))); } catch (...) {}
 		}
 
 		HOOK_ORIG_TYPE Character_SetupLipName_orig;
+		void Character_SetupLipName_hook(void* _this, void* name, float offsetTime, float addTime, void* mtd);
 		void Character_SetupLipName_hook(void* _this, void* name, float offsetTime, float addTime, void* mtd) {
 			const int cid = _this ? LipCharaId(_this) : -1;
 			const std::string nm = Il2CppStrOf(name);
