@@ -3082,6 +3082,11 @@ namespace
 		// cut-scene SetLipSync(soloIndex) can be resolved back to a character and
 		// then to the lip table that the MV already loaded for it.
 		std::vector<int> g_lastPostIds;
+		// [v82] scene alias of the running MV ("118_Summer") and the idol name token
+		// learned from the game's own lip table names ("Summer/summer_fuyuko").
+		std::string g_lastMvSceneName;
+		std::unordered_map<int, std::string> g_lipTokenByChara;
+		bool g_lipTokensLoaded = false;
 		int g_autoLiveModeOverride = -1;
 		int g_autoLiveSoloIndexOverride = -999;
 	int g_lastSoloIsSortIdols = 0;
@@ -3149,6 +3154,7 @@ namespace
 		std::string mvScene;
 		try { mvSongId = SoloUnlock::ReadSongIdFromMvStage(mvStage); } catch (...) {}
 		try { mvScene = SoloUnlock::ReadMvSceneFromMvStage(mvStage); } catch (...) {}
+		if (!mvScene.empty()) g_lastMvSceneName = mvScene;   // [v82] for the solo lip table name
 		try {
 			auto idolsLength = onStageIdols ? il2cpp_array_length(onStageIdols) : 0;
 			if (onStageIdols && vocalSeparatedSoloIndex >= 0 && (uint32_t)vocalSeparatedSoloIndex < idolsLength) {
@@ -4751,6 +4757,7 @@ namespace
 		std::string LipTableInfo(void* table);
 		std::string LipListInfo(void* lips);
 		std::string LipValues(void* lips);
+		void LipTryInjectMvTable(void* character);   // [v82] normal-part lips for the soloist
 
 		bool LipPatchController(void* controller, const char* source) {
 			if (!controller) return false;
@@ -4778,22 +4785,14 @@ namespace
 
 		void Character_UpdateLip_hook(void* _this, float dt, void* mtd) {
 			try {
-				if (_this) {
-					auto fi = FieldOf(KlassOf(_this), "_lipSyncController");
-					if (fi) {
-						void* controller = nullptr;
-						try { controller = il2cpp_symbols::read_field<void*>(_this, fi); }
-						catch (...) { controller = nullptr; }
-						LipPatchController(controller, "Character.UpdateLip");
-					}
-				}
+				if (_this && g_lipMode == "on") LipTryInjectMvTable(_this);
 			}
 			catch (...) {}
 			return HOOK_CAST_CALL(void, Character_UpdateLip)(_this, dt, mtd);
 		}
 
 		void LipSyncController_UpdateLip_hook(void* _this, float dt, void* mtd) {
-			try { LipPatchController(_this, "LipSyncController.UpdateLip"); } catch (...) {}
+			(void)_this;
 			return HOOK_CAST_CALL(void, LipSyncController_UpdateLip)(_this, dt, mtd);
 		}
 
@@ -4914,7 +4913,7 @@ namespace
 		// hook groups - lip.txt may name a subset so a crash can be bisected
 		// without rebuilding:   diag,setup   diag,update   on,expik   ...
 		bool g_lipGroupSetup = true;
-		bool g_lipGroupUpdate = false;
+		bool g_lipGroupUpdate = true;   // [v82] Character.UpdateLip drives the soloist's normal-part lips
 		// [v76] the three LiveSubSequence.<*Async>d__*.MoveNext detours are the
 		// proven crasher for cut-scene MVs: with only those three installed (and
 		// not a single one of them ever firing) song 118 dies during MV load.
@@ -5251,10 +5250,117 @@ namespace
 			return -1;
 		}
 
+		// [v82] normal-part lips for the soloist.
+		// The MV table for one character is  "<Alias>/<alias_lower>_<token>"
+		// (Summer/summer_fuyuko, NightP/nightp_mikoto).  The token is learned from
+		// the game's own table names and cached in lip-idols.txt so a solo-only run
+		// can use it too.
+		void LipLoadTokens() {
+			g_lipTokensLoaded = true;
+			FILE* f = fopen("lip-idols.txt", "r");
+			if (!f) return;
+			char line[128]{};
+			while (fgets(line, sizeof(line), f)) {
+				std::string s = line;
+				const size_t eq = s.find('=');
+				if (eq == std::string::npos) continue;
+				std::string cidStr = s.substr(0, eq);
+				std::string token = s.substr(eq + 1);
+				while (!token.empty() && (token.back() == '\n' || token.back() == '\r' || token.back() == ' ')) token.pop_back();
+				if (token.empty() || cidStr.empty()) continue;
+				bool alpha = true;
+				for (char c : token) if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) { alpha = false; break; }
+				if (!alpha) continue;
+				try { g_lipTokenByChara[std::stoi(cidStr)] = token; } catch (...) {}
+			}
+			fclose(f);
+		}
+
+		void LipLearnToken(int cid, const std::string& nm) {
+			if (cid <= 0 || nm.empty()) return;
+			const size_t slash = nm.rfind('/');
+			std::string base = (slash == std::string::npos) ? nm : nm.substr(slash + 1);
+			std::string token;
+			if (base.rfind("CS_", 0) == 0) {
+				// CS_118Summer_UCS_01_18fuyuko_01 -> drop "_01", then the digits
+				const size_t us = base.rfind('_');
+				if (us != std::string::npos && base.size() - us <= 3) base = base.substr(0, us);
+				size_t p = base.size();
+				while (p > 0 && !(base[p - 1] >= '0' && base[p - 1] <= '9')) --p;
+				token = base.substr(p);
+			}
+			else {
+				const size_t us = base.rfind('_');
+				if (us == std::string::npos) return;
+				token = base.substr(us + 1);
+			}
+			if (token.empty() || token.size() > 24) return;
+			for (char c : token) if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) return;
+			bool changed = false;
+			{
+				std::lock_guard<std::mutex> lock(g_lipMutex);
+				auto it = g_lipTokenByChara.find(cid);
+				if (it == g_lipTokenByChara.end() || it->second != token) {
+					g_lipTokenByChara[cid] = token;
+					changed = true;
+				}
+			}
+			if (changed) {
+				Log(std::format("[v82] idol token chara={} = \"{}\"", cid, token));
+				try {
+					FILE* f = fopen("lip-idols.txt", "a");
+					if (f) { fprintf(f, "%d=%s\n", cid, token.c_str()); fclose(f); }
+				}
+				catch (...) {}
+			}
+		}
+
+		std::string LipMvTableNameFor(int cid) {
+			if (cid <= 0 || g_lastMvSceneName.empty()) return "";
+			std::string token;
+			{
+				std::lock_guard<std::mutex> lock(g_lipMutex);
+				if (!g_lipTokensLoaded) LipLoadTokens();
+				auto it = g_lipTokenByChara.find(cid);
+				if (it != g_lipTokenByChara.end()) token = it->second;
+			}
+			if (token.empty()) return "";
+			std::string alias = g_lastMvSceneName;
+			const size_t us = alias.find('_');
+			if (us != std::string::npos) alias = alias.substr(us + 1);
+			if (alias.empty()) return "";
+			std::string lower = alias;
+			for (auto& c : lower) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+			return alias + "/" + lower + "_" + token;
+		}
+
+		std::unordered_set<void*> g_csCharacters;   // cut-scene cast: never inject MV tables
+		std::unordered_set<void*> g_mvInjected;
+
+		void LipTryInjectMvTable(void* character) {
+			if (!character || !g_setupLipStringMi) return;
+			void* controller = LipControllerOf(character);
+			if (!controller) return;
+			if (LipTableOf(controller)) return;
+			const int cid = LipCharaId(character);
+			if (cid <= 0) return;
+			const std::string name = LipMvTableNameFor(cid);
+			if (name.empty()) return;      // idol token not known yet - retry next frame
+			{
+				std::lock_guard<std::mutex> lock(g_lipMutex);
+				if (g_csCharacters.count(character)) return;
+				if (!g_mvInjected.insert(character).second) return;
+			}
+			Log(std::format("[v82] normal-part lip table \"{}\" -> chara={}", name, cid));
+			HOOK_CAST_CALL(void, Character_SetupLipName)(character, il2cpp_string_new(name.c_str()), 0.0f, 0.0f, g_setupLipStringMi);
+			try { Log(std::format("[v82] after inject {}", LipControllerState(LipControllerOf(character)))); } catch (...) {}
+		}
+
 		HOOK_ORIG_TYPE Character_SetupLipName_orig;
 		void Character_SetupLipName_hook(void* _this, void* name, float offsetTime, float addTime, void* mtd) {
 			const int cid = _this ? LipCharaId(_this) : -1;
 			const std::string nm = Il2CppStrOf(name);
+			try { LipLearnToken(cid, nm); } catch (...) {}
 			try {
 				if (g_lipSetupLogs++ < 120) {
 					Log(std::format("[v71] SetupLip(name) ch={} mode={} song={} name=\"{}\" offset={:.3f} add={:.3f}",
@@ -5420,6 +5526,23 @@ namespace
 			try { ch = il2cpp_symbols::array_get_value(arr, slot); } catch (...) { ch = nullptr; }
 			if (!ch || !RunwayDump::PlausiblePtr((uintptr_t)ch)) return nullptr;
 			return ch;
+		}
+
+		// remember the cut-scene cast so LipTryInjectMvTable never touches them
+		void CsRememberCharacters(void* cs) {
+			if (!cs || !RunwayDump::PlausiblePtr((uintptr_t)cs)) return;
+			void* lcc = RunwayDump::ReadPtr(cs, "liveCharacterController");
+			if (!lcc || !RunwayDump::PlausiblePtr((uintptr_t)lcc)) return;
+			void* arr = RunwayDump::ReadPtr(lcc, "_characters");
+			if (!arr || !RunwayDump::PlausiblePtr((uintptr_t)arr)) return;
+			int n = 0;
+			try { n = (int)il2cpp_array_length(arr); } catch (...) { return; }
+			std::lock_guard<std::mutex> lock(g_lipMutex);
+			for (int i = 0; i < n && i < 32; ++i) {
+				void* ch = nullptr;
+				try { ch = il2cpp_symbols::array_get_value(arr, i); } catch (...) { ch = nullptr; }
+				if (ch) g_csCharacters.insert(ch);
+			}
 		}
 
 		void* CsCharacterFor(void* cs, int charaId, std::string* dump) {
@@ -5606,6 +5729,7 @@ namespace
 					const int singer = LipSingerChara();
 					std::string chars;
 					(void)CsCharacterFor(_this, -999, &chars);   // dump slots only
+					try { CsRememberCharacters(_this); } catch (...) {}
 					void* ch = CsCharacterAt(_this, soloIndex);
 					if (!ch) ch = CsCharacterFor(_this, singer, nullptr);
 					if (!chars.empty() && g_lipStateLogs < 500)
