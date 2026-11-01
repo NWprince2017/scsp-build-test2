@@ -5554,6 +5554,7 @@ namespace
 		}
 
 
+		void LipSoloDrive(float time) {
 			if (g_lipMode != "on" || !g_setupLipStringMi || !g_lipUpdateMethod) return;
 			if (g_lastSoloVocalMode != 2) return;    // only solo mode lacks lips
 			if (g_csActive > 0) return;              // special performance keeps its own lips
