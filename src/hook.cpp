@@ -5281,18 +5281,29 @@ namespace
 			const size_t slash = nm.rfind('/');
 			std::string base = (slash == std::string::npos) ? nm : nm.substr(slash + 1);
 			std::string token;
+			bool authoritative = false;
 			if (base.rfind("CS_", 0) == 0) {
-				// CS_118Summer_UCS_01_18fuyuko_01 -> drop "_01", then the digits
+				// CS_118Summer_UCS_01_18fuyuko_01 -> drop "_01", then the digits.
+				// The digits are the charaId, so this pair is trustworthy.
 				const size_t us = base.rfind('_');
 				if (us != std::string::npos && base.size() - us <= 3) base = base.substr(0, us);
 				size_t p = base.size();
 				while (p > 0 && !(base[p - 1] >= '0' && base[p - 1] <= '9')) --p;
 				token = base.substr(p);
+				size_t q = p;
+				while (q > 0 && base[q - 1] >= '0' && base[q - 1] <= '9') --q;
+				int digits = 0;
+				try { digits = p > q ? std::stoi(base.substr(q, p - q)) : 0; } catch (...) { digits = 0; }
+				if (digits != cid) return;          // "<other>fuyuko" - not this character
+				authoritative = true;
 			}
 			else {
+				// MV tables are "<Alias>/<alias>_<token>".  Only learn real names:
+				// short stems like dyesky_c / dyesky_all are per-MV placeholders.
 				const size_t us = base.rfind('_');
 				if (us == std::string::npos) return;
 				token = base.substr(us + 1);
+				if (token.size() < 4) return;
 			}
 			if (token.empty() || token.size() > 24) return;
 			for (char c : token) if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) return;
@@ -5300,16 +5311,23 @@ namespace
 			{
 				std::lock_guard<std::mutex> lock(g_lipMutex);
 				auto it = g_lipTokenByChara.find(cid);
-				if (it == g_lipTokenByChara.end() || it->second != token) {
+				if (it == g_lipTokenByChara.end() || (it->second != token && (authoritative || it->second.size() < 4))) {
 					g_lipTokenByChara[cid] = token;
 					changed = true;
 				}
 			}
 			if (changed) {
-				Log(std::format("[v82] idol token chara={} = \"{}\"", cid, token));
+				Log(std::format("[v82] idol token chara={} = \"{}\" (from \"{}\")", cid, token, nm));
 				try {
-					FILE* f = fopen("lip-idols.txt", "a");
-					if (f) { fprintf(f, "%d=%s\n", cid, token.c_str()); fclose(f); }
+					// rewrite the whole cache so stale/guessed entries cannot pile up
+					std::string all;
+					{
+						std::lock_guard<std::mutex> lock(g_lipMutex);
+						for (auto& kv : g_lipTokenByChara)
+							all += std::format("{}={}\n", kv.first, kv.second);
+					}
+					FILE* f = fopen("lip-idols.txt", "w");
+					if (f) { fwrite(all.data(), 1, all.size(), f); fclose(f); }
 				}
 				catch (...) {}
 			}
@@ -5335,23 +5353,27 @@ namespace
 		}
 
 		std::unordered_set<void*> g_csCharacters;   // cut-scene cast: never inject MV tables
-		std::unordered_set<void*> g_mvInjected;
+		std::unordered_map<void*, int> g_mvInjectTries;
 
 		void LipTryInjectMvTable(void* character) {
 			if (!character || !g_setupLipStringMi || g_lipMode != "on") return;
 			void* controller = LipControllerOf(character);
 			if (!controller) return;
-			if (LipTableOf(controller)) return;
+			if (LipTableUsable(LipTableOf(controller))) return;   // already driven
 			const int cid = LipCharaId(character);
 			if (cid <= 0) return;
+			const int singer = LipSingerChara();
+			if (singer <= 0 || cid != singer) return;             // only the soloist sings
 			const std::string name = LipMvTableNameFor(cid);
-			if (name.empty()) return;      // idol token not known yet - retry next frame
+			if (name.empty()) return;                             // idol token not known yet
+			int tries = 0;
 			{
 				std::lock_guard<std::mutex> lock(g_lipMutex);
 				if (g_csCharacters.count(character)) return;
-				if (!g_mvInjected.insert(character).second) return;
+				tries = ++g_mvInjectTries[character];
 			}
-			Log(std::format("[v82] normal-part lip table \"{}\" -> chara={}", name, cid));
+			if (tries > 46 || (tries > 1 && (tries - 1) % 15 != 0)) return;   // throttled retries
+			Log(std::format("[v83] normal-part lip table \"{}\" -> chara={} (try {})", name, cid, tries));
 			// call through the MethodInfo so this does not depend on where the
 			// string-overload detour happens to be declared in this file
 			auto* mi = (MethodInfo*)g_setupLipStringMi;
@@ -5359,7 +5381,12 @@ namespace
 				auto fn = (void(*)(void*, void*, float, float, void*))mi->methodPointer;
 				fn(character, il2cpp_string_new(name.c_str()), 0.0f, 0.0f, g_setupLipStringMi);
 			}
-			try { Log(std::format("[v82] after inject {}", LipControllerState(LipControllerOf(character)))); } catch (...) {}
+			try {
+				void* t = LipTableOf(LipControllerOf(character));
+				Log(std::format("[v83]   result {} usable={}", LipControllerState(LipControllerOf(character)),
+					LipTableUsable(t) ? 1 : 0));
+			}
+			catch (...) {}
 		}
 
 		HOOK_ORIG_TYPE Character_SetupLipName_orig;
