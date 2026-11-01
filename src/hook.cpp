@@ -5420,6 +5420,100 @@ namespace
 			catch (...) {}
 		}
 
+		// ---------------------------------------------------------------
+		// [v85] solo MVs have no lip update at all.
+		//
+		//   In vocal-separated solo mode the game never calls
+		//   Character.UpdateLip and never hands the MV characters a lip
+		//   table, so nothing moves outside the special performance.
+		//   So we (a) give the soloist her own MV table and (b) run
+		//   LipSyncController.UpdateLip ourselves once per frame, using the
+		//   timeline delta that LiveSubSequence.ProcessTime receives.
+		void* g_lccInstance = nullptr;          // PRISM.LiveCharacterController
+		void* g_lipDriveChars = nullptr;        // last seen _characters array
+		std::unordered_set<void*> g_lipInjectTried;
+		std::unordered_set<void*> g_lipDriving;
+		float g_lipLastTime = -1.0f;
+		int g_lipDriveLogs = 0;
+		int g_lipDriveTicks = 0;
+		int g_csActive = 0;                     // >0 while a cut scene is enabled
+		void LipSoloDrive(float time);
+
+		HOOK_ORIG_TYPE LiveSubSequence_ProcessTime_orig;
+		void LiveSubSequence_ProcessTime_hook(void* _this, float time, void* mtd) {
+			try { LipSoloDrive(time); } catch (...) {}
+			return HOOK_CAST_CALL(void, LiveSubSequence_ProcessTime)(_this, time, mtd);
+		}
+
+		HOOK_ORIG_TYPE LiveCharacterController_get_characters_orig;
+		void* LiveCharacterController_get_characters_hook(void* _this, void* mtd) {
+			try {
+				if (_this && RunwayDump::PlausiblePtr((uintptr_t)_this)) g_lccInstance = _this;
+			} catch (...) {}
+			return HOOK_CAST_CALL(void*, LiveCharacterController_get_characters)(_this, mtd);
+		}
+
+		void LipSoloDrive(float time) {
+			if (g_lipMode != "on" || !g_setupLipStringMi || !g_lipUpdateMethod) return;
+			if (g_lastSoloVocalMode != 2) return;    // only solo mode lacks lips
+			if (g_csActive > 0) return;              // special performance keeps its own lips
+			const int singer = LipSingerChara();
+			if (singer <= 0) return;
+			void* lcc = g_lccInstance;
+			if (!lcc || !RunwayDump::PlausiblePtr((uintptr_t)lcc)) return;
+			void* arr = nullptr;
+			try { arr = RunwayDump::ReadPtr(lcc, "_characters"); } catch (...) { arr = nullptr; }
+			if (!arr || !RunwayDump::PlausiblePtr((uintptr_t)arr)) return;
+			float dt = 0.0f;
+			if (g_lipLastTime >= 0.0f && time > g_lipLastTime) {
+				dt = time - g_lipLastTime;
+				if (dt > 0.25f) dt = 0.25f;
+			}
+			g_lipLastTime = time;
+			const int ticks = ++g_lipDriveTicks;
+			if (arr != g_lipDriveChars) {
+				g_lipDriveChars = arr;
+				g_lipInjectTried.clear();
+				g_lipDriving.clear();
+			}
+			int n = 0;
+			try { n = (int)il2cpp_array_length(arr); } catch (...) { return; }
+			if (ticks <= 3)
+				Log(std::format("[v85] drive tick #{} time={:.3f} chars={} singer={} dt={:.4f}", ticks, time, n, singer, dt));
+			for (int i = 0; i < n && i < 32; ++i) {
+				void* ch = nullptr;
+				try { ch = il2cpp_symbols::array_get_value(arr, i); } catch (...) { continue; }
+				if (!ch) continue;
+				void* ctrl = LipControllerOf(ch);
+				if (!ctrl) continue;
+				int cid = LipCtlCharaId(ctrl);
+				if (cid <= 0) cid = LipCharaId(ch);
+				if (cid != singer) continue;
+				if (!LipTableUsable(LipTableOf(ctrl))) {
+					if (g_lipInjectTried.count(ch)) continue;
+					g_lipInjectTried.insert(ch);
+					const std::string name = LipMvTableNameFor(cid);
+					Log(std::format("[v85] soloist slot={} chara={} has no MV table -> inject \"{}\"", i, cid, name));
+					if (name.empty()) continue;
+					auto* smi = (MethodInfo*)g_setupLipStringMi;
+					if (smi && smi->methodPointer) {
+						auto fn = (void(*)(void*, void*, float, float, void*))smi->methodPointer;
+						fn(ch, il2cpp_string_new(name.c_str()), 0.0f, 0.0f, g_setupLipStringMi);
+					}
+					const bool ok = LipTableUsable(LipTableOf(ctrl));
+					Log(std::format("[v85]   after setup usable={} {}", ok ? 1 : 0, LipControllerState(ctrl)));
+					if (!ok) continue;
+				}
+				g_lipDriving.insert(ctrl);
+				if (dt <= 0.0f) continue;
+				if (g_lipDriveLogs < 6) {
+					++g_lipDriveLogs;
+					Log(std::format("[v85] drive #{} chara={} dt={:.4f} {}", g_lipDriveLogs, cid, dt, LipControllerState(ctrl)));
+				}
+				HOOK_CAST_CALL(void, LipSyncController_UpdateLip)(ctrl, dt, g_lipUpdateMethod);
+			}
+		}
+
 		HOOK_ORIG_TYPE Character_SetupLipName_orig;
 		void Character_SetupLipName_hook(void* _this, void* name, float offsetTime, float addTime, void* mtd);
 		void Character_SetupLipName_hook(void* _this, void* name, float offsetTime, float addTime, void* mtd) {
@@ -5598,6 +5692,7 @@ namespace
 			if (!cs || !RunwayDump::PlausiblePtr((uintptr_t)cs)) return;
 			void* lcc = RunwayDump::ReadPtr(cs, "liveCharacterController");
 			if (!lcc || !RunwayDump::PlausiblePtr((uintptr_t)lcc)) return;
+			g_lccInstance = lcc;                     // [v85] same controller drives the MV
 			void* arr = RunwayDump::ReadPtr(lcc, "_characters");
 			if (!arr || !RunwayDump::PlausiblePtr((uintptr_t)arr)) return;
 			int n = 0;
@@ -5713,6 +5808,7 @@ namespace
 		HOOK_ORIG_TYPE CutScene_OnEnable_orig;
 		void CutScene_OnEnable_hook(void* _this, void* mtd) {
 			try {
+				if (g_csActive < 8) ++g_csActive;
 				if (g_lipStateLogs++ < 500) {
 					Log(std::format("[v73] CutScene.OnEnable {}", CutSceneInfo(_this)));
 					Log(std::format("[v76] CutScene.OnEnable data {}", CutSceneDataInfo(_this)));
@@ -5723,6 +5819,12 @@ namespace
 			catch (...) {}
 			HOOK_CAST_CALL(void, CutScene_OnEnable)(_this, mtd);
 			Log("[v74] < CutScene.OnEnable done");
+		}
+
+		HOOK_ORIG_TYPE CutScene_OnDisable_orig;
+		void CutScene_OnDisable_hook(void* _this, void* mtd) {
+			try { if (g_csActive > 0) --g_csActive; } catch (...) {}
+			HOOK_CAST_CALL(void, CutScene_OnDisable)(_this, mtd);
 		}
 
 		HOOK_ORIG_TYPE CutScene_ResetLipSync_orig;
@@ -5831,6 +5933,8 @@ namespace
 			if (g_lipCsEnable) {
 				add("CutScene.OnEnable", ViewDiag::find_method_anywhere("PRISM", "CutScene", "OnEnable", 0),
 					(void*)CutScene_OnEnable_hook, CutScene_OnEnable_orig);
+				add("CutScene.OnDisable", ViewDiag::find_method_anywhere("PRISM", "CutScene", "OnDisable", 0),
+					(void*)CutScene_OnDisable_hook, CutScene_OnDisable_orig);
 			}
 			if (g_lipCsReset) {
 				add("CutScene.ResetLipSync", ViewDiag::find_method_anywhere("PRISM", "CutScene", "ResetLipSync", 0),
@@ -5857,6 +5961,14 @@ namespace
 				add("ExpressionAndIkController.SetResetLip",
 					ViewDiag::find_method_anywhere("", "ExpressionAndIkController", "SetResetLip", 2),
 					(void*)ExpIk_SetResetLip_hook, ExpIk_SetResetLip_orig);
+			}
+			if (g_lipGroupUpdate) {
+				add("LiveSubSequence.ProcessTime",
+					ViewDiag::find_method_anywhere("PRISM", "LiveSubSequence", "ProcessTime", 1),
+					(void*)LiveSubSequence_ProcessTime_hook, LiveSubSequence_ProcessTime_orig);
+				add("LiveCharacterController.get_characters",
+					ViewDiag::find_method_anywhere("PRISM", "LiveCharacterController", "get_characters", 0),
+					(void*)LiveCharacterController_get_characters_hook, LiveCharacterController_get_characters_orig);
 			}
 			if (g_lipGroupAsync) {
 				add("LiveSubSequence.<AllocateAsync>d__20.MoveNext",
