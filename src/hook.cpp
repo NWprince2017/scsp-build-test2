@@ -4703,6 +4703,9 @@ namespace
 		int g_lipHookCalls = 0;
 		int g_lipFlagLogs = 0;
 		MethodInfo* g_lipUpdateMethod = nullptr;
+		MethodInfo* g_lipSetOverwriteMi = nullptr;   // [v87] LipSyncController.SetOverwrite(bool)
+		int g_lipSoloOverwrite = 0;                  // lip-solo.txt: overwrite=1
+		int g_lipSoloLockExp = 0;                    // lip-solo.txt: lockexpik=1
 		std::mutex g_lipMutex;
 		std::vector<void*> g_lipCharacters;
 
@@ -4924,7 +4927,7 @@ namespace
 		// not a single one of them ever firing) song 118 dies during MV load.
 		// They stay available for bisecting but are OFF by default now.
 		bool g_lipGroupAsync = false;
-		bool g_lipGroupExpIk = false;
+		bool g_lipGroupExpIk = true;   // [v87] log / optionally neutralise expression lips
 		// LipSyncController.Setup(table, id, _faceAnimator) - the third argument is an
 		// Animator object, and the real type of `id` is still unknown, so this group
 		// stays OFF unless lip.txt names it explicitly.
@@ -5163,13 +5166,16 @@ namespace
 
 		HOOK_ORIG_TYPE ExpIk_SetOverwriteLip_orig;
 		void ExpIk_SetOverwriteLip_hook(void* _this, int idx, float rate, void* mtd) {
+			float use = rate;
 			try {
+				// [v87] keep the expression system from stealing the mouth
+				if (g_lipSoloLockExp && g_lastSoloVocalMode == 2) use = 0.0f;
 				if (g_lipStateLogs++ < 80)
-					Log(std::format("[v71] SetOverwriteLip ch={} idx={} rate={:.3f} mode={}",
-						LipCharacterOf(_this), idx, rate, g_lastSoloVocalMode));
+					Log(std::format("[v71] SetOverwriteLip ch={} idx={} rate={:.3f}->{:.3f} mode={}",
+						LipCharacterOf(_this), idx, rate, use, g_lastSoloVocalMode));
 			}
-			catch (...) {}
-			return HOOK_CAST_CALL(void, ExpIk_SetOverwriteLip)(_this, idx, rate, mtd);
+			catch (...) { use = rate; }
+			return HOOK_CAST_CALL(void, ExpIk_SetOverwriteLip)(_this, idx, use, mtd);
 		}
 
 		HOOK_ORIG_TYPE ExpIk_SetResetLip_orig;
@@ -5460,6 +5466,31 @@ namespace
 			return -1;
 		}
 
+		int g_lipNextInjectTick = 0;
+		int g_lipInjectCount = 0;
+		std::unordered_map<void*, void*> g_lipInjectedTable;   // character -> table we installed
+
+		void LipSoloConfig() {
+			int ow = 0, lk = 0;
+			FILE* f = fopen("lip-solo.txt", "r");
+			if (f) {
+				char line[160]{};
+				while (fgets(line, sizeof(line), f)) {
+					std::string s = line;
+					const size_t eq = s.find('=');
+					if (eq == std::string::npos) continue;
+					std::string k = s.substr(0, eq), v = s.substr(eq + 1);
+					while (!k.empty() && (k.back() == ' ' || k.back() == '\t')) k.pop_back();
+					while (!v.empty() && (v.back() == ' ' || v.back() == '\t' || v.back() == '\r' || v.back() == '\n')) v.pop_back();
+					if (k == "overwrite") ow = (v == "1" || v == "true") ? 1 : 0;
+					else if (k == "lockexpik") lk = (v == "1" || v == "true") ? 1 : 0;
+				}
+				fclose(f);
+			}
+			g_lipSoloOverwrite = ow;
+			g_lipSoloLockExp = lk;
+		}
+
 		void LipSoloDrive(float time) {
 			if (g_lipMode != "on" || !g_setupLipStringMi || !g_lipUpdateMethod) return;
 			if (g_lastSoloVocalMode != 2) return;    // only solo mode lacks lips
@@ -5471,22 +5502,21 @@ namespace
 			void* arr = nullptr;
 			try { arr = RunwayDump::ReadPtr(lcc, "_characters"); } catch (...) { arr = nullptr; }
 			if (!arr || !RunwayDump::PlausiblePtr((uintptr_t)arr)) return;
-			float dt = 0.0f;
-			if (g_lipLastTime >= 0.0f && time > g_lipLastTime) {
-				dt = time - g_lipLastTime;
-				if (dt > 0.25f) dt = 0.25f;
+			const int ticks = ++g_lipDriveTicks;
+			if (ticks % 600 == 0) LipSoloConfig();          // pick up lip-solo.txt edits live
+			if (ticks == 1 || ticks % 600 == 0) {
+				Log(std::format("[v87] tick #{} time={:.2f} cs={} singer={} injected={} overwrite={} lockexp={}",
+					ticks, time, g_csActive, singer, g_lipInjectCount,
+					g_lipSoloOverwrite, g_lipSoloLockExp));
 			}
 			g_lipLastTime = time;
-			const int ticks = ++g_lipDriveTicks;
 			if (arr != g_lipDriveChars) {
 				g_lipDriveChars = arr;
 				g_lipInjectTried.clear();
-				g_lipDriving.clear();
+				g_lipInjectedTable.clear();
 			}
 			int n = 0;
 			try { n = (int)il2cpp_array_length(arr); } catch (...) { return; }
-			if (ticks <= 3)
-				Log(std::format("[v85] drive tick #{} time={:.3f} chars={} singer={} dt={:.4f}", ticks, time, n, singer, dt));
 			const bool logEval = (ticks <= 2);
 			auto ps = [](void* p) { return p ? std::format("0x{:x}", (uintptr_t)p) : std::string("null"); };
 			for (int i = 0; i < n && i < 32; ++i) {
@@ -5498,35 +5528,48 @@ namespace
 				const int cidSlot = LipCharaId(ch);
 				const int cidMap = LipCharaFromSlot(cidSlot);
 				const int cid = cidCtl > 0 ? cidCtl : (cidMap > 0 ? cidMap : cidSlot);
-				const bool hasTable = ctrl ? LipTableUsable(LipTableOf(ctrl)) : false;
-				if (logEval)
-					Log(std::format("[v86] char {} slot={} ctrl={} cidCtl={} cidMap={} cid={} table={}",
-						i, cidSlot, ps(ctrl), cidCtl, cidMap, cid, hasTable ? 1 : 0));
 				if (cid != singer) continue;
-				if (!hasTable) {
-					if (g_lipInjectTried.count(ch)) continue;
-					g_lipInjectTried.insert(ch);
+				void* table = ctrl ? LipTableOf(ctrl) : nullptr;
+				bool usable = LipTableUsable(table);
+				// the game resets lip sync after the cut scene, which wipes our table
+				auto inj = g_lipInjectedTable.find(ch);
+				const bool lost = usable && inj != g_lipInjectedTable.end() && inj->second && table != inj->second;
+				if (logEval)
+					Log(std::format("[v86] char {} slot={} ctrl={} cidCtl={} cidMap={} cid={} table={} lost={}",
+						i, cidSlot, ps(ctrl), cidCtl, cidMap, cid, usable ? 1 : 0, lost ? 1 : 0));
+				if ((!usable || lost) && ticks >= g_lipNextInjectTick) {
+					g_lipNextInjectTick = ticks + 30;
 					const std::string name = LipMvTableNameFor(cid);
-					Log(std::format("[v86] soloist index={} chara={} ctrl={} has no MV table -> inject \"{}\"",
-						i, cid, ps(ctrl), name));
+					Log(std::format("[v87] soloist index={} chara={} ctrl={} lost={} -> inject \"{}\"",
+						i, cid, ps(ctrl), lost ? 1 : 0, name));
 					if (name.empty()) continue;
 					auto* smi = (MethodInfo*)g_setupLipStringMi;
 					if (smi && smi->methodPointer) {
 						auto fn = (void(*)(void*, void*, float, float, void*))smi->methodPointer;
 						fn(ch, il2cpp_string_new(name.c_str()), 0.0f, 0.0f, g_setupLipStringMi);
 					}
-					ctrl = LipControllerOf(ch);          // SetupLip creates it when missing
-					const bool ok = ctrl ? LipTableUsable(LipTableOf(ctrl)) : false;
-					Log(std::format("[v86]   after setup ctrl={} usable={} {}", ps(ctrl), ok ? 1 : 0, LipControllerState(ctrl)));
-					if (!ok) continue;
+					ctrl = LipControllerOf(ch);
+					table = ctrl ? LipTableOf(ctrl) : nullptr;
+					usable = LipTableUsable(table);
+					if (usable) { g_lipInjectedTable[ch] = table; ++g_lipInjectCount; }
+					Log(std::format("[v87]   after setup ctrl={} usable={} {}", ps(ctrl), usable ? 1 : 0, LipControllerState(ctrl)));
+					if (!usable) continue;
+				}
+				if (!usable || !ctrl) continue;
+				if (g_lipSoloOverwrite && g_lipSetOverwriteMi && (ticks % 30 == 0)) {
+					auto* omi = (MethodInfo*)g_lipSetOverwriteMi;
+					if (omi && omi->methodPointer) {
+						auto ofn = (void(*)(void*, bool, void*))omi->methodPointer;
+						ofn(ctrl, true, g_lipSetOverwriteMi);
+					}
 				}
 				g_lipDriving.insert(ctrl);
-				if (dt <= 0.0f) continue;
 				if (g_lipDriveLogs < 6) {
 					++g_lipDriveLogs;
-					Log(std::format("[v86] drive #{} chara={} dt={:.4f} {}", g_lipDriveLogs, cid, dt, LipControllerState(ctrl)));
+					Log(std::format("[v87] drive #{} chara={} time={:.3f} {}", g_lipDriveLogs, cid, time, LipControllerState(ctrl)));
 				}
-				HOOK_CAST_CALL(void, LipSyncController_UpdateLip)(ctrl, dt, g_lipUpdateMethod);
+				// UpdateLip takes the *song time*, not a delta
+				HOOK_CAST_CALL(void, LipSyncController_UpdateLip)(ctrl, time, g_lipUpdateMethod);
 			}
 		}
 
@@ -5985,6 +6028,15 @@ namespace
 				add("LiveCharacterController.get_characters",
 					ViewDiag::find_method_anywhere("PRISM", "LiveCharacterController", "get_characters", 0),
 					(void*)LiveCharacterController_get_characters_hook, LiveCharacterController_get_characters_orig);
+				try {
+					auto* k = (Il2CppClass*)ViewDiag::find_class_anywhere("PRISM", "LipSyncController");
+					if (k) g_lipSetOverwriteMi = il2cpp_class_get_method_from_name(k, "SetOverwrite", 1);
+					Log(std::format("[v87] LipSyncController.SetOverwrite {}", g_lipSetOverwriteMi ? "found" : "MISSING"));
+				} catch (...) {}
+				try {
+					LipSoloConfig();
+					Log(std::format("[v87] lip-solo.txt overwrite={} lockexpik={}", g_lipSoloOverwrite, g_lipSoloLockExp));
+				} catch (...) {}
 			}
 			if (g_lipGroupAsync) {
 				add("LiveSubSequence.<AllocateAsync>d__20.MoveNext",
