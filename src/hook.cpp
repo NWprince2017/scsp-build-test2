@@ -5453,6 +5453,13 @@ namespace
 			return HOOK_CAST_CALL(void*, LiveCharacterController_get_characters)(_this, mtd);
 		}
 
+		// idol id for a stage slot, using the lineup the solo-map hook stored
+		int LipCharaFromSlot(int slot) {
+			std::lock_guard<std::mutex> lock(g_lipMutex);
+			if (slot >= 0 && slot < (int)g_lastPostIds.size()) return g_lastPostIds[slot];
+			return -1;
+		}
+
 		void LipSoloDrive(float time) {
 			if (g_lipMode != "on" || !g_setupLipStringMi || !g_lipUpdateMethod) return;
 			if (g_lastSoloVocalMode != 2) return;    // only solo mode lacks lips
@@ -5480,35 +5487,44 @@ namespace
 			try { n = (int)il2cpp_array_length(arr); } catch (...) { return; }
 			if (ticks <= 3)
 				Log(std::format("[v85] drive tick #{} time={:.3f} chars={} singer={} dt={:.4f}", ticks, time, n, singer, dt));
+			const bool logEval = (ticks <= 2);
+			auto ps = [](void* p) { return p ? std::format("0x{:x}", (uintptr_t)p) : std::string("null"); };
 			for (int i = 0; i < n && i < 32; ++i) {
 				void* ch = nullptr;
 				try { ch = il2cpp_symbols::array_get_value(arr, i); } catch (...) { continue; }
 				if (!ch) continue;
 				void* ctrl = LipControllerOf(ch);
-				if (!ctrl) continue;
-				int cid = LipCtlCharaId(ctrl);
-				if (cid <= 0) cid = LipCharaId(ch);
+				const int cidCtl = LipCtlCharaId(ctrl);
+				const int cidSlot = LipCharaId(ch);
+				const int cidMap = LipCharaFromSlot(cidSlot);
+				const int cid = cidCtl > 0 ? cidCtl : (cidMap > 0 ? cidMap : cidSlot);
+				const bool hasTable = ctrl ? LipTableUsable(LipTableOf(ctrl)) : false;
+				if (logEval)
+					Log(std::format("[v86] char {} slot={} ctrl={} cidCtl={} cidMap={} cid={} table={}",
+						i, cidSlot, ps(ctrl), cidCtl, cidMap, cid, hasTable ? 1 : 0));
 				if (cid != singer) continue;
-				if (!LipTableUsable(LipTableOf(ctrl))) {
+				if (!hasTable) {
 					if (g_lipInjectTried.count(ch)) continue;
 					g_lipInjectTried.insert(ch);
 					const std::string name = LipMvTableNameFor(cid);
-					Log(std::format("[v85] soloist slot={} chara={} has no MV table -> inject \"{}\"", i, cid, name));
+					Log(std::format("[v86] soloist index={} chara={} ctrl={} has no MV table -> inject \"{}\"",
+						i, cid, ps(ctrl), name));
 					if (name.empty()) continue;
 					auto* smi = (MethodInfo*)g_setupLipStringMi;
 					if (smi && smi->methodPointer) {
 						auto fn = (void(*)(void*, void*, float, float, void*))smi->methodPointer;
 						fn(ch, il2cpp_string_new(name.c_str()), 0.0f, 0.0f, g_setupLipStringMi);
 					}
-					const bool ok = LipTableUsable(LipTableOf(ctrl));
-					Log(std::format("[v85]   after setup usable={} {}", ok ? 1 : 0, LipControllerState(ctrl)));
+					ctrl = LipControllerOf(ch);          // SetupLip creates it when missing
+					const bool ok = ctrl ? LipTableUsable(LipTableOf(ctrl)) : false;
+					Log(std::format("[v86]   after setup ctrl={} usable={} {}", ps(ctrl), ok ? 1 : 0, LipControllerState(ctrl)));
 					if (!ok) continue;
 				}
 				g_lipDriving.insert(ctrl);
 				if (dt <= 0.0f) continue;
 				if (g_lipDriveLogs < 6) {
 					++g_lipDriveLogs;
-					Log(std::format("[v85] drive #{} chara={} dt={:.4f} {}", g_lipDriveLogs, cid, dt, LipControllerState(ctrl)));
+					Log(std::format("[v86] drive #{} chara={} dt={:.4f} {}", g_lipDriveLogs, cid, dt, LipControllerState(ctrl)));
 				}
 				HOOK_CAST_CALL(void, LipSyncController_UpdateLip)(ctrl, dt, g_lipUpdateMethod);
 			}
