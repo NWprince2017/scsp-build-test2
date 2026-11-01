@@ -4757,6 +4757,7 @@ namespace
 		std::string LipTableInfo(void* table);
 		std::string LipListInfo(void* lips);
 		std::string LipValues(void* lips);
+		std::string LipControllerState(void* controller);
 		void LipTryInjectMvTable(void* character);   // [v82] normal-part lips for the soloist
 
 		bool LipPatchController(void* controller, const char* source) {
@@ -4792,7 +4793,11 @@ namespace
 		}
 
 		void LipSyncController_UpdateLip_hook(void* _this, float dt, void* mtd) {
-			(void)_this;
+			try {
+				const int n = g_lipUpdateCalls++;
+				if (n < 10 || n % 4000 == 0)
+					Log(std::format("[v84] ctrl-update #{} {}", n, LipControllerState(_this)));
+			} catch (...) {}
 			return HOOK_CAST_CALL(void, LipSyncController_UpdateLip)(_this, dt, mtd);
 		}
 
@@ -5355,22 +5360,48 @@ namespace
 		std::unordered_set<void*> g_csCharacters;   // cut-scene cast: never inject MV tables
 		std::unordered_map<void*, int> g_mvInjectTries;
 
+		// <CharacterID> on the component can hold the *slot* number, so the
+		// controller's own _charaID is the trustworthy idol id.
+		int LipCtlCharaId(void* controller) {
+			if (!controller) return -1;
+			try { return RunwayDump::ReadInt(controller, "_charaID"); } catch (...) { return -1; }
+		}
+
 		void LipTryInjectMvTable(void* character) {
-			if (!character || !g_setupLipStringMi || g_lipMode != "on") return;
-			void* controller = LipControllerOf(character);
-			if (!controller) return;
-			if (LipTableUsable(LipTableOf(controller))) return;   // already driven
-			const int cid = LipCharaId(character);
-			if (cid <= 0) return;
-			const int singer = LipSingerChara();
-			if (singer <= 0 || cid != singer) return;             // only the soloist sings
-			const std::string name = LipMvTableNameFor(cid);
-			if (name.empty()) return;                             // idol token not known yet
+			if (!character) return;
 			int tries = 0;
 			{
 				std::lock_guard<std::mutex> lock(g_lipMutex);
-				if (g_csCharacters.count(character)) return;
 				tries = ++g_mvInjectTries[character];
+			}
+			const bool verbose = (tries <= 3);
+			void* controller = LipControllerOf(character);
+			void* table = controller ? LipTableOf(controller) : nullptr;
+			const bool usable = LipTableUsable(table);
+			const int cidSlot = LipCharaId(character);
+			const int cidCtl = LipCtlCharaId(controller);
+			const int cid = cidCtl > 0 ? cidCtl : cidSlot;
+			const int singer = LipSingerChara();
+			std::string token;
+			{
+				std::lock_guard<std::mutex> lock(g_lipMutex);
+				auto it = g_lipTokenByChara.find(cid);
+				if (it != g_lipTokenByChara.end()) token = it->second;
+			}
+			const std::string name = LipMvTableNameFor(cid);
+			if (verbose) {
+				auto ps = [](void* p) { return p ? std::format("0x{:x}", (uintptr_t)p) : std::string("null"); };
+				Log(std::format("[v84] eval slot={} cid={} ctrl={} table={} usable={} singer={} scene=\"{}\" token=\"{}\" name=\"{}\" mode={} mi={}",
+					cidSlot, cid, ps(controller), ps(table), usable ? 1 : 0, singer,
+					g_lastMvSceneName, token, name, g_lipMode, g_setupLipStringMi ? 1 : 0));
+			}
+			if (!g_setupLipStringMi || g_lipMode != "on") return;
+			if (!controller || usable) return;
+			if (cid <= 0 || singer <= 0 || cid != singer) return;
+			if (name.empty()) return;
+			{
+				std::lock_guard<std::mutex> lock(g_lipMutex);
+				if (g_csCharacters.count(character)) return;
 			}
 			if (tries > 46 || (tries > 1 && (tries - 1) % 15 != 0)) return;   // throttled retries
 			Log(std::format("[v83] normal-part lip table \"{}\" -> chara={} (try {})", name, cid, tries));
