@@ -5491,7 +5491,69 @@ namespace
 			g_lipSoloLockExp = lk;
 		}
 
-		void LipSoloDrive(float time) {
+		std::string LipTok(int cid) {
+			std::lock_guard<std::mutex> lock(g_lipMutex);
+			auto it = g_lipTokenByChara.find(cid);
+			return it == g_lipTokenByChara.end() ? std::string() : it->second;
+		}
+
+		// ---------------------------------------------------------------
+		// [v88] the MV table ("Summer/summer_fuyuko") is authored for the
+		// *divided* arrangement, so it only has mouth data for the lines that
+		// character sings there.  A solo run needs the whole song, so probe
+		// for a solo / all-singer variant and report which ones exist.
+		int g_lipProbeDone = 0;
+
+		void LipProbeTables(void* character, int cid) {
+			if (!character || cid <= 0) return;
+			const std::string base = LipMvTableNameFor(cid);
+			std::string alias = g_lastMvSceneName;
+			const size_t us = alias.find('_');
+			if (us != std::string::npos) alias = alias.substr(us + 1);
+			if (alias.empty()) return;
+			std::string lower = alias;
+			for (auto& c : lower) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+			const std::string token = LipTok(cid);
+			const std::string dir = alias + "/";
+			std::vector<std::string> cands;
+			if (!base.empty()) {
+				cands.push_back(base + "_solo");
+				cands.push_back(base + "_all");
+				cands.push_back(base + "_full");
+				cands.push_back(base + "_vocal");
+				cands.push_back(base + "_01");
+				cands.push_back(base + "_1");
+			}
+			cands.push_back(dir + lower + "_solo");
+			cands.push_back(dir + lower + "_all");
+			cands.push_back(dir + lower + "_full");
+			if (!token.empty()) {
+				cands.push_back(dir + lower + "_solo_" + token);
+				cands.push_back(dir + lower + "_" + token + "_solo");
+				cands.push_back(dir + lower + "_all_" + token);
+				cands.push_back(dir + g_lastMvSceneName + "_" + token);
+				cands.push_back(dir + g_lastMvSceneName + "_solo_" + token);
+			}
+			auto* smi = (MethodInfo*)g_setupLipStringMi;
+			if (!smi || !smi->methodPointer) return;
+			auto fn = (void(*)(void*, void*, float, float, void*))smi->methodPointer;
+			Log(std::format("[v88] probing solo/all lip tables for chara={} (base \"{}\")", cid, base));
+			for (auto& n : cands) {
+				fn(character, il2cpp_string_new(n.c_str()), 0.0f, 0.0f, g_setupLipStringMi);
+				void* ctrl = LipControllerOf(character);
+				void* table = ctrl ? LipTableOf(ctrl) : nullptr;
+				const bool ok = LipTableUsable(table);
+				Log(std::format("[v88]   \"{}\" -> usable={} {}", n, ok ? 1 : 0, LipTableInfo(table)));
+			}
+			if (!base.empty()) {
+				fn(character, il2cpp_string_new(base.c_str()), 0.0f, 0.0f, g_setupLipStringMi);
+				void* ctrl = LipControllerOf(character);
+				Log(std::format("[v88]   restored \"{}\" usable={} {}", base,
+					(ctrl && LipTableUsable(LipTableOf(ctrl))) ? 1 : 0, LipTableInfo(ctrl ? LipTableOf(ctrl) : nullptr)));
+			}
+		}
+
+
 			if (g_lipMode != "on" || !g_setupLipStringMi || !g_lipUpdateMethod) return;
 			if (g_lastSoloVocalMode != 2) return;    // only solo mode lacks lips
 			if (g_csActive > 0) return;              // special performance keeps its own lips
@@ -5551,6 +5613,13 @@ namespace
 					ctrl = LipControllerOf(ch);
 					table = ctrl ? LipTableOf(ctrl) : nullptr;
 					usable = LipTableUsable(table);
+					if (usable && !g_lipProbeDone) {
+						g_lipProbeDone = 1;
+						try { LipProbeTables(ch, cid); } catch (...) {}
+						ctrl = LipControllerOf(ch);
+						table = ctrl ? LipTableOf(ctrl) : nullptr;
+						usable = LipTableUsable(table);
+					}
 					if (usable) { g_lipInjectedTable[ch] = table; ++g_lipInjectCount; }
 					Log(std::format("[v87]   after setup ctrl={} usable={} {}", ps(ctrl), usable ? 1 : 0, LipControllerState(ctrl)));
 					if (!usable) continue;
