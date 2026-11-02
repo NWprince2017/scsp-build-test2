@@ -5305,10 +5305,26 @@ namespace
 				while (q > 0 && base[q - 1] >= '0' && base[q - 1] <= '9') --q;
 				int digits = 0;
 				try { digits = p > q ? std::stoi(base.substr(q, p - q)) : 0; } catch (...) { digits = 0; }
-				if (digits != cid) return;          // "<other>fuyuko" - not this character
+				if (digits <= 0 || token.empty()) return;
+				// [v89] the digits in "CS_..._03meguru_01" are the charaId itself, so
+				// this name is authoritative regardless of what <CharacterID> holds.
+				cid = digits;
 				authoritative = true;
 			}
 			else {
+				// [v89] <CharacterID> on an MV character is its stage *slot*, not the
+				// idol id (the game hands out summer_yuika for slot 1, summer_fuyuko for
+				// slot 3, ...).  Map it through the lineup before caching, otherwise the
+				// cache ends up with 1=yuika 2=kaho 3=fuyuko and every look up misses.
+				int mapped = -1;
+				{
+					std::lock_guard<std::mutex> lock(g_lipMutex);
+					if (cid < (int)g_lastPostIds.size()) mapped = g_lastPostIds[cid];
+				}
+				if (mapped > 0 && mapped != cid) {
+					Log(std::format("[v89] lip token slot {} -> chara {} (from \"{}\")", cid, mapped, nm));
+					cid = mapped;
+				}
 				// MV tables are "<Alias>/<alias>_<token>".  Only learn real names:
 				// short stems like dyesky_c / dyesky_all are per-MV placeholders.
 				const size_t us = base.rfind('_');
