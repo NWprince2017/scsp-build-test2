@@ -5677,28 +5677,53 @@ namespace
 		}
 
 		// ---------------------------------------------------------------
-		// [v92] merge the divided-arrangement tables into one "everybody sings"
+		// [v92/v93] merge the divided-arrangement tables into one "everybody sings"
 		// table and write it back into the soloist's own table.
 		//
-		//   PRISM.LipData = 7 floats (28 bytes): tongue, a, i, u, e, o, db
-		//   All tables of one song have the same length (9634) and offsetFrame,
-		//   so frame i means the same moment in every table.
-		//
-		//   In the divided arrangement exactly one idol owns each line, so for
-		//   every frame we pick the table with the strongest vowel weight and copy
-		//   that whole LipData.  Copying the whole struct keeps the mouth shape
-		//   self-consistent (no mixing a from one idol with i from another).
-		const int kLipDataBytes = 28;
-		const int kLipVowelFrom = 1;        // a
-		const int kLipVowelTo = 5;          // o
-		const int kLipDataFloats = 7;
+		//   PRISM.LipData = 7 float fields (tongue, a, i, u, e, o, db)
+		//   LipData is a *class*, so "LipData[]" is a reference array: 8 bytes per
+		//   element, each pointing at a heap object whose fields start at +0x10
+		//   (klass + monitor).  Writing 28 contiguous bytes per element straight
+		//   into the array (v92) overran the array and crashed the game.
+		const int kLipFloats = 7;
+		const int kLipArrayDataOffset = 0x20;   // first element slot
+		const int kLipRefStride = 8;            // reference array element size
+		const int kLipObjFieldOffset = 0x10;    // klass + monitor
 
-		void LipLogFrame(const char* tag, const unsigned char* p, int frame) {
-			const float* f = (const float*)p;
-			std::string s;
-			for (int i = 0; i < kLipDataFloats; ++i) s += std::format("{:.3f} ", f[i]);
-			Log(std::format("[v92]   {} frame {}: {}", tag, frame, s));
+		// every element of "datas" must be a pointer to a real LipData object;
+		// if that does not hold we refuse to touch anything (no blind writes).
+		bool LipDatasIsRefArray(void* datas, std::string* why) {
+			if (!datas) { if (why) *why = "datas null"; return false; }
+			for (int i = 0; i < 3; ++i) {
+				const uintptr_t slot = (uintptr_t)datas + kLipArrayDataOffset + (size_t)i * kLipRefStride;
+				void* obj = *(void**)slot;
+				if (!obj || !RunwayDump::PlausiblePtr((uintptr_t)obj)) {
+					if (why) *why = std::format("element {} is not a pointer", i);
+					return false;
+				}
+				const char* cn = RunwayDump::ClassNameOf(obj);
+				if (!cn || std::string(cn) != "LipData") {
+					if (why) *why = std::format("element {} class={}", i, cn ? cn : "?");
+					return false;
+				}
+			}
+			return true;
 		}
+
+		float* LipElem(void* datas, int i) {
+			const uintptr_t slot = (uintptr_t)datas + kLipArrayDataOffset + (size_t)i * kLipRefStride;
+			void* obj = *(void**)slot;
+			if (!obj || !RunwayDump::PlausiblePtr((uintptr_t)obj)) return nullptr;
+			return (float*)((char*)obj + kLipObjFieldOffset);
+		}
+
+		std::string LipFrameText(const float* f) {
+			if (!f) return "(null)";
+			std::string s;
+			for (int i = 0; i < kLipFloats; ++i) s += std::format("{:.3f} ", f[i]);
+			return s;
+		}
+
 
 		void LipMergeTables(void* character, int singerCid) {
 			if (!character) return;
@@ -5731,9 +5756,14 @@ namespace
 					Log(std::format("[v92]   \"{}\" len={} != {} -> skip", name, n, frameCount));
 					continue;
 				}
-				std::vector<unsigned char> buf((size_t)n * kLipDataBytes);
-				try { memcpy(buf.data(), (void*)RunwayDump::ArrayElem(datas, 0, kLipDataBytes), buf.size()); }
-				catch (...) { Log(std::format("[v92]   \"{}\" -> copy failed", name)); continue; }
+				std::vector<float> buf((size_t)n * kLipFloats, 0.0f);
+				bool readAll = true;
+				for (int i = 0; i < n; ++i) {
+					const float* e = LipElem(datas, i);
+					if (!e) { readAll = false; break; }
+					for (int k = 0; k < kLipFloats; ++k) buf[(size_t)i * kLipFloats + k] = e[k];
+				}
+				if (!readAll) { Log(std::format("[v93]   \"{}\" -> element read failed", name)); continue; }
 				frames.push_back(std::move(buf));
 				names.push_back(name);
 				Log(std::format("[v92]   cached \"{}\" len={}", name, n));
@@ -5757,31 +5787,35 @@ namespace
 					restored ? 1 : 0, LipTableUsable(table) ? 1 : 0, n, frameCount, (int)frames.size()));
 				return;
 			}
-			Log(std::format("[v92] merging {} table(s) into \"{}\" ({} frames)", (int)frames.size(), base, frameCount));
-			unsigned char* dst = (unsigned char*)RunwayDump::ArrayElem(datas, 0, kLipDataBytes);
-			if (frameCount > 3000) LipLogFrame("before", dst + (size_t)3000 * kLipDataBytes, 3000);
+			std::string why;
+			if (!LipDatasIsRefArray(datas, &why)) {
+				Log(std::format("[v93] abort: datas layout unexpected ({})", why));
+				return;
+			}
+			Log(std::format("[v93] merging {} table(s) into \"{}\" ({} frames)", (int)frames.size(), base, frameCount));
+			if (frameCount > 3000) Log(std::format("[v93]   before frame 3000: {}", LipFrameText(LipElem(datas, 3000))));
 			int copied = 0;
 			int kept = 0;
+			int missing = 0;
 			for (int i = 0; i < frameCount; ++i) {
 				int best = -1;
 				float bestScore = 0.0f;
 				for (int t = 0; t < (int)frames.size(); ++t) {
-					const float* p = (const float*)(frames[t].data() + (size_t)i * kLipDataBytes);
+					const float* p = frames[t].data() + (size_t)i * kLipFloats;
 					float score = 0.0f;
-					for (int k = kLipVowelFrom; k <= kLipVowelTo; ++k) score += p[k];
+					for (int k = 1; k <= 5; ++k) score += p[k];       // a i u e o
 					if (score > bestScore) { bestScore = score; best = t; }
 				}
-				if (best >= 0 && bestScore > 0.05f) {
-					memcpy(dst + (size_t)i * kLipDataBytes, frames[best].data() + (size_t)i * kLipDataBytes, kLipDataBytes);
-					++copied;
-				}
-				else {
-					++kept;
-				}
+				if (best < 0 || bestScore <= 0.05f) { ++kept; continue; }
+				float* d = LipElem(datas, i);
+				if (!d) { ++missing; continue; }
+				const float* src = frames[best].data() + (size_t)i * kLipFloats;
+				for (int k = 0; k < kLipFloats; ++k) d[k] = src[k];
+				++copied;
 			}
-			Log(std::format("[v92] merged: frames={} replaced={} kept={}", frameCount, copied, kept));
-			if (frameCount > 3000) LipLogFrame("after ", dst + (size_t)3000 * kLipDataBytes, 3000);
-			if (frameCount > 6000) LipLogFrame("after ", dst + (size_t)6000 * kLipDataBytes, 6000);
+			Log(std::format("[v93] merged: frames={} replaced={} kept={} missing={}", frameCount, copied, kept, missing));
+			if (frameCount > 3000) Log(std::format("[v93]   after  frame 3000: {}", LipFrameText(LipElem(datas, 3000))));
+			if (frameCount > 6000) Log(std::format("[v93]   after  frame 6000: {}", LipFrameText(LipElem(datas, 6000))));
 		}
 
 		void LipSoloDrive(float time) {
