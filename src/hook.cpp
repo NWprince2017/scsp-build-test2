@@ -5602,6 +5602,80 @@ namespace
 		}
 
 
+		// ---------------------------------------------------------------
+		// [v91] data scout: the solo arrangement has no lip table at all
+		// (v90 probe: 18 candidates, all "missing"), so the only way to give
+		// the soloist real lips is to synthesise one.  The divided-arrangement
+		// tables of the *same song* together cover the whole timeline (whoever
+		// sings a line owns the data for that line), so merging them frame by
+		// frame should approximate a "everybody sings" table.
+		// This step only inspects - it never writes.
+		int g_lipScoutDone = 0;
+
+		std::vector<int> LipLineupIds() {
+			std::lock_guard<std::mutex> lock(g_lipMutex);
+			return g_lastPostIds;
+		}
+
+		std::string LipScoutSample(void* datas, int from, int count, int stride) {
+			std::string s;
+			for (int i = from; i < from + count; ++i) {
+				const uintptr_t p = RunwayDump::ArrayElem(datas, i, stride);
+				float f = 0.0f;
+				try { f = *reinterpret_cast<float*>(p); } catch (...) {}
+				s += std::format("{:.2f} ", f);
+			}
+			return s;
+		}
+
+		void LipScoutTables(void* character, int singerCid) {
+			if (!character) return;
+			auto* mi = (MethodInfo*)g_setupLipStringMi;
+			if (!mi || !mi->methodPointer) return;
+			auto fn = (void(*)(void*, void*, float, float, void*))mi->methodPointer;
+			const std::string base = LipMvTableNameFor(singerCid);
+			const std::vector<int> ids = LipLineupIds();
+			Log(std::format("[v91] scout start singer={} lineup={} base=\"{}\"", singerCid, (int)ids.size(), base));
+			for (int id : ids) {
+				const std::string name = LipMvTableNameFor(id);
+				if (name.empty()) { Log(std::format("[v91]   chara={} -> no name (token missing)", id)); continue; }
+				bool threw = false;
+				try { fn(character, il2cpp_string_new(name.c_str()), 0.0f, 0.0f, g_setupLipStringMi); }
+				catch (...) { threw = true; }
+				if (threw) { Log(std::format("[v91]   chara={} \"{}\" -> missing (threw)", id, name)); continue; }
+				void* ctrl = nullptr;
+				void* table = nullptr;
+				try { ctrl = LipControllerOf(character); table = ctrl ? LipTableOf(ctrl) : nullptr; } catch (...) {}
+				if (!LipTableUsable(table)) {
+					Log(std::format("[v91]   chara={} \"{}\" -> no data {}", id, name, LipTableInfo(table)));
+					continue;
+				}
+				void* datas = nullptr;
+				void* curve = nullptr;
+				try { datas = RunwayDump::ReadPtr(table, "datas"); } catch (...) {}
+				try { curve = RunwayDump::ReadPtr(table, "curveData"); } catch (...) {}
+				const int n = RunwayDump::ArrayLength(datas);
+				const int nc = RunwayDump::ArrayLength(curve);
+				const char* dc = datas ? RunwayDump::ClassNameOf(datas) : nullptr;
+				const char* cc = curve ? RunwayDump::ClassNameOf(curve) : nullptr;
+				Log(std::format("[v91]   chara={} \"{}\" datasClass={} len={} curveClass={} curveLen={} {}",
+					id, name, dc ? dc : "?", n, cc ? cc : "?", nc, LipTableInfo(table)));
+				const int stride = 4;      // float[] - confirmed by datasClass
+				if (n > 64) {
+					Log("[v91]     head    : " + LipScoutSample(datas, 0, 24, stride));
+					Log("[v91]     mid3000 : " + LipScoutSample(datas, 3000, 24, stride));
+					Log("[v91]     tail    : " + LipScoutSample(datas, n - 16, 16, stride));
+				}
+			}
+			if (!base.empty()) {
+				try { fn(character, il2cpp_string_new(base.c_str()), 0.0f, 0.0f, g_setupLipStringMi); } catch (...) {}
+			}
+			void* ctrl = nullptr;
+			void* table = nullptr;
+			try { ctrl = LipControllerOf(character); table = ctrl ? LipTableOf(ctrl) : nullptr; } catch (...) {}
+			Log(std::format("[v91] scout done, restored usable={} {}", LipTableUsable(table) ? 1 : 0, LipTableInfo(table)));
+		}
+
 		void LipSoloDrive(float time) {
 			if (g_lipMode != "on" || !g_setupLipStringMi || !g_lipUpdateMethod) return;
 			if (g_lastSoloVocalMode != 2) return;    // only solo mode lacks lips
@@ -5664,7 +5738,9 @@ namespace
 					usable = LipTableUsable(table);
 					if (usable && !g_lipProbeDone) {
 						g_lipProbeDone = 1;
-						try { LipProbeTables(ch, cid); } catch (...) {}
+						// [v90] proved there is no solo/all variant of the table, so
+						// inspect the data layout instead of probing names again.
+						try { LipScoutTables(ch, cid); } catch (...) {}
 						ctrl = LipControllerOf(ch);
 						table = ctrl ? LipTableOf(ctrl) : nullptr;
 						usable = LipTableUsable(table);
