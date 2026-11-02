@@ -5543,28 +5543,60 @@ namespace
 			cands.push_back(dir + lower + "_solo");
 			cands.push_back(dir + lower + "_all");
 			cands.push_back(dir + lower + "_full");
+			cands.push_back(dir + lower + "_solo_01");
+			cands.push_back(dir + lower + "_all_01");
 			if (!token.empty()) {
 				cands.push_back(dir + lower + "_solo_" + token);
 				cands.push_back(dir + lower + "_" + token + "_solo");
 				cands.push_back(dir + lower + "_all_" + token);
+				cands.push_back(dir + lower + "_vocal_" + token);
+				cands.push_back(dir + lower + "_" + token + "_vocal");
 				cands.push_back(dir + g_lastMvSceneName + "_" + token);
 				cands.push_back(dir + g_lastMvSceneName + "_solo_" + token);
 			}
 			auto* smi = (MethodInfo*)g_setupLipStringMi;
 			if (!smi || !smi->methodPointer) return;
 			auto fn = (void(*)(void*, void*, float, float, void*))smi->methodPointer;
-			Log(std::format("[v88] probing solo/all lip tables for chara={} (base \"{}\")", cid, base));
+			Log(std::format("[v90] probing solo/all lip tables for chara={} (base \"{}\")", cid, base));
+			int found = 0;
 			for (auto& n : cands) {
-				fn(character, il2cpp_string_new(n.c_str()), 0.0f, 0.0f, g_setupLipStringMi);
-				void* ctrl = LipControllerOf(character);
-				void* table = ctrl ? LipTableOf(ctrl) : nullptr;
-				const bool ok = LipTableUsable(table);
-				Log(std::format("[v88]   \"{}\" -> usable={} {}", n, ok ? 1 : 0, LipTableInfo(table)));
+				// A missing table makes Character.SetupLip throw a managed
+				// exception, so every attempt needs its own guard - otherwise the
+				// first miss aborts the whole probe.
+				bool threw = false;
+				try {
+					fn(character, il2cpp_string_new(n.c_str()), 0.0f, 0.0f, g_setupLipStringMi);
+				}
+				catch (...) { threw = true; }
+				std::string info;
+				if (threw) info = "missing (threw)";
+				else {
+					try {
+						void* pctrl = LipControllerOf(character);
+						void* ptable = pctrl ? LipTableOf(pctrl) : nullptr;
+						const bool ok = LipTableUsable(ptable);
+						if (ok) ++found;
+						info = std::format("usable={} {}", ok ? 1 : 0, LipTableInfo(ptable));
+					}
+					catch (...) { info = "eval-threw"; }
+				}
+				Log(std::format("[v90]   \"{}\" -> {}", n, info));
+				// a failed load must not leave the singer without her table
+				if (threw && !base.empty()) {
+					try { fn(character, il2cpp_string_new(base.c_str()), 0.0f, 0.0f, g_setupLipStringMi); } catch (...) {}
+				}
 			}
+			Log(std::format("[v90] probe summary: {} candidate(s) usable", found));
 			if (!base.empty()) {
-				fn(character, il2cpp_string_new(base.c_str()), 0.0f, 0.0f, g_setupLipStringMi);
-				void* ctrl = LipControllerOf(character);
-				Log(std::format("[v88]   restored \"{}\" usable={} {}", base,
+				bool restored = false;
+				try {
+					fn(character, il2cpp_string_new(base.c_str()), 0.0f, 0.0f, g_setupLipStringMi);
+					restored = true;
+				}
+				catch (...) { restored = false; }
+				void* ctrl = nullptr;
+				try { ctrl = LipControllerOf(character); } catch (...) {}
+				Log(std::format("[v90]   restored \"{}\" ok={} usable={} {}", base, restored ? 1 : 0,
 					(ctrl && LipTableUsable(LipTableOf(ctrl))) ? 1 : 0, LipTableInfo(ctrl ? LipTableOf(ctrl) : nullptr)));
 			}
 		}
