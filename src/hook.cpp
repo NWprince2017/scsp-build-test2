@@ -5676,6 +5676,114 @@ namespace
 			Log(std::format("[v91] scout done, restored usable={} {}", LipTableUsable(table) ? 1 : 0, LipTableInfo(table)));
 		}
 
+		// ---------------------------------------------------------------
+		// [v92] merge the divided-arrangement tables into one "everybody sings"
+		// table and write it back into the soloist's own table.
+		//
+		//   PRISM.LipData = 7 floats (28 bytes): tongue, a, i, u, e, o, db
+		//   All tables of one song have the same length (9634) and offsetFrame,
+		//   so frame i means the same moment in every table.
+		//
+		//   In the divided arrangement exactly one idol owns each line, so for
+		//   every frame we pick the table with the strongest vowel weight and copy
+		//   that whole LipData.  Copying the whole struct keeps the mouth shape
+		//   self-consistent (no mixing a from one idol with i from another).
+		const int kLipDataBytes = 28;
+		const int kLipVowelFrom = 1;        // a
+		const int kLipVowelTo = 5;          // o
+		const int kLipDataFloats = 7;
+
+		void LipLogFrame(const char* tag, const unsigned char* p, int frame) {
+			const float* f = (const float*)p;
+			std::string s;
+			for (int i = 0; i < kLipDataFloats; ++i) s += std::format("{:.3f} ", f[i]);
+			Log(std::format("[v92]   {} frame {}: {}", tag, frame, s));
+		}
+
+		void LipMergeTables(void* character, int singerCid) {
+			if (!character) return;
+			auto* mi = (MethodInfo*)g_setupLipStringMi;
+			if (!mi || !mi->methodPointer) return;
+			auto fn = (void(*)(void*, void*, float, float, void*))mi->methodPointer;
+			const std::string base = LipMvTableNameFor(singerCid);
+			if (base.empty()) { Log("[v92] abort: singer has no MV table name"); return; }
+			const std::vector<int> ids = LipLineupIds();
+			std::vector<std::vector<unsigned char>> frames;
+			std::vector<std::string> names;
+			int frameCount = 0;
+			for (int id : ids) {
+				const std::string name = LipMvTableNameFor(id);
+				if (name.empty() || name == base) continue;
+				bool threw = false;
+				try { fn(character, il2cpp_string_new(name.c_str()), 0.0f, 0.0f, g_setupLipStringMi); }
+				catch (...) { threw = true; }
+				if (threw) { Log(std::format("[v92]   \"{}\" -> missing", name)); continue; }
+				void* ctrl = nullptr;
+				void* table = nullptr;
+				try { ctrl = LipControllerOf(character); table = ctrl ? LipTableOf(ctrl) : nullptr; } catch (...) {}
+				if (!LipTableUsable(table)) { Log(std::format("[v92]   \"{}\" -> no data", name)); continue; }
+				void* datas = nullptr;
+				try { datas = RunwayDump::ReadPtr(table, "datas"); } catch (...) {}
+				const int n = RunwayDump::ArrayLength(datas);
+				if (n <= 0) { Log(std::format("[v92]   \"{}\" -> empty datas", name)); continue; }
+				if (frameCount == 0) frameCount = n;
+				if (n != frameCount) {
+					Log(std::format("[v92]   \"{}\" len={} != {} -> skip", name, n, frameCount));
+					continue;
+				}
+				std::vector<unsigned char> buf((size_t)n * kLipDataBytes);
+				try { memcpy(buf.data(), (void*)RunwayDump::ArrayElem(datas, 0, kLipDataBytes), buf.size()); }
+				catch (...) { Log(std::format("[v92]   \"{}\" -> copy failed", name)); continue; }
+				frames.push_back(std::move(buf));
+				names.push_back(name);
+				Log(std::format("[v92]   cached \"{}\" len={}", name, n));
+			}
+			// the singer's own table is the write target
+			bool restored = false;
+			try { fn(character, il2cpp_string_new(base.c_str()), 0.0f, 0.0f, g_setupLipStringMi); restored = true; }
+			catch (...) { restored = false; }
+			void* ctrl = nullptr;
+			void* table = nullptr;
+			void* datas = nullptr;
+			try {
+				ctrl = LipControllerOf(character);
+				table = ctrl ? LipTableOf(ctrl) : nullptr;
+				datas = table ? RunwayDump::ReadPtr(table, "datas") : nullptr;
+			}
+			catch (...) {}
+			const int n = RunwayDump::ArrayLength(datas);
+			if (!restored || !LipTableUsable(table) || n <= 0 || n != frameCount) {
+				Log(std::format("[v92] abort: restored={} usable={} len={} frames={} cached={}",
+					restored ? 1 : 0, LipTableUsable(table) ? 1 : 0, n, frameCount, (int)frames.size()));
+				return;
+			}
+			Log(std::format("[v92] merging {} table(s) into \"{}\" ({} frames)", (int)frames.size(), base, frameCount));
+			unsigned char* dst = (unsigned char*)RunwayDump::ArrayElem(datas, 0, kLipDataBytes);
+			if (frameCount > 3000) LipLogFrame("before", dst + (size_t)3000 * kLipDataBytes, 3000);
+			int copied = 0;
+			int kept = 0;
+			for (int i = 0; i < frameCount; ++i) {
+				int best = -1;
+				float bestScore = 0.0f;
+				for (int t = 0; t < (int)frames.size(); ++t) {
+					const float* p = (const float*)(frames[t].data() + (size_t)i * kLipDataBytes);
+					float score = 0.0f;
+					for (int k = kLipVowelFrom; k <= kLipVowelTo; ++k) score += p[k];
+					if (score > bestScore) { bestScore = score; best = t; }
+				}
+				if (best >= 0 && bestScore > 0.05f) {
+					memcpy(dst + (size_t)i * kLipDataBytes, frames[best].data() + (size_t)i * kLipDataBytes, kLipDataBytes);
+					++copied;
+				}
+				else {
+					++kept;
+				}
+			}
+			Log(std::format("[v92] merged: frames={} replaced={} kept={}", frameCount, copied, kept));
+			if (frameCount > 3000) LipLogFrame("after ", dst + (size_t)3000 * kLipDataBytes, 3000);
+			if (frameCount > 6000) LipLogFrame("after ", dst + (size_t)6000 * kLipDataBytes, 6000);
+		}
+
 		void LipSoloDrive(float time) {
 			if (g_lipMode != "on" || !g_setupLipStringMi || !g_lipUpdateMethod) return;
 			if (g_lastSoloVocalMode != 2) return;    // only solo mode lacks lips
@@ -5739,8 +5847,8 @@ namespace
 					if (usable && !g_lipProbeDone) {
 						g_lipProbeDone = 1;
 						// [v90] proved there is no solo/all variant of the table, so
-						// inspect the data layout instead of probing names again.
-						try { LipScoutTables(ch, cid); } catch (...) {}
+						// [v92] build one: merge the divided-arrangement tables.
+						try { LipMergeTables(ch, cid); } catch (...) {}
 						ctrl = LipControllerOf(ch);
 						table = ctrl ? LipTableOf(ctrl) : nullptr;
 						usable = LipTableUsable(table);
