@@ -5733,7 +5733,7 @@ namespace
 			const std::string base = LipMvTableNameFor(singerCid);
 			if (base.empty()) { Log("[v92] abort: singer has no MV table name"); return; }
 			const std::vector<int> ids = LipLineupIds();
-			std::vector<std::vector<unsigned char>> frames;
+			std::vector<std::vector<float>> frames;
 			std::vector<std::string> names;
 			int frameCount = 0;
 			for (int id : ids) {
