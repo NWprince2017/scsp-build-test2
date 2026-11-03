@@ -5735,10 +5735,11 @@ namespace
 			const std::vector<int> ids = LipLineupIds();
 			std::vector<std::vector<float>> frames;
 			std::vector<std::string> names;
+			int ownIdx = -1;
 			int frameCount = 0;
 			for (int id : ids) {
 				const std::string name = LipMvTableNameFor(id);
-				if (name.empty() || name == base) continue;
+				if (name.empty()) continue;
 				bool threw = false;
 				try { fn(character, il2cpp_string_new(name.c_str()), 0.0f, 0.0f, g_setupLipStringMi); }
 				catch (...) { threw = true; }
@@ -5766,7 +5767,8 @@ namespace
 				if (!readAll) { Log(std::format("[v93]   \"{}\" -> element read failed", name)); continue; }
 				frames.push_back(std::move(buf));
 				names.push_back(name);
-				Log(std::format("[v92]   cached \"{}\" len={}", name, n));
+				if (name == base && ownIdx < 0) ownIdx = (int)frames.size() - 1;
+				Log(std::format("[v92]   cached \"{}\" len={}{}", name, n, name == base ? "  <- singer" : ""));
 			}
 			// the singer's own table is the write target
 			bool restored = false;
@@ -5789,33 +5791,71 @@ namespace
 			}
 			std::string why;
 			if (!LipDatasIsRefArray(datas, &why)) {
-				Log(std::format("[v93] abort: datas layout unexpected ({})", why));
+				Log(std::format("[v94] abort: datas layout unexpected ({})", why));
 				return;
 			}
-			Log(std::format("[v93] merging {} table(s) into \"{}\" ({} frames)", (int)frames.size(), base, frameCount));
-			if (frameCount > 3000) Log(std::format("[v93]   before frame 3000: {}", LipFrameText(LipElem(datas, 3000))));
+			if (ownIdx < 0) {
+				Log(std::format("[v94] abort: singer table \"{}\" not in the cached set", base));
+				return;
+			}
+			const int tableCount = (int)frames.size();
+			// 1) per-frame winner, the singer's own table included: in the divided
+			//    arrangement she wins every frame she actually sings, so those frames
+			//    stay untouched instead of being overwritten by somebody else's row.
+			std::vector<int> winner((size_t)frameCount, ownIdx);
+			std::vector<float> winScore((size_t)frameCount, 0.0f);
+			for (int i = 0; i < frameCount; ++i) {
+				int best = ownIdx;
+				float bestScore = -1.0f;
+				for (int t = 0; t < tableCount; ++t) {
+					const float* p = frames[t].data() + (size_t)i * kLipFloats;
+					float score = 0.0f;
+					for (int k = 1; k <= 5; ++k) score += p[k];        // a i u e o
+					if (score > bestScore) { bestScore = score; best = t; }
+				}
+				winner[i] = best;
+				winScore[i] = bestScore;
+			}
+			// 2) majority filter: one frame flickering between two idols is exactly
+			//    what made the mouth alternate between singing and expression.
+			const int kWin = 7;
+			std::vector<int> smooth(winner);
+			for (int i = 0; i < frameCount; ++i) {
+				const int lo = (i - kWin < 0) ? 0 : i - kWin;
+				const int hi = (i + kWin >= frameCount) ? frameCount - 1 : i + kWin;
+				int votes[16] = {0};
+				for (int j = lo; j <= hi; ++j) {
+					const int w = winner[(size_t)j];
+					if (w >= 0 && w < 16) ++votes[w];
+				}
+				int pick = ownIdx;
+				int bestVotes = -1;
+				for (int t = 0; t < tableCount && t < 16; ++t) {
+					if (votes[t] > bestVotes) { bestVotes = votes[t]; pick = t; }
+				}
+				smooth[(size_t)i] = pick;
+			}
+			// 3) only frames whose winner is somebody else get written
+			Log(std::format("[v94] merging {} table(s) into \"{}\" ({} frames, singer idx={})",
+				tableCount, base, frameCount, ownIdx));
+			if (frameCount > 3000) Log(std::format("[v94]   before frame 3000: {}", LipFrameText(LipElem(datas, 3000))));
 			int copied = 0;
 			int kept = 0;
 			int missing = 0;
+			int switched = 0;
 			for (int i = 0; i < frameCount; ++i) {
-				int best = -1;
-				float bestScore = 0.0f;
-				for (int t = 0; t < (int)frames.size(); ++t) {
-					const float* p = frames[t].data() + (size_t)i * kLipFloats;
-					float score = 0.0f;
-					for (int k = 1; k <= 5; ++k) score += p[k];       // a i u e o
-					if (score > bestScore) { bestScore = score; best = t; }
-				}
-				if (best < 0 || bestScore <= 0.05f) { ++kept; continue; }
+				if (smooth[(size_t)i] == ownIdx || winScore[(size_t)i] <= 0.02f) { ++kept; continue; }
 				float* d = LipElem(datas, i);
 				if (!d) { ++missing; continue; }
-				const float* src = frames[best].data() + (size_t)i * kLipFloats;
+				const float* src = frames[smooth[(size_t)i]].data() + (size_t)i * kLipFloats;
 				for (int k = 0; k < kLipFloats; ++k) d[k] = src[k];
 				++copied;
+				if (i > 0 && smooth[(size_t)(i - 1)] != smooth[(size_t)i]) ++switched;
 			}
-			Log(std::format("[v93] merged: frames={} replaced={} kept={} missing={}", frameCount, copied, kept, missing));
-			if (frameCount > 3000) Log(std::format("[v93]   after  frame 3000: {}", LipFrameText(LipElem(datas, 3000))));
-			if (frameCount > 6000) Log(std::format("[v93]   after  frame 6000: {}", LipFrameText(LipElem(datas, 6000))));
+			Log(std::format("[v94] merged: frames={} filled={} kept={} missing={} switchPoints={}",
+				frameCount, copied, kept, missing, switched));
+			if (frameCount > 3000) Log(std::format("[v94]   after  frame 3000: {}", LipFrameText(LipElem(datas, 3000))));
+			if (frameCount > 6000) Log(std::format("[v94]   after  frame 6000: {}", LipFrameText(LipElem(datas, 6000))));
 		}
 
 		void LipSoloDrive(float time) {
