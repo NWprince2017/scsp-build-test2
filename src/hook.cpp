@@ -5953,6 +5953,151 @@ namespace
 			}
 		}
 
+		// [v96] collect every lineup table's raw LipData into memory.
+		bool LipCollectTables(void* character, const std::string& base,
+			std::vector<std::vector<float>>& frames, std::vector<std::string>& names,
+			int& ownIdx, int& frameCount) {
+			ownIdx = -1;
+			frameCount = 0;
+			auto* mi = (MethodInfo*)g_setupLipStringMi;
+			if (!mi || !mi->methodPointer || base.empty()) return false;
+			auto fn = (void(*)(void*, void*, float, float, void*))mi->methodPointer;
+			const std::vector<int> ids = LipLineupIds();
+			for (int id : ids) {
+				const std::string name = LipMvTableNameFor(id);
+				if (name.empty()) continue;
+				bool threw = false;
+				try { fn(character, il2cpp_string_new(name.c_str()), 0.0f, 0.0f, g_setupLipStringMi); }
+				catch (...) { threw = true; }
+				if (threw) { Log(std::format("[v96]   \"{}\" -> missing", name)); continue; }
+				void* ctrl = nullptr;
+				void* table = nullptr;
+				try { ctrl = LipControllerOf(character); table = ctrl ? LipTableOf(ctrl) : nullptr; } catch (...) {}
+				if (!LipTableUsable(table)) { Log(std::format("[v96]   \"{}\" -> no data", name)); continue; }
+				void* datas = nullptr;
+				try { datas = RunwayDump::ReadPtr(table, "datas"); } catch (...) {}
+				const int n = RunwayDump::ArrayLength(datas);
+				if (n <= 0) continue;
+				if (frameCount == 0) frameCount = n;
+				if (n != frameCount) { Log(std::format("[v96]   \"{}\" len={} != {}", name, n, frameCount)); continue; }
+				std::vector<float> buf((size_t)n * kLipFloats, 0.0f);
+				bool readAll = true;
+				for (int i = 0; i < n; ++i) {
+					const float* e = LipElem(datas, i);
+					if (!e) { readAll = false; break; }
+					for (int k = 0; k < kLipFloats; ++k) buf[(size_t)i * kLipFloats + k] = e[k];
+				}
+				if (!readAll) { Log(std::format("[v96]   \"{}\" read failed", name)); continue; }
+				frames.push_back(std::move(buf));
+				names.push_back(name);
+				if (name == base && ownIdx < 0) ownIdx = (int)frames.size() - 1;
+			}
+			return !frames.empty() && frameCount > 0 && ownIdx >= 0;
+		}
+
+		// ---------------------------------------------------------------
+		// [v96] every table carries lip motion for the whole song (v95: each one is
+		// "strong" for 65-82% of all frames), so vowel weights cannot tell who is
+		// actually singing.  LipData.db can: it is that idol's track level
+		// (-96 = silent, about -9 = loud).  Per frame we therefore take the table
+		// with the loudest track - that is the "who sings this line" information
+		// the game itself uses - and ignore the expression-only lips of the others.
+		void LipMergeByDb(void* character, int singerCid) {
+			if (!character) return;
+			const std::string base = LipMvTableNameFor(singerCid);
+			if (base.empty()) { Log("[v96] abort: no table name"); return; }
+			std::vector<std::vector<float>> frames;
+			std::vector<std::string> names;
+			int ownIdx = -1;
+			int frameCount = 0;
+			if (!LipCollectTables(character, base, frames, names, ownIdx, frameCount)) {
+				Log(std::format("[v96] abort: cached={} frames={} own={}", (int)frames.size(), frameCount, ownIdx));
+				return;
+			}
+			const int tc = (int)frames.size();
+			// 1) loudest track per frame
+			std::vector<int> winner((size_t)frameCount, ownIdx);
+			std::vector<float> winnerDb((size_t)frameCount, -1000.0f);
+			std::vector<int> picked((size_t)tc, 0);
+			for (int i = 0; i < frameCount; ++i) {
+				int best = ownIdx;
+				float bestDb = -1000.0f;
+				for (int t = 0; t < tc; ++t) {
+					const float db = frames[(size_t)t][(size_t)i * kLipFloats + 6];
+					if (db > bestDb) { bestDb = db; best = t; }
+				}
+				winner[(size_t)i] = best;
+				winnerDb[(size_t)i] = bestDb;
+				++picked[(size_t)best];
+			}
+			// 2) majority filter - db can flicker when two tracks are equally loud
+			const int kWin = 7;
+			std::vector<int> smoothv(winner);
+			for (int i = 0; i < frameCount; ++i) {
+				const int lo = (i - kWin < 0) ? 0 : i - kWin;
+				const int hi = (i + kWin >= frameCount) ? frameCount - 1 : i + kWin;
+				int votes[16] = {0};
+				for (int j = lo; j <= hi; ++j) {
+					const int w = winner[(size_t)j];
+					if (w >= 0 && w < 16) ++votes[w];
+				}
+				int pick = ownIdx;
+				int bestVotes = -1;
+				for (int t = 0; t < tc && t < 16; ++t) {
+					if (votes[t] > bestVotes) { bestVotes = votes[t]; pick = t; }
+				}
+				smoothv[(size_t)i] = pick;
+			}
+			std::string pickLog = "[v96] picked frames:";
+			for (int t = 0; t < tc; ++t) pickLog += std::format(" {}={}", names[(size_t)t].substr(names[(size_t)t].rfind('_') + 1), picked[(size_t)t]);
+			Log(pickLog);
+			std::string hdr = "[v96] db/frame";
+			for (int t = 0; t < tc; ++t) hdr += std::format("{:>8}", names[(size_t)t].substr(names[(size_t)t].rfind('_') + 1).substr(0, 7));
+			Log(hdr);
+			for (int i = 0; i < frameCount; i += 300) {
+				std::string row = std::format("[v96] {:>6} ", i);
+				for (int t = 0; t < tc; ++t) row += std::format("{:>8.1f}", frames[(size_t)t][(size_t)i * kLipFloats + 6]);
+				Log(row);
+			}
+			// 3) write the loudest track's data into the singer's table
+			auto* mi = (MethodInfo*)g_setupLipStringMi;
+			auto fn = (void(*)(void*, void*, float, float, void*))mi->methodPointer;
+			bool restored = false;
+			try { fn(character, il2cpp_string_new(base.c_str()), 0.0f, 0.0f, g_setupLipStringMi); restored = true; }
+			catch (...) { restored = false; }
+			void* datas = nullptr;
+			void* table = nullptr;
+			try {
+				void* ctrl = LipControllerOf(character);
+				table = ctrl ? LipTableOf(ctrl) : nullptr;
+				datas = table ? RunwayDump::ReadPtr(table, "datas") : nullptr;
+			}
+			catch (...) {}
+			std::string why;
+			if (!restored || !LipTableUsable(table) || !LipDatasIsRefArray(datas, &why) || RunwayDump::ArrayLength(datas) != frameCount) {
+				Log(std::format("[v96] abort write: restored={} usable={} layout={}", restored ? 1 : 0, LipTableUsable(table) ? 1 : 0, why));
+				return;
+			}
+			const float kSilentDb = -80.0f;
+			int filled = 0;
+			int kept = 0;
+			int silent = 0;
+			int switched = 0;
+			for (int i = 0; i < frameCount; ++i) {
+				const int w = smoothv[(size_t)i];
+				if (w == ownIdx) { ++kept; continue; }
+				if (winnerDb[(size_t)i] <= kSilentDb) { ++silent; continue; }
+				float* d = LipElem(datas, i);
+				if (!d) continue;
+				const float* src = frames[(size_t)w].data() + (size_t)i * kLipFloats;
+				for (int k = 0; k < kLipFloats; ++k) d[k] = src[k];
+				++filled;
+				if (i > 0 && smoothv[(size_t)(i - 1)] != w) ++switched;
+			}
+			Log(std::format("[v96] merged by db: frames={} filled={} own={} silent={} switchPoints={}",
+				frameCount, filled, kept, silent, switched));
+		}
+
 		void LipSoloDrive(float time) {
 			if (g_lipMode != "on" || !g_setupLipStringMi || !g_lipUpdateMethod) return;
 			if (g_lastSoloVocalMode != 2) return;    // only solo mode lacks lips
@@ -6015,9 +6160,9 @@ namespace
 					usable = LipTableUsable(table);
 					if (usable && !g_lipProbeDone) {
 						g_lipProbeDone = 1;
-						// [v95] diagnostics first: find out which frames of every table
-						// carry real singing data and which only carry expression data.
-						try { LipAnalyzeTables(ch, cid); } catch (...) {}
+						// [v96] pick the loudest track per frame (LipData.db) and copy
+						// that table's lip data into the singer's table.
+						try { LipMergeByDb(ch, cid); } catch (...) {}
 						ctrl = LipControllerOf(ch);
 						table = ctrl ? LipTableOf(ctrl) : nullptr;
 						usable = LipTableUsable(table);
