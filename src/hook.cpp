@@ -5858,6 +5858,101 @@ namespace
 			if (frameCount > 6000) Log(std::format("[v94]   after  frame 6000: {}", LipFrameText(LipElem(datas, 6000))));
 		}
 
+		// ---------------------------------------------------------------
+		// [v95] diagnostics: print what every table actually looks like over the
+		// whole timeline, so we can tell "singing lip data" apart from the
+		// "expression lip data" the same table carries for the lines its owner
+		// does not sing.
+		void LipAnalyzeTables(void* character, int singerCid) {
+			if (!character) return;
+			auto* mi = (MethodInfo*)g_setupLipStringMi;
+			if (!mi || !mi->methodPointer) return;
+			auto fn = (void(*)(void*, void*, float, float, void*))mi->methodPointer;
+			const std::string base = LipMvTableNameFor(singerCid);
+			if (base.empty()) { Log("[v95] abort: no table name"); return; }
+			const std::vector<int> ids = LipLineupIds();
+			std::vector<std::vector<float>> frames;
+			std::vector<std::string> names;
+			int frameCount = 0;
+			for (int id : ids) {
+				const std::string name = LipMvTableNameFor(id);
+				if (name.empty()) continue;
+				bool threw = false;
+				try { fn(character, il2cpp_string_new(name.c_str()), 0.0f, 0.0f, g_setupLipStringMi); }
+				catch (...) { threw = true; }
+				if (threw) { Log(std::format("[v95]   \"{}\" -> missing", name)); continue; }
+				void* ctrl = nullptr;
+				void* table = nullptr;
+				try { ctrl = LipControllerOf(character); table = ctrl ? LipTableOf(ctrl) : nullptr; } catch (...) {}
+				if (!LipTableUsable(table)) { Log(std::format("[v95]   \"{}\" -> no data", name)); continue; }
+				void* datas = nullptr;
+				try { datas = RunwayDump::ReadPtr(table, "datas"); } catch (...) {}
+				const int n = RunwayDump::ArrayLength(datas);
+				if (n <= 0) continue;
+				if (frameCount == 0) frameCount = n;
+				if (n != frameCount) { Log(std::format("[v95]   \"{}\" len={} != {}", name, n, frameCount)); continue; }
+				std::vector<float> buf((size_t)n * kLipFloats, 0.0f);
+				bool readAll = true;
+				for (int i = 0; i < n; ++i) {
+					const float* e = LipElem(datas, i);
+					if (!e) { readAll = false; break; }
+					for (int k = 0; k < kLipFloats; ++k) buf[(size_t)i * kLipFloats + k] = e[k];
+				}
+				if (!readAll) continue;
+				frames.push_back(std::move(buf));
+				names.push_back(name);
+				Log(std::format("[v95]   cached \"{}\"{}", name, name == base ? "  <- singer" : ""));
+			}
+			if (frames.empty() || frameCount <= 0) { Log("[v95] abort: nothing cached"); return; }
+			const int tc = (int)frames.size();
+			// per-table statistics: how much of the timeline is "strong" (real singing)
+			for (int t = 0; t < tc; ++t) {
+				int strong = 0, weak = 0, silent = 0;
+				float mx = 0.0f;
+				double sum = 0.0;
+				double dbMax = -1e9;
+				double dbMin = 1e9;
+				int dbUnique = 0;
+				float lastDb = 1e9f;
+				bool dbSorted = true;
+				for (int i = 0; i < frameCount; ++i) {
+					const float* p = frames[t].data() + (size_t)i * kLipFloats;
+					float sc = 0.0f;
+					for (int k = 1; k <= 5; ++k) sc += p[k];
+					sum += sc;
+					if (sc > mx) mx = sc;
+					if (sc >= 0.5f) ++strong;
+					else if (sc > 0.02f) ++weak;
+					else ++silent;
+					const float db = p[6];
+					if (db > dbMax) dbMax = db;
+					if (db < dbMin) dbMin = db;
+					if (db != lastDb) { ++dbUnique; lastDb = db; }
+					if (i > 0) {
+						const float prevDb = frames[t][(size_t)(i - 1) * kLipFloats + 6];
+						if (db < prevDb - 0.001f) dbSorted = false;
+					}
+				}
+				Log(std::format("[v95] stat \"{}\" strong(>=0.5)={} weak={} silent={} max={:.2f} avg={:.3f} db[{:.1f}..{:.1f}] dbUnique={} mono={}",
+					names[t], strong, weak, silent, mx, sum / frameCount, dbMin, dbMax, dbUnique, dbSorted ? 1 : 0));
+			}
+			// timeline matrix, one row per second of song
+			const int step = 60;
+			std::string hdr = "[v95] frame ";
+			for (int t = 0; t < tc; ++t) hdr += std::format("{:>8}", names[t].substr(names[t].rfind('_') + 1).substr(0, 7));
+			Log(hdr);
+			for (int i = 0; i < frameCount; i += step) {
+				std::string row = std::format("[v95] {:>6} ", i);
+				for (int t = 0; t < tc; ++t) {
+					const float* p = frames[t].data() + (size_t)i * kLipFloats;
+					float sc = 0.0f;
+					for (int k = 1; k <= 5; ++k) sc += p[k];
+					row += std::format("{:>8.2f}", sc);
+				}
+				Log(row);
+			}
+		}
+
 		void LipSoloDrive(float time) {
 			if (g_lipMode != "on" || !g_setupLipStringMi || !g_lipUpdateMethod) return;
 			if (g_lastSoloVocalMode != 2) return;    // only solo mode lacks lips
@@ -5920,9 +6015,9 @@ namespace
 					usable = LipTableUsable(table);
 					if (usable && !g_lipProbeDone) {
 						g_lipProbeDone = 1;
-						// [v90] proved there is no solo/all variant of the table, so
-						// [v92] build one: merge the divided-arrangement tables.
-						try { LipMergeTables(ch, cid); } catch (...) {}
+						// [v95] diagnostics first: find out which frames of every table
+						// carry real singing data and which only carry expression data.
+						try { LipAnalyzeTables(ch, cid); } catch (...) {}
 						ctrl = LipControllerOf(ch);
 						table = ctrl ? LipTableOf(ctrl) : nullptr;
 						usable = LipTableUsable(table);
