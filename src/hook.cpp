@@ -6015,23 +6015,32 @@ namespace
 				return;
 			}
 			const int tc = (int)frames.size();
-			// 1) loudest track per frame
+			const float kSingDb = -80.0f;          // above this the track carries voice
+			// 1) her own track wins whenever it is audible - those frames are already
+			//    correct.  Only where she is silent do we borrow the loudest other
+			//    track (in a chorus several are loud; the loudest is the lead).
 			std::vector<int> winner((size_t)frameCount, ownIdx);
 			std::vector<float> winnerDb((size_t)frameCount, -1000.0f);
 			std::vector<int> picked((size_t)tc, 0);
 			for (int i = 0; i < frameCount; ++i) {
+				const float ownDb = frames[(size_t)ownIdx][(size_t)i * kLipFloats + 6];
 				int best = ownIdx;
 				float bestDb = -1000.0f;
-				for (int t = 0; t < tc; ++t) {
-					const float db = frames[(size_t)t][(size_t)i * kLipFloats + 6];
-					if (db > bestDb) { bestDb = db; best = t; }
+				if (ownDb > kSingDb) {
+					bestDb = ownDb;
+				}
+				else {
+					for (int t = 0; t < tc; ++t) {
+						const float db = frames[(size_t)t][(size_t)i * kLipFloats + 6];
+						if (db > bestDb) { bestDb = db; best = t; }
+					}
 				}
 				winner[(size_t)i] = best;
 				winnerDb[(size_t)i] = bestDb;
 				++picked[(size_t)best];
 			}
-			// 2) majority filter - db can flicker when two tracks are equally loud
-			const int kWin = 7;
+			// 2) majority filter - in a chorus the loudest track can swap frame by frame
+			const int kWin = 21;
 			std::vector<int> smoothv(winner);
 			for (int i = 0; i < frameCount; ++i) {
 				const int lo = (i - kWin < 0) ? 0 : i - kWin;
