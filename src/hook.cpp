@@ -6016,31 +6016,28 @@ namespace
 			}
 			const int tc = (int)frames.size();
 			const float kSingDb = -80.0f;          // above this the track carries voice
-			// 1) her own track wins whenever it is audible - those frames are already
-			//    correct.  Only where she is silent do we borrow the loudest other
-			//    track (in a chorus several are loud; the loudest is the lead).
+			// 1) loudest track per frame, with hysteresis: switching to another idol
+			//    needs a clear 6 dB advantage, so two equally loud tracks cannot make
+			//    the mouth flicker back and forth.
 			std::vector<int> winner((size_t)frameCount, ownIdx);
 			std::vector<float> winnerDb((size_t)frameCount, -1000.0f);
 			std::vector<int> picked((size_t)tc, 0);
+			int cur = ownIdx;
 			for (int i = 0; i < frameCount; ++i) {
-				const float ownDb = frames[(size_t)ownIdx][(size_t)i * kLipFloats + 6];
-				int best = ownIdx;
+				int best = 0;
 				float bestDb = -1000.0f;
-				if (ownDb > kSingDb) {
-					bestDb = ownDb;
+				for (int t = 0; t < tc; ++t) {
+					const float db = frames[(size_t)t][(size_t)i * kLipFloats + 6];
+					if (db > bestDb) { bestDb = db; best = t; }
 				}
-				else {
-					for (int t = 0; t < tc; ++t) {
-						const float db = frames[(size_t)t][(size_t)i * kLipFloats + 6];
-						if (db > bestDb) { bestDb = db; best = t; }
-					}
-				}
-				winner[(size_t)i] = best;
-				winnerDb[(size_t)i] = bestDb;
-				++picked[(size_t)best];
+				const float curDb = frames[(size_t)cur][(size_t)i * kLipFloats + 6];
+				if (curDb <= kSingDb || bestDb > curDb + 6.0f) cur = best;
+				winner[(size_t)i] = cur;
+				winnerDb[(size_t)i] = frames[(size_t)cur][(size_t)i * kLipFloats + 6];
+				++picked[(size_t)cur];
 			}
 			// 2) majority filter - in a chorus the loudest track can swap frame by frame
-			const int kWin = 21;
+			const int kWin = 11;
 			std::vector<int> smoothv(winner);
 			for (int i = 0; i < frameCount; ++i) {
 				const int lo = (i - kWin < 0) ? 0 : i - kWin;
