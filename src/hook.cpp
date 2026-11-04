@@ -6065,6 +6065,80 @@ namespace
 				for (int t = 0; t < tc; ++t) row += std::format("{:>8.1f}", frames[(size_t)t][(size_t)i * kLipFloats + 6]);
 				Log(row);
 			}
+			// [v99] timeline export.  "mouth" = how far the lips actually open
+			// (max of a/i/u/e/o): a table that sings this line opens wide, an
+			// expression-only table stays near zero - that is the discriminator
+			// the vowel weights alone could not give us (v95).
+			auto shortName = [](const std::string& n) {
+				const size_t p = n.find_last_of('/');
+				std::string s = (p == std::string::npos) ? n : n.substr(p + 1);
+				if (s.rfind("summer_", 0) == 0) s = s.substr(7);
+				return s;
+			};
+			auto mouthOf = [&](int t, int i) {
+				const float* e = frames[(size_t)t].data() + (size_t)i * kLipFloats;
+				float m = e[1];
+				for (int k = 2; k <= 5; ++k) if (e[k] > m) m = e[k];
+				return m;
+			};
+			std::vector<int> mouthPicked((size_t)tc, 0);
+			for (int i = 0; i < frameCount; ++i) {
+				int best = 0;
+				float bestM = -1.0f;
+				for (int t = 0; t < tc; ++t) {
+					const float m = mouthOf(t, i);
+					if (m > bestM) { bestM = m; best = t; }
+				}
+				++mouthPicked[(size_t)best];
+			}
+			std::string mouthLog = "[v99] mouth-widest frames:";
+			for (int t = 0; t < tc; ++t) mouthLog += std::format(" {}={}", shortName(names[(size_t)t]), mouthPicked[(size_t)t]);
+			Log(mouthLog);
+			{
+				FILE* f = nullptr;
+				if (fopen_s(&f, "lip-timeline.csv", "w") == 0 && f) {
+					fputs("frame,time", f);
+					for (int t = 0; t < tc; ++t) {
+						const std::string s = shortName(names[(size_t)t]);
+						fprintf(f, ",%s_db,%s_mouth", s.c_str(), s.c_str());
+					}
+					fputs(",used,used_db,used_mouth\n", f);
+					for (int i = 0; i < frameCount; ++i) {
+						fprintf(f, "%d,%.3f", i, (double)i / 60.0);
+						for (int t = 0; t < tc; ++t) {
+							fprintf(f, ",%.1f,%.3f",
+								(double)frames[(size_t)t][(size_t)i * kLipFloats + 6], (double)mouthOf(t, i));
+						}
+						const int u = smoothv[(size_t)i];
+						fprintf(f, ",%s,%.1f,%.3f\n", shortName(names[(size_t)u]).c_str(),
+							(double)winnerDb[(size_t)i], (double)mouthOf(u, i));
+					}
+					fclose(f);
+					Log("[v99] wrote lip-timeline.csv");
+				}
+				else {
+					Log("[v99] cannot write lip-timeline.csv");
+				}
+			}
+			// segment summary - one line per steady stretch of the same source table
+			{
+				int segStart = 0;
+				auto flushSeg = [&](int segEnd) {
+					const int u = smoothv[(size_t)segStart];
+					double dbSum = 0.0, mSum = 0.0;
+					for (int i = segStart; i < segEnd; ++i) { dbSum += winnerDb[(size_t)i]; mSum += mouthOf(u, i); }
+					const double n = (double)(segEnd - segStart);
+					Log(std::format("[v99] seg {:6.2f}-{:6.2f}s {:>5.2f}s {:<8} db={:6.1f} mouth={:.3f}",
+						(double)segStart / 60.0, (double)segEnd / 60.0, n / 60.0,
+						shortName(names[(size_t)u]), dbSum / n, mSum / n));
+				};
+				for (int i = 1; i <= frameCount; ++i) {
+					if (i == frameCount || smoothv[(size_t)i] != smoothv[(size_t)segStart]) {
+						if (i - segStart >= 6) flushSeg(i);
+						segStart = i;
+					}
+				}
+			}
 			// 3) write the loudest track's data into the singer's table
 			auto* mi = (MethodInfo*)g_setupLipStringMi;
 			auto fn = (void(*)(void*, void*, float, float, void*))mi->methodPointer;
