@@ -4713,6 +4713,12 @@ namespace
 		MethodInfo* g_lipSetOverwriteMi = nullptr;   // [v87] LipSyncController.SetOverwrite(bool)
 		int g_lipSoloOverwrite = 0;                  // lip-solo.txt: overwrite=1
 		int g_lipSoloLockExp = 0;                    // lip-solo.txt: lockexpik=1
+		// [v100] merge=0 (default): give the soloist her own full-length table and
+		// leave it alone.  The v99 timeline dump proved every table already holds
+		// lip motion for the WHOLE song (quiet frames average a 0.6 mouth), so
+		// "helping" by copying other idols' frames only makes the mouth wrong.
+		// merge=1 restores the old per-frame db merge for experiments.
+		int g_lipSoloMerge = 0;
 		std::mutex g_lipMutex;
 		std::vector<void*> g_lipCharacters;
 
@@ -5546,7 +5552,7 @@ namespace
 		std::unordered_map<void*, void*> g_lipInjectedTable;   // character -> table we installed
 
 		void LipSoloConfig() {
-			int ow = 0, lk = 0;
+			int ow = 0, lk = 0, mg = 0;
 			FILE* f = fopen("lip-solo.txt", "r");
 			if (f) {
 				char line[160]{};
@@ -5559,11 +5565,13 @@ namespace
 					while (!v.empty() && (v.back() == ' ' || v.back() == '\t' || v.back() == '\r' || v.back() == '\n')) v.pop_back();
 					if (k == "overwrite") ow = (v == "1" || v == "true") ? 1 : 0;
 					else if (k == "lockexpik") lk = (v == "1" || v == "true") ? 1 : 0;
+					else if (k == "merge") mg = (v == "1" || v == "true") ? 1 : 0;
 				}
 				fclose(f);
 			}
 			g_lipSoloOverwrite = ow;
 			g_lipSoloLockExp = lk;
+			g_lipSoloMerge = mg;
 		}
 
 		std::string LipTok(int cid) {
@@ -6211,6 +6219,16 @@ namespace
 					}
 				}
 			}
+			// [v100] merge=0 (default): everything above is diagnostic only.
+			// Copying the loudest track's frames into the soloist's table made her
+			// mouth follow somebody else's syllables.  The v99 timeline dump shows
+			// that is pointless: her own table already animates the whole song
+			// (frames with db=-96 still average a 0.6 mouth), so in a vocal
+			// separated solo run the right answer is simply her own table.
+			if (!g_lipSoloMerge) {
+				Log("[v100] merge disabled (lip-solo.txt merge=0) - soloist keeps her own table");
+				return;
+			}
 			// 3) write the loudest track's data into the singer's table
 			auto* mi = (MethodInfo*)g_setupLipStringMi;
 			auto fn = (void(*)(void*, void*, float, float, void*))mi->methodPointer;
@@ -6822,7 +6840,7 @@ namespace
 				} catch (...) {}
 				try {
 					LipSoloConfig();
-					Log(std::format("[v87] lip-solo.txt overwrite={} lockexpik={}", g_lipSoloOverwrite, g_lipSoloLockExp));
+					Log(std::format("[v87] lip-solo.txt overwrite={} lockexpik={} merge={}", g_lipSoloOverwrite, g_lipSoloLockExp, g_lipSoloMerge));
 				} catch (...) {}
 			}
 			if (g_lipGroupAsync) {
