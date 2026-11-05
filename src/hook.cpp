@@ -3086,6 +3086,13 @@ namespace
 		// learned from the game's own lip table names ("Summer/summer_fuyuko").
 		std::string g_lastMvSceneName;
 		std::unordered_map<int, std::string> g_lipTokenByChara;
+		// [v100] only tokens parsed out of a cut-scene name ("...18fuyuko...")
+		// are written back to lip-idols.txt.  MV table names are learned in
+		// memory only: writing them used to overwrite the hand-maintained
+		// cache with slot-based garbage (4=kiriko 5=mamimi 6=sakuya 7=yuika),
+		// after which every lookup for 18=fuyuko missed and the soloist lost
+		// her lips entirely.
+		std::set<std::pair<int, std::string>> g_lipTokenAuthoritative;
 		bool g_lipTokensLoaded = false;
 		int g_autoLiveModeOverride = -1;
 		int g_autoLiveSoloIndexOverride = -999;
@@ -5015,6 +5022,25 @@ namespace
 			return RunwayDump::ArrayLength(datas) > 0 || RunwayDump::ArrayLength(curve) > 0;
 		}
 
+		// [v100] frame count of a table (0 when it is not a usable table).
+		int LipTableFrameCount(void* table) {
+			if (!LipTableUsable(table)) return 0;
+			void* datas = nullptr;
+			try { datas = RunwayDump::ReadPtr(table, "datas"); } catch (...) { return 0; }
+			return RunwayDump::ArrayLength(datas);
+		}
+
+		// [v100] THE bug behind "the C-centre only lips-syncs during the special
+		// performance".  When a cut scene ends the game hands the soloist a
+		// 1-frame placeholder table; LipTableUsable() reports that as usable
+		// (ArrayLength > 0), so the injection branch below never ran and the
+		// mouth stayed shut for the whole song.  A real MV table holds every
+		// frame of the song (Summer/summer_fuyuko: 9634 frames = 160.6 s), so
+		// demand at least two seconds of data before believing it.
+		bool LipTableRich(void* table) {
+			return LipTableFrameCount(table) >= 120;
+		}
+
 		// true only when the argument really is a LipSyncTable that carries no
 		// frame data - never for a string/other overload's argument.
 		bool LipArgIsEmptyTable(void* table) {
@@ -5270,6 +5296,7 @@ namespace
 			g_lipTokensLoaded = true;
 			FILE* f = fopen("lip-idols.txt", "r");
 			if (!f) return;
+			int got = 0;
 			char line[128]{};
 			while (fgets(line, sizeof(line), f)) {
 				std::string s = line;
@@ -5282,9 +5309,49 @@ namespace
 				bool alpha = true;
 				for (char c : token) if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) { alpha = false; break; }
 				if (!alpha) continue;
-				try { g_lipTokenByChara[std::stoi(cidStr)] = token; } catch (...) {}
+				try { g_lipTokenByChara[std::stoi(cidStr)] = token; ++got; } catch (...) {}
 			}
 			fclose(f);
+			// [v100] a failed/partial read must not latch - otherwise a cache
+			// that is restored while the game is already running is never read.
+			if (got == 0) g_lipTokensLoaded = false;
+		}
+
+		// [v100] merge the authoritative (cut-scene derived) tokens into
+		// lip-idols.txt instead of overwriting the file with whatever an MV
+		// happened to reveal.  Hand-added lines survive, and a wrong slot-based
+		// guess can no longer wipe 18=fuyuko out of the cache.
+		void LipSaveTokens() {
+			std::set<std::pair<int, std::string>> merged;
+			{
+				FILE* f = fopen("lip-idols.txt", "r");
+				if (f) {
+					char line[128]{};
+					while (fgets(line, sizeof(line), f)) {
+						std::string s = line;
+						const size_t eq = s.find('=');
+						if (eq == std::string::npos) continue;
+						std::string tok = s.substr(eq + 1);
+						while (!tok.empty() && (tok.back() == '\n' || tok.back() == '\r' || tok.back() == ' ')) tok.pop_back();
+						if (tok.empty()) continue;
+						try { merged.insert({ std::stoi(s.substr(0, eq)), tok }); } catch (...) {}
+					}
+					fclose(f);
+				}
+			}
+			{
+				std::lock_guard<std::mutex> lock(g_lipMutex);
+				for (auto& kv : g_lipTokenAuthoritative) {
+					std::set<std::pair<int, std::string>> rebuilt;
+					for (auto& m : merged) if (m.first != kv.first) rebuilt.insert(m);
+					rebuilt.insert(kv);
+					merged.swap(rebuilt);
+				}
+			}
+			std::string all;
+			for (auto& kv : merged) all += std::format("{}={}\n", kv.first, kv.second);
+			FILE* f = nullptr;
+			if (fopen_s(&f, "lip-idols.txt", "w") == 0 && f) { fwrite(all.data(), 1, all.size(), f); fclose(f); }
 		}
 
 		void LipLearnToken(int cid, const std::string& nm) {
@@ -5340,23 +5407,15 @@ namespace
 				auto it = g_lipTokenByChara.find(cid);
 				if (it == g_lipTokenByChara.end() || (it->second != token && (authoritative || it->second.size() < 4))) {
 					g_lipTokenByChara[cid] = token;
+					if (authoritative) g_lipTokenAuthoritative.insert({ cid, token });
 					changed = true;
 				}
 			}
 			if (changed) {
 				Log(std::format("[v82] idol token chara={} = \"{}\" (from \"{}\")", cid, token, nm));
-				try {
-					// rewrite the whole cache so stale/guessed entries cannot pile up
-					std::string all;
-					{
-						std::lock_guard<std::mutex> lock(g_lipMutex);
-						for (auto& kv : g_lipTokenByChara)
-							all += std::format("{}={}\n", kv.first, kv.second);
-					}
-					FILE* f = fopen("lip-idols.txt", "w");
-					if (f) { fwrite(all.data(), 1, all.size(), f); fclose(f); }
-				}
-				catch (...) {}
+				// [v100] only cut-scene derived names are trustworthy enough to
+				// persist; MV names stay in memory (see g_lipTokenAuthoritative)
+				if (authoritative) LipSaveTokens();
 			}
 		}
 
@@ -5519,6 +5578,13 @@ namespace
 		// character sings there.  A solo run needs the whole song, so probe
 		// for a solo / all-singer variant and report which ones exist.
 		int g_lipProbeDone = 0;
+		// [v100] character -> the table whose data we already merged into it.
+		// Keyed by table pointer so a table swapped in by a cut scene is
+		// merged again, while the same table is never merged twice.
+		std::unordered_map<void*, void*> g_lipMergedTable;
+		// [v100] set while a special performance owns the lips; the tick after
+		// it ends rebuilds the soloist's table from scratch.
+		int g_lipCsSeen = 0;
 
 		void LipProbeTables(void* character, int cid) {
 			if (!character || cid <= 0) return;
@@ -5965,7 +6031,13 @@ namespace
 			const std::vector<int> ids = LipLineupIds();
 			for (int id : ids) {
 				const std::string name = LipMvTableNameFor(id);
-				if (name.empty()) continue;
+				if (name.empty()) {
+					// [v99] a lineup idol without a cached token is simply skipped,
+					// and every line that idol sings keeps the singer's own table -
+					// that is exactly how lip-idols.txt missing "3=meguru" looked.
+					Log(std::format("[v99] lineup id {} has no table token (skipped)", id));
+					continue;
+				}
 				bool threw = false;
 				try { fn(character, il2cpp_string_new(name.c_str()), 0.0f, 0.0f, g_setupLipStringMi); }
 				catch (...) { threw = true; }
@@ -6181,7 +6253,16 @@ namespace
 		void LipSoloDrive(float time) {
 			if (g_lipMode != "on" || !g_setupLipStringMi || !g_lipUpdateMethod) return;
 			if (g_lastSoloVocalMode != 2) return;    // only solo mode lacks lips
-			if (g_csActive > 0) return;              // special performance keeps its own lips
+			if (g_csActive > 0) { g_lipCsSeen = 1; return; }   // special performance keeps its own lips
+			// [v100] first tick after a special performance: the game has just
+			// rebuilt the soloist's table, so drop both caches and redo the work.
+			if (g_lipCsSeen) {
+				g_lipCsSeen = 0;
+				g_lipInjectedTable.clear();
+				g_lipMergedTable.clear();
+				g_lipDriveLogs = 0;
+				Log("[v100] special performance ended -> re-injecting the soloist's lip table");
+			}
 			const int singer = LipSingerChara();
 			if (singer <= 0) return;
 			void* lcc = g_lccInstance;
@@ -6201,6 +6282,7 @@ namespace
 				g_lipDriveChars = arr;
 				g_lipInjectTried.clear();
 				g_lipInjectedTable.clear();
+				g_lipMergedTable.clear();
 			}
 			int n = 0;
 			try { n = (int)il2cpp_array_length(arr); } catch (...) { return; }
@@ -6217,13 +6299,18 @@ namespace
 				const int cid = cidCtl > 0 ? cidCtl : (cidMap > 0 ? cidMap : cidSlot);
 				if (cid != singer) continue;
 				void* table = ctrl ? LipTableOf(ctrl) : nullptr;
-				bool usable = LipTableUsable(table);
+				// [v100] a 1-frame placeholder is NOT usable.  After the special
+				// performance the game hands the soloist exactly that, so the old
+				// "ArrayLength > 0" test declared it fine, skipped the injection
+				// and left the mouth shut for the rest of the song.
+				const int tableFrames = LipTableFrameCount(table);
+				bool usable = (tableFrames >= 120);
 				// the game resets lip sync after the cut scene, which wipes our table
 				auto inj = g_lipInjectedTable.find(ch);
 				const bool lost = usable && inj != g_lipInjectedTable.end() && inj->second && table != inj->second;
 				if (logEval)
-					Log(std::format("[v86] char {} slot={} ctrl={} cidCtl={} cidMap={} cid={} table={} lost={}",
-						i, cidSlot, ps(ctrl), cidCtl, cidMap, cid, usable ? 1 : 0, lost ? 1 : 0));
+					Log(std::format("[v86] char {} slot={} ctrl={} cidCtl={} cidMap={} cid={} frames={} rich={} lost={}",
+						i, cidSlot, ps(ctrl), cidCtl, cidMap, cid, tableFrames, usable ? 1 : 0, lost ? 1 : 0));
 				if ((!usable || lost) && ticks >= g_lipNextInjectTick) {
 					g_lipNextInjectTick = ticks + 30;
 					const std::string name = LipMvTableNameFor(cid);
@@ -6237,15 +6324,19 @@ namespace
 					}
 					ctrl = LipControllerOf(ch);
 					table = ctrl ? LipTableOf(ctrl) : nullptr;
-					usable = LipTableUsable(table);
-					if (usable && !g_lipProbeDone) {
-						g_lipProbeDone = 1;
+					usable = LipTableRich(table);
+					Log(std::format("[v100] injected \"{}\" -> frames={} rich={}", name, LipTableFrameCount(table), usable ? 1 : 0));
+					// [v100] merge once per loaded table (not once per process):
+					// the cut scene swaps in a new table and the merged data has
+					// to be rebuilt for that one.
+					if (usable && g_lipMergedTable[ch] != table) {
+						g_lipMergedTable[ch] = table;
 						// [v96] pick the loudest track per frame (LipData.db) and copy
 						// that table's lip data into the singer's table.
 						try { LipMergeByDb(ch, cid); } catch (...) {}
 						ctrl = LipControllerOf(ch);
 						table = ctrl ? LipTableOf(ctrl) : nullptr;
-						usable = LipTableUsable(table);
+						usable = LipTableRich(table);
 					}
 					if (usable) { g_lipInjectedTable[ch] = table; ++g_lipInjectCount; }
 					Log(std::format("[v87]   after setup ctrl={} usable={} {}", ps(ctrl), usable ? 1 : 0, LipControllerState(ctrl)));
