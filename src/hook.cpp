@@ -2608,13 +2608,15 @@ namespace
 		try {
 			FILE* f = fopen("lyric-lines.txt", n == 1 ? "wb" : "ab");
 			if (f) {
-				const std::string line = std::format("{:03d}\t{}\t{}\n", n, src, utf8);
+				// GetTickCount64 is the same clock the [v87] tick lines are
+				// stamped with, so a later pass can map wall clock -> song time.
+				const unsigned long long ms = (unsigned long long)GetTickCount64();
+				const std::string line = std::format("{:03d}\t{}.{:03d}\t{}\t{}\n",
+					n, ms / 1000, ms % 1000, src, utf8);
 				fwrite(line.data(), 1, line.size(), f);
 				fclose(f);
 			}
 		}
-		catch (...) {}
-		try { Log(std::format("[v101] lyric #{:03d} {}", n, utf8)); }
 		catch (...) {}
 	}
 
