@@ -4760,6 +4760,14 @@ namespace
 		// "helping" by copying other idols' frames only makes the mouth wrong.
 		// merge=1 restores the old per-frame db merge for experiments.
 		int g_lipSoloMerge = 0;
+		// [v102] drivecs=1 (default): keep driving the soloist inside a cut scene.
+		// A session log proved the game never calls UpdateLip while a cut scene
+		// is enabled ([22955.9] CutScene.OnEnable endFrame=1216 -> nothing until
+		// [22976.2]), so song time 78.3..102.4 s had no lip motion at all even
+		// though four lyric lines fall inside it.  The cut-scene table only holds
+		// 1216 frames (it cannot cover song time), so the driver swaps the full
+		// song table back in and drives that.
+		int g_lipSoloDriveCs = 1;
 		std::mutex g_lipMutex;
 		std::vector<void*> g_lipCharacters;
 
@@ -5594,7 +5602,7 @@ namespace
 		std::unordered_map<void*, void*> g_lipInjectedTable;   // character -> table we installed
 
 		void LipSoloConfig() {
-			int ow = 0, lk = 0, mg = 0;
+			int ow = 0, lk = 0, mg = 0, dc = 1;
 			FILE* f = fopen("lip-solo.txt", "r");
 			if (f) {
 				char line[160]{};
@@ -5608,12 +5616,14 @@ namespace
 					if (k == "overwrite") ow = (v == "1" || v == "true") ? 1 : 0;
 					else if (k == "lockexpik") lk = (v == "1" || v == "true") ? 1 : 0;
 					else if (k == "merge") mg = (v == "1" || v == "true") ? 1 : 0;
+					else if (k == "drivecs") dc = (v == "1" || v == "true") ? 1 : 0;
 				}
 				fclose(f);
 			}
 			g_lipSoloOverwrite = ow;
 			g_lipSoloLockExp = lk;
 			g_lipSoloMerge = mg;
+			g_lipSoloDriveCs = dc;
 		}
 
 		std::string LipTok(int cid) {
@@ -6313,10 +6323,19 @@ namespace
 		void LipSoloDrive(float time) {
 			if (g_lipMode != "on" || !g_setupLipStringMi || !g_lipUpdateMethod) return;
 			if (g_lastSoloVocalMode != 2) return;    // only solo mode lacks lips
-			if (g_csActive > 0) { g_lipCsSeen = 1; return; }   // special performance keeps its own lips
+			// [v102] a cut scene used to be skipped outright, but the game never
+			// calls UpdateLip inside one (measured: nothing between
+			// CutScene.OnEnable endFrame=1216 and the next normal tick), so the
+			// soloist's mouth froze for the whole insert while the song played on.
+			// drivecs=1 keeps driving her with the full song table instead.
+			const bool inCs = g_csActive > 0;
+			if (inCs) {
+				g_lipCsSeen = 1;
+				if (!g_lipSoloDriveCs) return;   // lip-solo.txt drivecs=0 = old behaviour
+			}
 			// [v100] first tick after a special performance: the game has just
 			// rebuilt the soloist's table, so drop both caches and redo the work.
-			if (g_lipCsSeen) {
+			else if (g_lipCsSeen) {
 				g_lipCsSeen = 0;
 				g_lipInjectedTable.clear();
 				g_lipMergedTable.clear();
@@ -6899,7 +6918,7 @@ namespace
 				} catch (...) {}
 				try {
 					LipSoloConfig();
-					Log(std::format("[v87] lip-solo.txt overwrite={} lockexpik={} merge={}", g_lipSoloOverwrite, g_lipSoloLockExp, g_lipSoloMerge));
+					Log(std::format("[v87] lip-solo.txt overwrite={} lockexpik={} merge={} drivecs={}", g_lipSoloOverwrite, g_lipSoloLockExp, g_lipSoloMerge, g_lipSoloDriveCs));
 				} catch (...) {}
 			}
 			if (g_lipGroupAsync) {
