@@ -2581,8 +2581,46 @@ namespace
 		return dumpCount;
 	}
 
+	// ---------------------------------------------------------------
+	// [v101] lyric capture.
+	//
+	//   The game itself hands every displayed lyric line to
+	//   LiveMVOverlayView.UpdateLyrics / TimelineController.SetLyric, so
+	//   these two methods are the only trustworthy source for BOTH the
+	//   text and where in the song it appears.  Previously the timeline
+	//   was guessed by spreading the lyric file over the singing frames,
+	//   which produced a table for the wrong song entirely.
+	//
+	//   lyric-lines.txt  "NNN<TAB>source<TAB>text"  (UTF-8, rewritten at
+	//   the start of every process).  Each write is mirrored to the log,
+	//   whose [seconds.millis] prefix maps onto song time through the
+	//   "[v87] tick #n time=x" lines.
+	int g_lyricDumpCount = 0;
+	std::string g_lyricDumpLast;
+	void LipDumpLyricText(const char* src, Il2CppString* text) {
+		if (!text) return;
+		std::string utf8;
+		try { utf8 = text->ToUtf8String(); }
+		catch (...) { return; }
+		if (utf8.empty() || utf8 == g_lyricDumpLast) return;
+		g_lyricDumpLast = utf8;
+		const int n = ++g_lyricDumpCount;
+		try {
+			FILE* f = fopen("lyric-lines.txt", n == 1 ? "wb" : "ab");
+			if (f) {
+				const std::string line = std::format("{:03d}\t{}\t{}\n", n, src, utf8);
+				fwrite(line.data(), 1, line.size(), f);
+				fclose(f);
+			}
+		}
+		catch (...) {}
+		try { Log(std::format("[v101] lyric #{:03d} {}", n, utf8)); }
+		catch (...) {}
+	}
+
 	HOOK_ORIG_TYPE LiveMVOverlayView_UpdateLyrics_orig;
 	void LiveMVOverlayView_UpdateLyrics_hook(void* _this, Il2CppString* text) {
+		if (text) { try { LipDumpLyricText("overlay", text); } catch (...) {} }
 		const std::wstring origWstr(text->start_char);
 		const auto newText = SCLocal::getLyricsTrans(origWstr);
 		return HOOK_CAST_CALL(void, LiveMVOverlayView_UpdateLyrics)(_this, il2cpp_string_new(newText.c_str()));
@@ -2591,6 +2629,7 @@ namespace
 	std::pair<std::wstring, std::string> lastLrc{};
 	HOOK_ORIG_TYPE TimelineController_SetLyric_orig;
 	void TimelineController_SetLyric_hook(void* _this, Il2CppString* text) {
+		if (text) { try { LipDumpLyricText("timeline", text); } catch (...) {} }
 		const std::wstring origWstr(text->start_char);
 		std::string newText = "";
 		if (!origWstr.empty()) {
@@ -5523,6 +5562,7 @@ namespace
 		float g_lipLastTime = -1.0f;
 		int g_lipDriveLogs = 0;
 		int g_lipDriveTicks = 0;
+		int g_lipLiveWrites = 0;                // [v101] lip-live.csv row counter
 		int g_csActive = 0;                     // >0 while a cut scene is enabled
 		void LipSoloDrive(float time);
 
@@ -6375,6 +6415,23 @@ namespace
 				}
 				// UpdateLip takes the *song time*, not a delta
 				HOOK_CAST_CALL(void, LipSyncController_UpdateLip)(ctrl, time, g_lipUpdateMethod);
+				// [v101] sample what the controller actually holds right now.
+				// This separates "the table is injected" from "the mouth moves":
+				// if the viseme values stay at zero the expression system won.
+				if ((ticks % 30) == 0) {
+					try {
+						void* lipsNow = LipReadPtr(ctrl, "_lips");
+						FILE* lf = fopen("lip-live.csv", g_lipLiveWrites == 0 ? "wb" : "ab");
+						if (lf) {
+							const std::string line = std::format("{:.3f}\t{}\t{}\t{}\n",
+								time, cid, tableFrames, LipValues(lipsNow));
+							fwrite(line.data(), 1, line.size(), lf);
+							fclose(lf);
+							++g_lipLiveWrites;
+						}
+					}
+					catch (...) {}
+				}
 			}
 		}
 
