@@ -6860,6 +6860,24 @@ namespace
 		}
 
 
+		// Read-only diagnostic: capture the game-provided volume toggle schedule.
+		// The original SetData remains responsible for all game behaviour.
+		HOOK_ORIG_TYPE VocalSchedule_SetData_orig;
+		void VocalSchedule_SetData_hook(void* self, void* dataList, void* method) {
+			HOOK_CAST_CALL(void, VocalSchedule_SetData)(self, dataList, method);
+			try {
+				Log(std::format("[vocal-schedule] SetData song={} mode={} list={}",
+					g_lastMvSongId, g_lastSoloVocalMode, ViewDiag::ptr_str(dataList)));
+				if (!dataList) return;
+				auto serialize = reinterpret_cast<Il2CppString* (*)(void*)>(
+					il2cpp_symbols::get_method_pointer("Newtonsoft.Json.dll", "Newtonsoft.Json", "JsonConvert", "SerializeObject", 1));
+				if (!serialize) { Log("[vocal-schedule] serializer unavailable"); return; }
+				Il2CppString* json = serialize(dataList);
+				if (json) Log(std::string("[vocal-schedule] data=") + json->ToUtf8String());
+				else Log("[vocal-schedule] null JSON");
+			} catch (...) { Log("[vocal-schedule] capture failed"); }
+		}
+
 		void InstallLipDiag(int& installed) {
 			auto add = [&](const char* label, void* addr, void* detour, HOOK_ORIG_TYPE& orig) {
 				if (!addr) { Log(std::format("[v71] {} not found", label)); return; }
@@ -6868,6 +6886,9 @@ namespace
 					Log(std::format("[v71] {} hooked @ {}", label, ViewDiag::ptr_str(addr)));
 				}
 			};
+			add("VocalSeparatedController.SetData",
+				ViewDiag::find_method_anywhere("PRISM.RhythmGame", "VocalSeparatedController", "SetData", 1),
+				(void*)VocalSchedule_SetData_hook, VocalSchedule_SetData_orig);
 			if (g_lipCsSetup) {
 				add("CutScene.SetupControllers", ViewDiag::find_method_anywhere("PRISM", "CutScene", "SetupControllers", 0),
 					(void*)CutScene_SetupControllers_hook, CutScene_SetupControllers_orig);
