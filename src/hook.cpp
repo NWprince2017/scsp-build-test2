@@ -6321,7 +6321,7 @@ namespace
 		}
 
 		// Experimental song-118 table is a separate AssetBundle; never mutate native tables.
-		bool LipUseSummerComposite(void* character, void* controller, void* original, int cid) {
+		int LipUseSummerComposite(void* character, void* controller, void* original, int cid) {
 			if (g_lastMvSongId != 118 || cid != 18 || !character || !controller || !original) return false;
 			if (!std::filesystem::exists("lip-118-composite.bundle")) return false;
 			try {
@@ -6337,10 +6337,17 @@ namespace
 				}
 				auto field = FieldOf(KlassOf(controller), "_lipSyncTable");
 				if (!field) return false;
-				il2cpp_field_set_value(controller, field, &composite);
-				bool ok = LipTableOf(controller) == composite;
-				Log(std::format("[vocal-composite] bound={} {}", ok ? 1 : 0, LipTableInfo(composite)));
-				return ok;
+				// For reference fields il2cpp_field_set_value takes the object itself,
+				// not the address of a native pointer variable (which corrupts the field).
+				il2cpp_field_set_value(controller, field, composite);
+				if (LipTableOf(controller) != composite) {
+					il2cpp_field_set_value(controller, field, original);
+					const bool restored = LipTableOf(controller) == original;
+					Log(std::format("[vocal-composite] binding failed, restored={}", restored ? 1 : 0));
+					return restored ? 0 : -1;
+				}
+				Log(std::format("[vocal-composite] bound=1 {}", LipTableInfo(composite)));
+				return 1;
 			} catch (...) { Log("[vocal-composite] failed; using existing method"); return false; }
 		}
 
@@ -6439,9 +6446,13 @@ namespace
 						const bool isCompositeTest = g_lastMvSongId == 118 && cid == 18 &&
 							std::filesystem::exists("lip-118-composite.bundle");
 						if (isCompositeTest) {
-						bool compositeBound = false;
-						try { compositeBound = LipUseSummerComposite(ch, ctrl, table, cid); } catch (...) {}
-						if (!compositeBound) Log("[vocal-composite] keeping original table after load failure");
+						int compositeResult = 0;
+						try { compositeResult = LipUseSummerComposite(ch, ctrl, table, cid); } catch (...) {}
+						if (compositeResult < 0) {
+							Log("[vocal-composite] unsafe table; stopping controller updates");
+							continue;
+						}
+						if (compositeResult == 0) Log("[vocal-composite] keeping original table after load failure");
 						} else { try { LipMergeByDb(ch, cid); } catch (...) {} }
 						ctrl = LipControllerOf(ch);
 						table = ctrl ? LipTableOf(ctrl) : nullptr;
