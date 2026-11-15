@@ -4239,6 +4239,7 @@ namespace
 		}
 
 		void ApplySoloIndexMap(void* _this, void* onStageIdols, int origIndex, int charaId, int songId) {
+			if (g_lastSoloVocalMode != 2) return;
 			if (g_soloMapLogs++ > 60) return;
 			const std::string mode = ReadSoloMapMode();
 			auto k = KlassOf(_this);
@@ -4851,7 +4852,7 @@ namespace
 
 		void Character_UpdateLip_hook(void* _this, float dt, void* mtd) {
 			try {
-				if (_this) LipTryInjectMvTable(_this);
+				if (_this && g_lastSoloVocalMode == 2) LipTryInjectMvTable(_this);
 			}
 			catch (...) {}
 			return HOOK_CAST_CALL(void, Character_UpdateLip)(_this, dt, mtd);
@@ -5158,6 +5159,7 @@ namespace
 
 		HOOK_ORIG_TYPE Character_SetupLipDiag_orig;
 		void Character_SetupLipDiag_hook(void* _this, void* table, float offsetTime, float addTime, void* mtd) {
+			if (g_lastSoloVocalMode != 2) return HOOK_CAST_CALL(void, Character_SetupLipDiag)(_this, table, offsetTime, addTime, mtd);
 			void* use = table;
 			try {
 				const int cid = LipCharaId(_this);
@@ -6602,6 +6604,8 @@ namespace
 		HOOK_ORIG_TYPE Character_SetupLipName_orig;
 		void Character_SetupLipName_hook(void* _this, void* name, float offsetTime, float addTime, void* mtd);
 		void Character_SetupLipName_hook(void* _this, void* name, float offsetTime, float addTime, void* mtd) {
+			// Full-chorus resources must go to the game unmodified.
+			if (g_lastSoloVocalMode != 2) return HOOK_CAST_CALL(void, Character_SetupLipName)(_this, name, offsetTime, addTime, mtd);
 			const int cid = _this ? LipCharaId(_this) : -1;
 			const std::string nm = Il2CppStrOf(name);
 			try { LipLearnToken(cid, nm); } catch (...) {}
@@ -6870,7 +6874,7 @@ namespace
 		// When that one is empty but the shared name is not, hand the shared table
 		// over instead - still the game's own data, just reused.
 		void CutSceneDataForceSolo(void* cs) {
-			if (g_lipMode != "on" || !cs || !RunwayDump::PlausiblePtr((uintptr_t)cs)) return;
+			if (g_lastSoloVocalMode != 2 || g_lipMode != "on" || !cs || !RunwayDump::PlausiblePtr((uintptr_t)cs)) return;
 			void* data = RunwayDump::ReadPtr(cs, "sceneCreateData");
 			if (!data || !RunwayDump::PlausiblePtr((uintptr_t)data)) return;
 			if (!LipStrOf(RunwayDump::ReadPtr(data, "soloLipSyncName")).empty()) return;
@@ -6908,7 +6912,7 @@ namespace
 		// normal MV does.  The data is still the game's own table - nothing is
 		// opened/closed by hand.
 		void CutSceneForceLip(void* cs) {
-			if (g_lipMode != "on" || !cs || !RunwayDump::PlausiblePtr((uintptr_t)cs)) return;
+			if (g_lastSoloVocalMode != 2 || g_lipMode != "on" || !cs || !RunwayDump::PlausiblePtr((uintptr_t)cs)) return;
 			if (LipReadBool(cs, "forcedCutSceneLipSyncWithSolo")) return;
 			if (LipWriteBool(cs, "forcedCutSceneLipSyncWithSolo", true))
 				Log("[v73] forcedCutSceneLipSyncWithSolo -> true");
@@ -6967,6 +6971,7 @@ namespace
 
 		HOOK_ORIG_TYPE CutScene_SetLipSync_orig;
 		void CutScene_SetLipSync_hook(void* _this, int mode, int soloIndex, void* name, float startTime, void* mtd) {
+			if (g_lastSoloVocalMode != 2) return HOOK_CAST_CALL(void, CutScene_SetLipSync)(_this, mode, soloIndex, name, startTime, mtd);
 			void* useName = name;
 			Log(std::format("[v74] > CutScene.SetLipSync enter this={} nameRaw={}",
 				ViewDiag::ptr_str(_this), ViewDiag::ptr_str(name)));
