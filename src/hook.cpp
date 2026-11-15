@@ -6320,6 +6320,30 @@ namespace
 				frameCount, filled, kept, silent, switched));
 		}
 
+		// Experimental song-118 table is a separate AssetBundle; never mutate native tables.
+		bool LipUseSummerComposite(void* character, void* controller, void* original, int cid) {
+			if (g_lastMvSongId != 118 || cid != 18 || !character || !controller || !original) return false;
+			if (!std::filesystem::exists("lip-118-composite.bundle")) return false;
+			try {
+				auto klass = KlassOf(original);
+				if (!klass) return false;
+				auto type = il2cpp_type_get_object(il2cpp_class_get_type(klass));
+				if (!type) return false;
+				void* composite = LoadExternAsset("lip-118-composite.bundle::summer_fuyuko.asset", type);
+				if (!composite || LipTableFrameCount(composite) != 9634 ||
+					RunwayDump::ReadInt(composite, "frameRate") != 60 ||
+					RunwayDump::ReadInt(composite, "offsetFrame") != 8) {
+					Log("[vocal-composite] experimental table missing or invalid"); return false;
+				}
+				auto field = FieldOf(KlassOf(controller), "_lipSyncTable");
+				if (!field) return false;
+				il2cpp_field_set_value(controller, field, &composite);
+				bool ok = LipTableOf(controller) == composite;
+				Log(std::format("[vocal-composite] bound={} {}", ok ? 1 : 0, LipTableInfo(composite)));
+				return ok;
+			} catch (...) { Log("[vocal-composite] failed; using existing method"); return false; }
+		}
+
 		void LipSoloDrive(float time) {
 			if (g_lipMode != "on" || !g_setupLipStringMi || !g_lipUpdateMethod) return;
 			if (g_lastSoloVocalMode != 2) return;    // only solo mode lacks lips
@@ -6412,7 +6436,13 @@ namespace
 						g_lipMergedTable[ch] = table;
 						// [v96] pick the loudest track per frame (LipData.db) and copy
 						// that table's lip data into the singer's table.
-						try { LipMergeByDb(ch, cid); } catch (...) {}
+						const bool isCompositeTest = g_lastMvSongId == 118 && cid == 18 &&
+							std::filesystem::exists("lip-118-composite.bundle");
+						if (isCompositeTest) {
+						bool compositeBound = false;
+						try { compositeBound = LipUseSummerComposite(ch, ctrl, table, cid); } catch (...) {}
+						if (!compositeBound) Log("[vocal-composite] keeping original table after load failure");
+						} else { try { LipMergeByDb(ch, cid); } catch (...) {} }
 						ctrl = LipControllerOf(ch);
 						table = ctrl ? LipTableOf(ctrl) : nullptr;
 						usable = LipTableRich(table);
