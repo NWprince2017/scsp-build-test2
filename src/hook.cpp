@@ -6439,12 +6439,13 @@ namespace
 					// [v100] merge once per loaded table (not once per process):
 					// the cut scene swaps in a new table and the merged data has
 					// to be rebuilt for that one.
-					if (usable && g_lipMergedTable[ch] != table) {
+					const bool isCompositeTest = g_lastMvSongId == 118 && cid == 18 &&
+						std::filesystem::exists("lip-118-composite.bundle");
+					// SetupLip(name) rebinds the original table even when its pointer is
+					// unchanged, so the independent composite must be rebound on every injection.
+					if (usable && (isCompositeTest || g_lipMergedTable[ch] != table)) {
 						g_lipMergedTable[ch] = table;
-						// [v96] pick the loudest track per frame (LipData.db) and copy
-						// that table's lip data into the singer's table.
-						const bool isCompositeTest = g_lastMvSongId == 118 && cid == 18 &&
-							std::filesystem::exists("lip-118-composite.bundle");
+						// [v96] other songs retain their existing merge behaviour.
 						if (isCompositeTest) {
 						int compositeResult = 0;
 						try { compositeResult = LipUseSummerComposite(ch, ctrl, table, cid); } catch (...) {}
