@@ -6535,6 +6535,29 @@ namespace
 			}
 			catch (...) { useName = name; swapped.clear(); }
 			HOOK_CAST_CALL(void, Character_SetupLipName)(_this, useName, offsetTime, addTime, mtd);
+			// Scoped solo test: give the non-singing centre an isolated copy of her
+			// special-performance table with only the reported line neutralised.
+			try {
+				if (g_lipMode == "on" && g_lastSoloVocalMode == 2 && g_lastMvSongId == 118 &&
+					LipSingerChara() == 18 && nm == "Summer/CS_118Summer_UCS_01_03meguru_01" &&
+					std::filesystem::exists("lip-118-meguru-quiet.bundle")) {
+					void* target = LipControllerOf(_this);
+					void* original = target ? LipTableOf(target) : nullptr;
+					if (target && original && LipCtlCharaId(target) == 3 && LipTableFrameCount(original) == 1216) {
+						auto klass = KlassOf(original);
+						auto type = klass ? il2cpp_type_get_object(il2cpp_class_get_type(klass)) : nullptr;
+						void* quiet = type ? LoadExternAsset("lip-118-meguru-quiet.bundle::cs_118summer_ucs_01_03meguru_01.asset", type) : nullptr;
+						auto field = FieldOf(KlassOf(target), "_lipSyncTable");
+						if (field && quiet && LipTableFrameCount(quiet) == 1216 &&
+							RunwayDump::ReadInt(quiet, "frameRate") == 60 && RunwayDump::ReadInt(quiet, "offsetFrame") == 10) {
+							il2cpp_field_set_value(target, field, quiet);
+							bool bound = LipTableOf(target) == quiet;
+							if (!bound) il2cpp_field_set_value(target, field, original);
+							Log(std::format("[vocal-quiet] meguru special table bound={}", bound ? 1 : 0));
+						} else Log("[vocal-quiet] asset missing or invalid; original retained");
+					}
+				}
+			} catch (...) { Log("[vocal-quiet] could not bind optional table"); }
 			if (!swapped.empty()) {
 				try {
 					void* ctrl = LipControllerOf(_this);
