@@ -6320,9 +6320,13 @@ namespace
 				frameCount, filled, kept, silent, switched));
 		}
 
+		// Only the eight singers with song-118 separated tracks use this composite.
+		bool IsSummer118Singer(int cid) {
+			switch (cid) { case 3: case 7: case 9: case 15: case 18: case 22: case 25: case 28: return true; default: return false; }
+		}
 		// Experimental song-118 table is a separate AssetBundle; never mutate native tables.
 		int LipUseSummerComposite(void* character, void* controller, void* original, int cid) {
-			if (g_lastMvSongId != 118 || cid != 18 || !character || !controller || !original) return false;
+			if (g_lastMvSongId != 118 || !IsSummer118Singer(cid) || !character || !controller || !original) return false;
 			if (!std::filesystem::exists("lip-118-composite.bundle")) return false;
 			try {
 				auto klass = KlassOf(original);
@@ -6418,10 +6422,14 @@ namespace
 				// the game resets lip sync after the cut scene, which wipes our table
 				auto inj = g_lipInjectedTable.find(ch);
 				const bool lost = usable && inj != g_lipInjectedTable.end() && inj->second && table != inj->second;
+				// A valid native table may already be present when the singer occupies
+				// a different stage slot. Install the composite once even in that case.
+				const bool needsInitialComposite = usable && inj == g_lipInjectedTable.end() &&
+					g_lastMvSongId == 118 && IsSummer118Singer(cid) && std::filesystem::exists("lip-118-composite.bundle");
 				if (logEval)
 					Log(std::format("[v86] char {} slot={} ctrl={} cidCtl={} cidMap={} cid={} frames={} rich={} lost={}",
 						i, cidSlot, ps(ctrl), cidCtl, cidMap, cid, tableFrames, usable ? 1 : 0, lost ? 1 : 0));
-				if ((!usable || lost) && ticks >= g_lipNextInjectTick) {
+				if ((!usable || lost || needsInitialComposite) && ticks >= g_lipNextInjectTick) {
 					g_lipNextInjectTick = ticks + 30;
 					const std::string name = LipMvTableNameFor(cid);
 					Log(std::format("[v87] soloist index={} chara={} ctrl={} lost={} -> inject \"{}\"",
@@ -6439,7 +6447,7 @@ namespace
 					// [v100] merge once per loaded table (not once per process):
 					// the cut scene swaps in a new table and the merged data has
 					// to be rebuilt for that one.
-					const bool isCompositeTest = g_lastMvSongId == 118 && cid == 18 &&
+					const bool isCompositeTest = g_lastMvSongId == 118 && IsSummer118Singer(cid) &&
 						std::filesystem::exists("lip-118-composite.bundle");
 					// SetupLip(name) rebinds the original table even when its pointer is
 					// unchanged, so the independent composite must be rebound on every injection.
@@ -6498,6 +6506,41 @@ namespace
 			}
 		}
 
+		// Safe fallback for a special-performance asset not cached during packaging.
+		// Clone via Unity, prove all 1216 entries are independent, and retain a GC
+		// handle. Never touch the source if the engine returns a shallow clone.
+		void* LipQuietSpecialClone(void* source, const std::string& assetName) {
+			static std::unordered_map<std::string, void*> handles;
+			auto hit = handles.find(assetName);
+			if (hit != handles.end()) return il2cpp_gchandle_get_target(hit->second);
+			auto* mi = il2cpp_symbols_logged::get_method("UnityEngine.CoreModule.dll", "UnityEngine", "Object", "Internal_CloneSingle", 1);
+			if (!mi || !mi->methodPointer) { Log("[vocal-quiet] clone method missing"); return nullptr; }
+			auto cloneFn = (void*(*)(void*, void*))mi->methodPointer;
+			void* clone = cloneFn(source, mi);
+			if (!clone || clone == source) return nullptr;
+			void* handle = il2cpp_gchandle_new(clone, false);
+			if (!handle) return nullptr;
+			auto reject = [&]() -> void* { il2cpp_gchandle_free(handle); return nullptr; };
+			if (LipTableFrameCount(clone) != 1216 || RunwayDump::ReadInt(clone, "frameRate") != 60 ||
+				RunwayDump::ReadInt(clone, "offsetFrame") != 10) return reject();
+			void* originalData = RunwayDump::ReadPtr(source, "datas");
+			void* clonedData = RunwayDump::ReadPtr(clone, "datas");
+			std::string why;
+			if (!originalData || !clonedData || originalData == clonedData ||
+				!LipDatasIsRefArray(originalData, &why) || !LipDatasIsRefArray(clonedData, &why)) return reject();
+			for (int i = 0; i < 1216; ++i) {
+				float* a = LipElem(originalData, i); float* z = LipElem(clonedData, i);
+				if (!a || !z || a == z || std::memcmp(a, z, kLipFloats * sizeof(float)) != 0) return reject();
+			}
+			for (int i = 609; i < 877; ++i) {
+				float* values = LipElem(clonedData, i);
+				for (int k = 1; k <= 5; ++k) values[k] = 0.0f;
+			}
+			handles.emplace(assetName, handle);
+			Log(std::format("[vocal-quiet] generated validated copy for {}", assetName));
+			return clone;
+		}
+
 		HOOK_ORIG_TYPE Character_SetupLipName_orig;
 		void Character_SetupLipName_hook(void* _this, void* name, float offsetTime, float addTime, void* mtd);
 		void Character_SetupLipName_hook(void* _this, void* name, float offsetTime, float addTime, void* mtd) {
@@ -6517,7 +6560,11 @@ namespace
 			void* useName = name;
 			std::string swapped;
 			try {
-				if (g_lipMode == "on" && nm.find("CS_") != std::string::npos) {
+				const int currentSinger = LipSingerChara();
+				const bool keepSummerHead = g_lastMvSongId == 118 && g_lastSoloVocalMode == 2 &&
+					currentSinger > 0 && LipCharaId(_this) == 0 && LipCharaFromSlot(0) > 0 &&
+					LipCharaFromSlot(0) != currentSinger && nm.rfind("Summer/CS_118Summer_UCS_01_", 0) == 0;
+				if (g_lipMode == "on" && nm.find("CS_") != std::string::npos && !keepSummerHead) {
 					const int singer = LipSingerChara();
 					const std::string token = LipIdolToken(singer);
 					swapped = SwapCsLipName(nm, singer, token);
@@ -6535,26 +6582,40 @@ namespace
 			}
 			catch (...) { useName = name; swapped.clear(); }
 			HOOK_CAST_CALL(void, Character_SetupLipName)(_this, useName, offsetTime, addTime, mtd);
-			// Scoped solo test: give the non-singing centre an isolated copy of her
-			// special-performance table with only the reported line neutralised.
+			// Retain the centre's own special expressions but neutralise the observed
+			// extra lyric only when another idol is singing solo.
 			try {
+				const std::string prefix = "Summer/CS_118Summer_UCS_01_";
+				const int singer = LipSingerChara();
 				if (g_lipMode == "on" && g_lastSoloVocalMode == 2 && g_lastMvSongId == 118 &&
-					LipSingerChara() == 18 && nm == "Summer/CS_118Summer_UCS_01_03meguru_01" &&
-					std::filesystem::exists("lip-118-meguru-quiet.bundle")) {
+					singer > 0 && LipCharaId(_this) == 0 && nm.rfind(prefix, 0) == 0 && nm.size() >= prefix.size() + 2 &&
+					nm[prefix.size()] >= '0' && nm[prefix.size()] <= '9' &&
+					nm[prefix.size()+1] >= '0' && nm[prefix.size()+1] <= '9') {
+					const int actor = (nm[prefix.size()] - '0') * 10 + nm[prefix.size()+1] - '0';
 					void* target = LipControllerOf(_this);
 					void* original = target ? LipTableOf(target) : nullptr;
-					if (target && original && LipCtlCharaId(target) == 3 && LipTableFrameCount(original) == 1216) {
-						auto klass = KlassOf(original);
-						auto type = klass ? il2cpp_type_get_object(il2cpp_class_get_type(klass)) : nullptr;
-						void* quiet = type ? LoadExternAsset("lip-118-meguru-quiet.bundle::cs_118summer_ucs_01_03meguru_01.asset", type) : nullptr;
+					if (actor > 0 && actor != singer && actor == LipCharaFromSlot(0) && target && original &&
+						LipCtlCharaId(target) == actor && LipTableFrameCount(original) == 1216 &&
+						RunwayDump::ReadInt(original, "frameRate") == 60 && RunwayDump::ReadInt(original, "offsetFrame") == 10) {
+						std::string asset = nm.substr(nm.find_last_of('/') + 1);
+						for (char& c : asset) if (c >= 'A' && c <= 'Z') c = char(c - 'A' + 'a');
+						asset += ".asset";
+						std::string path = std::format("lip-118-cs-quiet-{:02}.bundle", actor);
+						void* quiet = nullptr;
+						if (std::filesystem::exists(path)) {
+							auto klass = KlassOf(original);
+							auto type = klass ? il2cpp_type_get_object(il2cpp_class_get_type(klass)) : nullptr;
+							if (type) quiet = LoadExternAsset(path + "::" + asset, type);
+						}
+						if (!quiet) quiet = LipQuietSpecialClone(original, nm);
 						auto field = FieldOf(KlassOf(target), "_lipSyncTable");
 						if (field && quiet && LipTableFrameCount(quiet) == 1216 &&
 							RunwayDump::ReadInt(quiet, "frameRate") == 60 && RunwayDump::ReadInt(quiet, "offsetFrame") == 10) {
 							il2cpp_field_set_value(target, field, quiet);
 							bool bound = LipTableOf(target) == quiet;
 							if (!bound) il2cpp_field_set_value(target, field, original);
-							Log(std::format("[vocal-quiet] meguru special table bound={}", bound ? 1 : 0));
-						} else Log("[vocal-quiet] asset missing or invalid; original retained");
+							Log(std::format("[vocal-quiet] actor={} singer={} bound={}", actor, singer, bound ? 1 : 0));
+						} else Log(std::format("[vocal-quiet] actor={} clone/asset unavailable; original retained", actor));
 					}
 				}
 			} catch (...) { Log("[vocal-quiet] could not bind optional table"); }
