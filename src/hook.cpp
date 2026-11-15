@@ -6325,15 +6325,17 @@ namespace
 			switch (cid) { case 3: case 7: case 9: case 15: case 18: case 22: case 25: case 28: return true; default: return false; }
 		}
 		// Experimental song-118 table is a separate AssetBundle; never mutate native tables.
-		int LipUseSummerComposite(void* character, void* controller, void* original, int cid) {
+		int LipUseSummerComposite(void* character, void* controller, void* original, int cid, int slot) {
 			if (g_lastMvSongId != 118 || !IsSummer118Singer(cid) || !character || !controller || !original) return false;
-			if (!std::filesystem::exists("lip-118-composite.bundle")) return false;
+			if (slot < 0 || slot >= 8) return false;
+			const std::string path = std::format("lip-118-main-slot-{}.bundle", slot);
+			if (!std::filesystem::exists(path)) return false;
 			try {
 				auto klass = KlassOf(original);
 				if (!klass) return false;
 				auto type = il2cpp_type_get_object(il2cpp_class_get_type(klass));
 				if (!type) return false;
-				void* composite = LoadExternAsset("lip-118-composite.bundle::summer_fuyuko.asset", type);
+				void* composite = LoadExternAsset(path + "::summer_fuyuko.asset", type);
 				if (!composite || LipTableFrameCount(composite) != 9634 ||
 					RunwayDump::ReadInt(composite, "frameRate") != 60 ||
 					RunwayDump::ReadInt(composite, "offsetFrame") != 8) {
@@ -6350,7 +6352,7 @@ namespace
 					Log(std::format("[vocal-composite] binding failed, restored={}", restored ? 1 : 0));
 					return restored ? 0 : -1;
 				}
-				Log(std::format("[vocal-composite] bound=1 {}", LipTableInfo(composite)));
+				Log(std::format("[vocal-main] slot={} actor={} bound=1 {}", slot, cid, LipTableInfo(composite)));
 				return 1;
 			} catch (...) { Log("[vocal-composite] failed; using existing method"); return false; }
 		}
@@ -6365,13 +6367,15 @@ namespace
 		void* g_summerExpressionArray = nullptr;
 		void LipSummerBackgroundExpressions(void* arr, int count, int singer, float time, int tick) {
 			if (g_lastMvSongId != 118 || g_lastSoloVocalMode != 2 || g_lipMode != "on" ||
-				g_csActive > 0 || !arr || singer <= 0 || !g_lipUpdateMethod || !g_setupLipStringMi) return;
+				!arr || singer <= 0 || !g_lipUpdateMethod || !g_setupLipStringMi) return;
 			static const char* names[8] = { "meguru", "yuika", "kaho", "fuyuko", "tenka", "haruki", "koito", "mikoto" };
 			if (arr != g_summerExpressionArray) {
 				g_summerExpressionArray = arr;
 				for (auto& x : g_summerExpressionSlots) x = SummerExpressionSlot{};
 			}
 			for (int slot = 0; slot < count && slot < 8; ++slot) {
+				// The centre uses its separate special-performance expression table.
+				if (g_csActive > 0 && slot == 0) continue;
 				const int actor = LipCharaFromSlot(slot);
 				if (actor <= 0 || actor == singer) continue;
 				void* ch = nullptr;
@@ -6384,7 +6388,7 @@ namespace
 				if (!ctrl || !entry.table || ctrl != entry.controller || current != entry.table) {
 					if (tick < entry.retryAt) continue;
 					entry.retryAt = tick + 120;
-					const std::string path = std::format("lip-118-expr-slot-{}.bundle", slot);
+					const std::string path = std::format("lip-118-cross-slot-{}.bundle", slot);
 					if (!std::filesystem::exists(path)) continue;
 					if (!ctrl || !current) {
 						if (!HOOK_GET_ORIG(Character_SetupLipName)) continue;
@@ -6402,7 +6406,7 @@ namespace
 					il2cpp_field_set_value(ctrl, field, expression);
 					if (LipTableOf(ctrl) != expression) { il2cpp_field_set_value(ctrl, field, current); continue; }
 					entry.controller = ctrl; entry.table = expression; entry.retryAt = 0;
-					Log(std::format("[vocal-expression] slot={} actor={} singer={} bound=1", slot, actor, singer));
+					Log(std::format("[vocal-cross] slot={} actor={} singer={} bound=1", slot, actor, singer));
 				}
 				if (entry.controller && entry.table && LipTableOf(entry.controller) == entry.table)
 					HOOK_CAST_CALL(void, LipSyncController_UpdateLip)(entry.controller, time, g_lipUpdateMethod);
@@ -6479,7 +6483,7 @@ namespace
 				// A valid native table may already be present when the singer occupies
 				// a different stage slot. Install the composite once even in that case.
 				const bool needsInitialComposite = usable && inj == g_lipInjectedTable.end() &&
-					g_lastMvSongId == 118 && IsSummer118Singer(cid) && std::filesystem::exists("lip-118-composite.bundle");
+					g_lastMvSongId == 118 && IsSummer118Singer(cid);
 				if (logEval)
 					Log(std::format("[v86] char {} slot={} ctrl={} cidCtl={} cidMap={} cid={} frames={} rich={} lost={}",
 						i, cidSlot, ps(ctrl), cidCtl, cidMap, cid, tableFrames, usable ? 1 : 0, lost ? 1 : 0));
@@ -6501,8 +6505,7 @@ namespace
 					// [v100] merge once per loaded table (not once per process):
 					// the cut scene swaps in a new table and the merged data has
 					// to be rebuilt for that one.
-					const bool isCompositeTest = g_lastMvSongId == 118 && IsSummer118Singer(cid) &&
-						std::filesystem::exists("lip-118-composite.bundle");
+					const bool isCompositeTest = g_lastMvSongId == 118 && IsSummer118Singer(cid);
 					// SetupLip(name) rebinds the original table even when its pointer is
 					// unchanged, so the independent composite must be rebound on every injection.
 					if (usable && (isCompositeTest || g_lipMergedTable[ch] != table)) {
@@ -6510,7 +6513,7 @@ namespace
 						// [v96] other songs retain their existing merge behaviour.
 						if (isCompositeTest) {
 						int compositeResult = 0;
-						try { compositeResult = LipUseSummerComposite(ch, ctrl, table, cid); } catch (...) {}
+						try { compositeResult = LipUseSummerComposite(ch, ctrl, table, cid, i); } catch (...) {}
 						if (compositeResult < 0) {
 							Log("[vocal-composite] unsafe table; stopping controller updates");
 							continue;
