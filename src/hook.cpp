@@ -6355,6 +6355,60 @@ namespace
 			} catch (...) { Log("[vocal-composite] failed; using existing method"); return false; }
 		}
 
+		// Use the original SetupLip trampoline for background roles: bypass token
+		// learning, since the table name identifies the original stage role, not
+		// necessarily the idol currently occupying that role.
+		extern HOOK_ORIG_TYPE Character_SetupLipName_orig;
+		void Character_SetupLipName_hook(void* _this, void* name, float offsetTime, float addTime, void* mtd);
+		struct SummerExpressionSlot { void* character = nullptr; void* controller = nullptr; void* table = nullptr; int retryAt = 0; };
+		SummerExpressionSlot g_summerExpressionSlots[8];
+		void* g_summerExpressionArray = nullptr;
+		void LipSummerBackgroundExpressions(void* arr, int count, int singer, float time, int tick) {
+			if (g_lastMvSongId != 118 || g_lastSoloVocalMode != 2 || g_lipMode != "on" ||
+				g_csActive > 0 || !arr || singer <= 0 || !g_lipUpdateMethod || !g_setupLipStringMi) return;
+			static const char* names[8] = { "meguru", "yuika", "kaho", "fuyuko", "tenka", "haruki", "koito", "mikoto" };
+			if (arr != g_summerExpressionArray) {
+				g_summerExpressionArray = arr;
+				for (auto& x : g_summerExpressionSlots) x = SummerExpressionSlot{};
+			}
+			for (int slot = 0; slot < count && slot < 8; ++slot) {
+				const int actor = LipCharaFromSlot(slot);
+				if (actor <= 0 || actor == singer) continue;
+				void* ch = nullptr;
+				try { ch = il2cpp_symbols::array_get_value(arr, slot); } catch (...) { continue; }
+				if (!ch) continue;
+				auto& entry = g_summerExpressionSlots[slot];
+				if (entry.character != ch) { entry = SummerExpressionSlot{}; entry.character = ch; }
+				void* ctrl = LipControllerOf(ch);
+				void* current = ctrl ? LipTableOf(ctrl) : nullptr;
+				if (!ctrl || !entry.table || ctrl != entry.controller || current != entry.table) {
+					if (tick < entry.retryAt) continue;
+					entry.retryAt = tick + 120;
+					const std::string path = std::format("lip-118-expr-slot-{}.bundle", slot);
+					if (!std::filesystem::exists(path)) continue;
+					if (!ctrl || !current) {
+						if (!HOOK_GET_ORIG(Character_SetupLipName)) continue;
+						const std::string nativeName = std::format("Summer/summer_{}", names[slot]);
+						HOOK_CAST_CALL(void, Character_SetupLipName)(ch, il2cpp_string_new(nativeName.c_str()), 0.0f, 0.0f, g_setupLipStringMi);
+						ctrl = LipControllerOf(ch); current = ctrl ? LipTableOf(ctrl) : nullptr;
+					}
+					if (!ctrl || !current || LipCtlCharaId(ctrl) != actor) continue;
+					auto klass = KlassOf(current); auto type = klass ? il2cpp_type_get_object(il2cpp_class_get_type(klass)) : nullptr;
+					const std::string asset = std::format("summer_{}.asset", names[slot]);
+					void* expression = type ? LoadExternAsset(path + "::" + asset, type) : nullptr;
+					auto field = FieldOf(KlassOf(ctrl), "_lipSyncTable");
+					if (!field || !expression || LipTableFrameCount(expression) != 9634 ||
+						RunwayDump::ReadInt(expression, "frameRate") != 60 || RunwayDump::ReadInt(expression, "offsetFrame") != 8) continue;
+					il2cpp_field_set_value(ctrl, field, expression);
+					if (LipTableOf(ctrl) != expression) { il2cpp_field_set_value(ctrl, field, current); continue; }
+					entry.controller = ctrl; entry.table = expression; entry.retryAt = 0;
+					Log(std::format("[vocal-expression] slot={} actor={} singer={} bound=1", slot, actor, singer));
+				}
+				if (entry.controller && entry.table && LipTableOf(entry.controller) == entry.table)
+					HOOK_CAST_CALL(void, LipSyncController_UpdateLip)(entry.controller, time, g_lipUpdateMethod);
+			}
+		}
+
 		void LipSoloDrive(float time) {
 			if (g_lipMode != "on" || !g_setupLipStringMi || !g_lipUpdateMethod) return;
 			if (g_lastSoloVocalMode != 2) return;    // only solo mode lacks lips
@@ -6504,6 +6558,7 @@ namespace
 					catch (...) {}
 				}
 			}
+			try { LipSummerBackgroundExpressions(arr, n, singer, time, ticks); } catch (...) {}
 		}
 
 		// Safe fallback for a special-performance asset not cached during packaging.
