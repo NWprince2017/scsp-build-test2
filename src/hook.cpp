@@ -6752,7 +6752,9 @@ namespace
 				const bool keepSummerHead = g_lastMvSongId == 118 && g_lastSoloVocalMode == 2 &&
 					currentSinger > 0 && LipCharaId(_this) == 0 && LipCharaFromSlot(0) > 0 &&
 					nm.rfind("Summer/CS_118Summer_UCS_01_", 0) == 0;
-				if (g_lipMode == "on" && nm.find("CS_") != std::string::npos && !keepSummerHead) {
+				const bool keepAdditionalHead = AdditionalPlan(g_lastMvSongId) && g_lastSoloVocalMode == 2 &&
+					LipCharaId(_this) == 0 && nm.find("CS_") != std::string::npos;
+				if (g_lipMode == "on" && nm.find("CS_") != std::string::npos && !keepSummerHead && !keepAdditionalHead) {
 					const int singer = LipSingerChara();
 					const std::string token = LipIdolToken(singer);
 					swapped = SwapCsLipName(nm, singer, token);
