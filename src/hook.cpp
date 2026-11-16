@@ -6367,6 +6367,11 @@ namespace
 		struct SummerExpressionSlot { void* character = nullptr; void* controller = nullptr; void* table = nullptr; int retryAt = 0; };
 		SummerExpressionSlot g_summerExpressionSlots[8];
 		void* g_summerExpressionArray = nullptr;
+		// Restore the centre's native special table when the last lyric ends.
+		void* g_summerNativeHead = nullptr;
+		std::string g_summerNativeHeadName;
+		float g_summerNativeHeadOffset = 0.0f, g_summerNativeHeadAdd = 0.0f;
+		bool g_summerNativeHeadRestored = false;
 		void LipSummerBackgroundExpressions(void* arr, int count, int singer, float time, int tick) {
 			if (g_lastMvSongId != 118 || g_lastSoloVocalMode != 2 || g_lipMode != "on" ||
 				!arr || singer <= 0 || !g_lipUpdateMethod || !g_setupLipStringMi) return;
@@ -6382,7 +6387,7 @@ namespace
 				// The centre uses its separate special-performance expression table.
 				if (special118 && slot == 0) continue;
 				const int actor = LipCharaFromSlot(slot);
-				if (actor <= 0 || (!special118 && actor == singer)) continue;
+				if (actor <= 0 || (actor == singer && (!special118 || time < 98.8f))) continue;
 				void* ch = nullptr;
 				try { ch = il2cpp_symbols::array_get_value(arr, slot); } catch (...) { continue; }
 				if (!ch) continue;
@@ -6463,7 +6468,16 @@ namespace
 			}
 			int n = 0;
 			try { n = (int)il2cpp_array_length(arr); } catch (...) { return; }
-			if (inCs && g_lastMvSongId == 118 && time >= 79.0f && time <= 103.0f) {
+			if (inCs && g_lastMvSongId == 118 && time >= 98.8f && time <= 103.0f) {
+				if (!g_summerNativeHeadRestored && LipCharaFromSlot(0) == singer &&
+					g_summerNativeHead && !g_summerNativeHeadName.empty() && HOOK_GET_ORIG(Character_SetupLipName)) {
+					void* head = nullptr;
+					try { head = il2cpp_symbols::array_get_value(arr, 0); } catch (...) {}
+					if (head == g_summerNativeHead) {
+						HOOK_CAST_CALL(void, Character_SetupLipName)(head, il2cpp_string_new(g_summerNativeHeadName.c_str()), g_summerNativeHeadOffset, g_summerNativeHeadAdd, g_setupLipStringMi);
+						g_summerNativeHeadRestored = true;
+					}
+				}
 				try { LipSummerBackgroundExpressions(arr, n, singer, time, ticks); } catch (...) {}
 				return;
 			}
@@ -6651,7 +6665,50 @@ namespace
 			}
 			catch (...) { useName = name; swapped.clear(); }
 			HOOK_CAST_CALL(void, Character_SetupLipName)(_this, useName, offsetTime, addTime, mtd);
-			// Song 118: keep the centre's native special-performance table intact.
+			if (g_lastMvSongId == 118 && LipCharaId(_this) == 0 && nm.rfind("Summer/CS_118Summer_UCS_01_", 0) == 0) {
+				g_summerNativeHead = _this;
+				g_summerNativeHeadName = nm;
+				g_summerNativeHeadOffset = offsetTime;
+				g_summerNativeHeadAdd = addTime;
+				g_summerNativeHeadRestored = false;
+			}
+			// Retain the centre's own special expressions but neutralise the observed
+			// extra lyric only when another idol is singing solo.
+			try {
+				const std::string prefix = "Summer/CS_118Summer_UCS_01_";
+				const int singer = LipSingerChara();
+				if (g_lipMode == "on" && g_lastSoloVocalMode == 2 && g_lastMvSongId == 118 &&
+					singer > 0 && LipCharaId(_this) == 0 && nm.rfind(prefix, 0) == 0 && nm.size() >= prefix.size() + 2 &&
+					nm[prefix.size()] >= '0' && nm[prefix.size()] <= '9' &&
+					nm[prefix.size()+1] >= '0' && nm[prefix.size()+1] <= '9') {
+					const int actor = (nm[prefix.size()] - '0') * 10 + nm[prefix.size()+1] - '0';
+					void* target = LipControllerOf(_this);
+					void* original = target ? LipTableOf(target) : nullptr;
+					if (actor > 0 && actor != singer && actor == LipCharaFromSlot(0) && target && original &&
+						LipCtlCharaId(target) == actor && LipTableFrameCount(original) == 1216 &&
+						RunwayDump::ReadInt(original, "frameRate") == 60 && RunwayDump::ReadInt(original, "offsetFrame") == 10) {
+						std::string asset = nm.substr(nm.find_last_of('/') + 1);
+						for (char& c : asset) if (c >= 'A' && c <= 'Z') c = char(c - 'A' + 'a');
+						asset += ".asset";
+						std::string path = std::format("lip-118-cs-quiet-{:02}.bundle", actor);
+						void* quiet = nullptr;
+						if (std::filesystem::exists(path)) {
+							auto klass = KlassOf(original);
+							auto type = klass ? il2cpp_type_get_object(il2cpp_class_get_type(klass)) : nullptr;
+							if (type) quiet = LoadExternAsset(path + "::" + asset, type);
+						}
+						if (!quiet) quiet = LipQuietSpecialClone(original, nm);
+						auto field = FieldOf(KlassOf(target), "_lipSyncTable");
+						if (field && quiet && LipTableFrameCount(quiet) == 1216 &&
+							RunwayDump::ReadInt(quiet, "frameRate") == 60 && RunwayDump::ReadInt(quiet, "offsetFrame") == 10) {
+							il2cpp_field_set_value(target, field, quiet);
+							bool bound = LipTableOf(target) == quiet;
+							if (!bound) il2cpp_field_set_value(target, field, original);
+							Log(std::format("[vocal-quiet] actor={} singer={} bound={}", actor, singer, bound ? 1 : 0));
+						} else Log(std::format("[vocal-quiet] actor={} clone/asset unavailable; original retained", actor));
+					}
+				}
+			} catch (...) { Log("[vocal-quiet] could not bind optional table"); }
 			if (!swapped.empty()) {
 				try {
 					void* ctrl = LipControllerOf(_this);
