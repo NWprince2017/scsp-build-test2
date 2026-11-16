@@ -6393,7 +6393,7 @@ namespace
 				if (!ctrl || !entry.table || ctrl != entry.controller || current != entry.table) {
 					if (tick < entry.retryAt) continue;
 					entry.retryAt = tick + 120;
-					const std::string path = std::format(special118 ? "lip-118-expr-slot-{}.bundle" : "lip-118-cross-slot-{}.bundle", slot);
+					const std::string path = special118 ? std::format("lip-118-expr-slot-{}.bundle", slot) : std::format("lip-118-cross-slot-{}.bundle", slot);
 					if (!std::filesystem::exists(path)) continue;
 					if (!ctrl || !current) {
 						if (!HOOK_GET_ORIG(Character_SetupLipName)) continue;
