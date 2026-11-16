@@ -3369,7 +3369,8 @@ namespace
 	HOOK_ORIG_TYPE LiveStartDataExtensions_PreLoadAsync_orig;
 	void* LiveStartDataExtensions_PreLoadAsync_hook(void* retstr, Il2CppObject* data, const MethodInfo* method) {
 		RunwayDump::ForceSceneName(data);   // [TEST] v22 - env-driven scene override
-		RunwayDump::DumpStartData(data);   // [DIAG] v21 - runway start data field dump
+		// Diagnostic reflection was dereferencing invalid value-type fields in focus-camera start data.
+		// Skip the diagnostic; the game receives the original data below.
 		try {   // [DIAG] v23 - arm the runway scene scan for runway runs
 			auto cls = RunwayDump::ClassOf(data);
 			const char* cn = cls ? il2cpp_class_get_name(cls) : nullptr;
@@ -5476,6 +5477,40 @@ namespace
 			}
 		}
 
+
+		struct AdditionalLipPlan {
+			int song, count, frames, offset;
+			const char* asset;
+			const char* const* roles;
+			const int* ids;
+		};
+		const AdditionalLipPlan* AdditionalPlan(int song) {
+			static const char* const a[] = { "asahi", "mei", "fuyuko" };
+			static const int ai[] = { 17, 19, 18 };
+			static const char* const c[] = { "amana", "rinze", "nichika", "hinana" };
+			static const int ci[] = { 14, 12, 24, 23 };
+			static const char* const n[] = { "mikoto", "hana", "mamimi", "madoka", "mano", "chiyuki", "mei", "natsuha" };
+			static const int ni[] = { 25, 27, 5, 21, 1, 16, 19, 13 };
+			static const AdditionalLipPlan plans[] = {
+				{ 41, 3, 6357, 0, "anramp_asahi", a, ai },
+				{ 148, 4, 9991, 8, "clover_amana", c, ci },
+				{ 167, 8, 9406, 10, "nightp_mikoto", n, ni },
+			};
+			for (const auto& p : plans) if (p.song == song) return &p;
+			return nullptr;
+		}
+		bool IsAdditionalSongSinger(int song, int cid) {
+			const auto* p = AdditionalPlan(song);
+			if (!p) return false;
+			for (int i = 0; i < p->count; ++i) if (p->ids[i] == cid) return true;
+			return false;
+		}
+		std::string AdditionalSongToken(int song, int cid) {
+			const auto* p = AdditionalPlan(song);
+			if (p) for (int i = 0; i < p->count; ++i) if (p->ids[i] == cid) return p->roles[i];
+			return "";
+		}
+
 		std::string LipMvTableNameFor(int cid) {
 			if (cid <= 0 || g_lastMvSceneName.empty()) return "";
 			std::string token;
@@ -5485,6 +5520,8 @@ namespace
 				auto it = g_lipTokenByChara.find(cid);
 				if (it != g_lipTokenByChara.end()) token = it->second;
 			}
+			const auto additionalToken = AdditionalSongToken(g_lastMvSongId, cid);
+			if (!additionalToken.empty()) token = additionalToken;
 			if (token.empty()) return "";
 			std::string alias = g_lastMvSceneName;
 			const size_t us = alias.find('_');
@@ -6423,6 +6460,72 @@ namespace
 			}
 		}
 
+
+		int LipUseAdditionalComposite(void* character, void* controller, void* original, int cid, int slot) {
+			const auto* p = AdditionalPlan(g_lastMvSongId);
+			if (!p || !IsAdditionalSongSinger(p->song, cid) || !character || !controller || !original || slot < 0 || slot >= p->count) return 0;
+			try {
+				const std::string path = std::format("lip-{}-main-slot-{}.bundle", p->song, slot);
+				if (!std::filesystem::exists(path)) return 0;
+				auto klass = KlassOf(original); auto type = klass ? il2cpp_type_get_object(il2cpp_class_get_type(klass)) : nullptr;
+				void* table = type ? LoadExternAsset(path + "::" + p->asset + ".asset", type) : nullptr;
+				auto field = FieldOf(KlassOf(controller), "_lipSyncTable");
+				if (!field || !table || LipTableFrameCount(table) != p->frames || RunwayDump::ReadInt(table, "frameRate") != 60 || RunwayDump::ReadInt(table, "offsetFrame") != p->offset) return 0;
+				il2cpp_field_set_value(controller, field, table);
+				if (LipTableOf(controller) != table) { il2cpp_field_set_value(controller, field, original); return LipTableOf(controller) == original ? 0 : -1; }
+				Log(std::format("[extra-vocal-main] song={} slot={} actor={} bound=1", p->song, slot, cid));
+				return 1;
+			} catch (...) { Log("[extra-vocal-main] load failed"); return 0; }
+		}
+
+		struct AdditionalBgSlot { void* character = nullptr; void* controller = nullptr; void* table = nullptr; int retryAt = 0; };
+		AdditionalBgSlot g_extraBg[8];
+		void* g_extraBgArray = nullptr;
+		int g_extraBgSong = 0;
+		bool g_extraBgSpecial = false;
+		void LipAdditionalBackground(void* arr, int count, int singer, float time, int tick) {
+			const auto* p = AdditionalPlan(g_lastMvSongId);
+			if (!p || g_lastSoloVocalMode != 2 || g_lipMode != "on" || !arr || singer <= 0 || !g_lipUpdateMethod || !g_setupLipStringMi) return;
+			const bool special = g_csActive > 0;
+			if (arr != g_extraBgArray || p->song != g_extraBgSong || special != g_extraBgSpecial) {
+				g_extraBgArray = arr; g_extraBgSong = p->song; g_extraBgSpecial = special;
+				for (auto& entry : g_extraBg) entry = AdditionalBgSlot{};
+			}
+			const char* prefix = p->song == 41 ? "anramp" : p->song == 148 ? "clover" : "nightp";
+			for (int slot = 0; slot < count && slot < p->count; ++slot) {
+				if (special && slot == 0) continue;
+				const int actor = LipCharaFromSlot(slot);
+				if (actor <= 0 || actor == singer) continue;
+				void* ch = nullptr; try { ch = il2cpp_symbols::array_get_value(arr, slot); } catch (...) { continue; }
+				if (!ch) continue;
+				auto& entry = g_extraBg[slot]; if (entry.character != ch) { entry = AdditionalBgSlot{}; entry.character = ch; }
+				void* ctrl = LipControllerOf(ch); void* current = ctrl ? LipTableOf(ctrl) : nullptr;
+				if (!ctrl || !entry.table || ctrl != entry.controller || current != entry.table) {
+					if (tick < entry.retryAt) continue; entry.retryAt = tick + 120;
+					const std::string path = special ? std::format("lip-{}-expr-slot-{}.bundle", p->song, slot) : std::format("lip-{}-cross-slot-{}.bundle", p->song, slot);
+					if (!std::filesystem::exists(path)) continue;
+					if (!ctrl || !current) {
+						if (!HOOK_GET_ORIG(Character_SetupLipName)) continue;
+						const std::string alias = p->song == 41 ? "AnRamp" : p->song == 148 ? "Clover" : "NightP";
+						const std::string nativeName = std::format("{}/{}_{}", alias, prefix, p->roles[slot]);
+						HOOK_CAST_CALL(void, Character_SetupLipName)(ch, il2cpp_string_new(nativeName.c_str()), 0.0f, 0.0f, g_setupLipStringMi);
+						ctrl = LipControllerOf(ch); current = ctrl ? LipTableOf(ctrl) : nullptr;
+					}
+					if (!ctrl || !current || LipCtlCharaId(ctrl) != actor) continue;
+					auto klass = KlassOf(current); auto type = klass ? il2cpp_type_get_object(il2cpp_class_get_type(klass)) : nullptr;
+					const std::string asset = std::format("{}_{}.asset", prefix, p->roles[slot]);
+					void* table = type ? LoadExternAsset(path + "::" + asset, type) : nullptr;
+					auto field = FieldOf(KlassOf(ctrl), "_lipSyncTable");
+					if (!field || !table || LipTableFrameCount(table) != p->frames || RunwayDump::ReadInt(table, "frameRate") != 60 || RunwayDump::ReadInt(table, "offsetFrame") != p->offset) continue;
+					il2cpp_field_set_value(ctrl, field, table);
+					if (LipTableOf(ctrl) != table) { il2cpp_field_set_value(ctrl, field, current); continue; }
+					entry.controller = ctrl; entry.table = table; entry.retryAt = 0;
+					Log(std::format("[extra-vocal-bg] song={} slot={} actor={} special={}", p->song, slot, actor, special ? 1 : 0));
+				}
+				if (entry.controller && entry.table && LipTableOf(entry.controller) == entry.table) HOOK_CAST_CALL(void, LipSyncController_UpdateLip)(entry.controller, time, g_lipUpdateMethod);
+			}
+		}
+
 		void LipSoloDrive(float time) {
 			if (g_lipMode != "on" || !g_setupLipStringMi || !g_lipUpdateMethod) return;
 			if (g_lastSoloVocalMode != 2) return;    // only solo mode lacks lips
@@ -6506,7 +6609,7 @@ namespace
 				// A valid native table may already be present when the singer occupies
 				// a different stage slot. Install the composite once even in that case.
 				const bool needsInitialComposite = usable && inj == g_lipInjectedTable.end() &&
-					g_lastMvSongId == 118 && IsSummer118Singer(cid);
+					(g_lastMvSongId == 118 && IsSummer118Singer(cid) || IsAdditionalSongSinger(g_lastMvSongId, cid));
 				if (logEval)
 					Log(std::format("[v86] char {} slot={} ctrl={} cidCtl={} cidMap={} cid={} frames={} rich={} lost={}",
 						i, cidSlot, ps(ctrl), cidCtl, cidMap, cid, tableFrames, usable ? 1 : 0, lost ? 1 : 0));
@@ -6528,7 +6631,8 @@ namespace
 					// [v100] merge once per loaded table (not once per process):
 					// the cut scene swaps in a new table and the merged data has
 					// to be rebuilt for that one.
-					const bool isCompositeTest = g_lastMvSongId == 118 && IsSummer118Singer(cid);
+					const bool isAdditional = IsAdditionalSongSinger(g_lastMvSongId, cid);
+					const bool isCompositeTest = (g_lastMvSongId == 118 && IsSummer118Singer(cid)) || isAdditional;
 					// SetupLip(name) rebinds the original table even when its pointer is
 					// unchanged, so the independent composite must be rebound on every injection.
 					if (usable && (isCompositeTest || g_lipMergedTable[ch] != table)) {
@@ -6536,7 +6640,7 @@ namespace
 						// [v96] other songs retain their existing merge behaviour.
 						if (isCompositeTest) {
 						int compositeResult = 0;
-						try { compositeResult = LipUseSummerComposite(ch, ctrl, table, cid, i); } catch (...) {}
+						try { compositeResult = isAdditional ? LipUseAdditionalComposite(ch, ctrl, table, cid, i) : LipUseSummerComposite(ch, ctrl, table, cid, i); } catch (...) {}
 						if (compositeResult < 0) {
 							Log("[vocal-composite] unsafe table; stopping controller updates");
 							continue;
@@ -6585,6 +6689,7 @@ namespace
 				}
 			}
 			try { LipSummerBackgroundExpressions(arr, n, singer, time, ticks); } catch (...) {}
+			try { LipAdditionalBackground(arr, n, singer, time, ticks); } catch (...) {}
 		}
 
 		// Safe fallback for a special-performance asset not cached during packaging.
