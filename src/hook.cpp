@@ -4313,7 +4313,9 @@ namespace
 		}
 
 		void ResetLipDriveSession();
+		void ResetSwitchDiagnostics();
 		void RememberStartData(void* data, int origIndex, int charaId, int songId) {
+			ResetSwitchDiagnostics();
 			ResetLipDriveSession();
 			g_lastStartData = data;
 			g_lastOrigSoloIndex = origIndex;
@@ -7261,6 +7263,86 @@ namespace
 		}
 
 
+		// Read-only diagnostics for the game's own swimsuit component switches.
+		// Observe native calls; do not modify selected models or timeline data.
+		int g_swDiagLines = 0;
+		std::unordered_map<void*, int> g_swLastRequest;
+		std::unordered_map<void*, int> g_swLastApplied;
+		void ResetSwitchDiagnostics() { g_swDiagLines = 0; g_swLastRequest.clear(); g_swLastApplied.clear(); }
+		void SwitchDiagList(void* character, const char* phase) {
+			if (!character || g_lastMvSongId != 118 || g_swDiagLines >= 350) return;
+			void* list = RunwayDump::ReadPtr(character, "switchModels");
+			const char* klass = list ? RunwayDump::ClassNameOf(list) : nullptr;
+			void* array = nullptr; int count = 0;
+			if (klass && strstr(klass, "List`1")) {
+				array = RunwayDump::ReadPtr(list, "_items");
+				count = RunwayDump::ReadInt(list, "_size");
+			} else if (klass && strstr(klass, "[]")) {
+				array = list; count = RunwayDump::ArrayLength(array);
+			}
+			int slot = LipCharaId(character);
+			int actor = LipCtlCharaId(LipControllerOf(character));
+			Log(std::format("[swim-diag] {} slot={} actor={} list={} count={}",
+				phase, slot, actor, klass ? klass : "null", count));
+			++g_swDiagLines;
+			if (!array || count < 0 || count > 64 || RunwayDump::ArrayLength(array) < count) return;
+			for (int i = 0; i < count && g_swDiagLines < 350; ++i) {
+				void* item = il2cpp_symbols::array_get_value(array, i);
+				if (!item) continue;
+				const char* name = RunwayDump::ClassNameOf(item);
+				if (!name || strcmp(name, "SwitchModel") != 0) continue;
+				std::string id = Il2CppStrOf(RunwayDump::ReadPtr(item, "switchID"));
+				int current = RunwayDump::ReadInt(item, "currentTargetIndex");
+				Log(std::format("[swim-diag]   switch={} current={}", id, current));
+				++g_swDiagLines;
+			}
+		}
+		HOOK_ORIG_TYPE Character_SetupSwitchModel_orig;
+		void Character_SetupSwitchModel_hook(void* self, void* method) {
+			HOOK_CAST_CALL(void, Character_SetupSwitchModel)(self, method);
+			try { SwitchDiagList(self, "setup"); } catch (...) {}
+		}
+		HOOK_ORIG_TYPE Character_SetSwitchModel_orig;
+		int Character_SetSwitchModel_hook(void* self, int index, void* switchId, void* method) {
+			int ret = HOOK_CAST_CALL(int, Character_SetSwitchModel)(self, index, switchId, method);
+			try {
+				if (g_lastMvSongId == 118 && self && g_swDiagLines < 350) {
+					std::string id = Il2CppStrOf(switchId);
+					if (id == "Swimsuit") {
+						auto it = g_swLastRequest.find(self);
+						if (it == g_swLastRequest.end() || it->second != index) {
+							g_swLastRequest[self] = index;
+							Log(std::format("[swim-diag] request slot={} actor={} id={} state={} result={}",
+								LipCharaId(self), LipCtlCharaId(LipControllerOf(self)), id, index, ret));
+							++g_swDiagLines;
+							SwitchDiagList(self, "after-request");
+						}
+					}
+				}
+			} catch (...) {}
+			return ret;
+		}
+		HOOK_ORIG_TYPE SwitchModel_DoSwitch_orig;
+		void SwitchModel_DoSwitch_hook(void* self, int index, void* switchId, void* method) {
+			HOOK_CAST_CALL(void, SwitchModel_DoSwitch)(self, index, switchId, method);
+			try {
+				if (g_lastMvSongId == 118 && self && g_swDiagLines < 350) {
+					std::string id = Il2CppStrOf(RunwayDump::ReadPtr(self, "switchID"));
+					if (id == "Swimsuit") {
+						auto it = g_swLastApplied.find(self);
+						if (it == g_swLastApplied.end() || it->second != index) {
+							g_swLastApplied[self] = index;
+							void* owner = RunwayDump::ReadPtr(self, "character");
+							Log(std::format("[swim-diag] applied slot={} actor={} request={} current={}",
+								owner ? LipCharaId(owner) : -1, owner ? LipCtlCharaId(LipControllerOf(owner)) : -1,
+								index, RunwayDump::ReadInt(self, "currentTargetIndex")));
+							++g_swDiagLines;
+						}
+					}
+				}
+			} catch (...) {}
+		}
+
 		// Read-only diagnostic: capture the game-provided volume toggle schedule.
 		// The original SetData remains responsible for all game behaviour.
 		HOOK_ORIG_TYPE VocalSchedule_SetData_orig;
@@ -7287,6 +7369,12 @@ namespace
 					Log(std::format("[v71] {} hooked @ {}", label, ViewDiag::ptr_str(addr)));
 				}
 			};
+			add("Character.SetupSwitchModel", ViewDiag::find_method_anywhere("PRISM", "Character", "SetupSwitchModel", 0),
+				(void*)Character_SetupSwitchModel_hook, Character_SetupSwitchModel_orig);
+			add("Character.SetSwitchModel", ViewDiag::find_method_anywhere("PRISM", "Character", "SetSwitchModel", 2),
+				(void*)Character_SetSwitchModel_hook, Character_SetSwitchModel_orig);
+			add("SwitchModel.DoSwitch", ViewDiag::find_method_anywhere("PRISM", "SwitchModel", "DoSwitch", 2),
+				(void*)SwitchModel_DoSwitch_hook, SwitchModel_DoSwitch_orig);
 			add("VocalSeparatedController.SetData",
 				ViewDiag::find_method_anywhere("PRISM.RhythmGame", "VocalSeparatedController", "SetData", 1),
 				(void*)VocalSchedule_SetData_hook, VocalSchedule_SetData_orig);
