@@ -4312,7 +4312,9 @@ namespace
 				fieldBefore, fieldAfter, JoinIds(postIds), JoinIds(g_soloVoiceIds)));
 		}
 
+		void ResetLipDriveSession();
 		void RememberStartData(void* data, int origIndex, int charaId, int songId) {
+			ResetLipDriveSession();
 			g_lastStartData = data;
 			g_lastOrigSoloIndex = origIndex;
 			g_lastSelectedCharaId = charaId;
@@ -5617,7 +5619,24 @@ namespace
 
 		HOOK_ORIG_TYPE LiveSubSequence_ProcessTime_orig;
 		void LiveSubSequence_ProcessTime_hook(void* _this, float time, void* mtd) {
-			try { LipSoloDrive(time); } catch (...) {}
+			// The sequence owns the actual controller. Do not reuse a controller
+			// captured from another sequence or an earlier MV/cut-scene.
+			try {
+				if (_this && g_lastStartData && g_lastSoloVocalMode == 2) {
+					void* scene = RunwayDump::ReadPtr(_this, "liveScene");
+					void* data = scene ? RunwayDump::ReadPtr(scene, "liveMVStartData") : nullptr;
+					if (data == g_lastStartData) {
+						void* controller = RunwayDump::ReadPtr(_this, "liveCharacterController");
+						if (controller && RunwayDump::PlausiblePtr((uintptr_t)controller)) {
+							if (g_lccInstance != controller) {
+								g_lccInstance = controller;
+								Log(std::format("[sequence-lips] song={} controller acquired", g_lastMvSongId));
+							}
+							LipSoloDrive(time);
+						}
+					}
+				}
+			} catch (...) {}
 			return HOOK_CAST_CALL(void, LiveSubSequence_ProcessTime)(_this, time, mtd);
 		}
 
@@ -6483,6 +6502,31 @@ namespace
 		void* g_extraBgArray = nullptr;
 		int g_extraBgSong = 0;
 		bool g_extraBgSpecial = false;
+		void ResetLipDriveSession() {
+			g_lccInstance = nullptr;
+			g_lipDriveChars = nullptr;
+			g_lipInjectTried.clear();
+			g_lipDriving.clear();
+			g_lipInjectedTable.clear();
+			g_lipMergedTable.clear();
+			g_lipNextInjectTick = 0;
+			g_lipDriveTicks = 0;
+			g_lipDriveLogs = 0;
+			g_lipLastTime = -1.0f;
+			g_lipCsSeen = 0;
+			g_csActive = 0;
+			g_summerExpressionArray = nullptr;
+			g_extraBgArray = nullptr;
+			g_extraBgSong = 0;
+			g_summerNativeHead = nullptr;
+			g_summerNativeHeadName.clear();
+			g_summerNativeHeadRestored = false;
+			{
+				std::lock_guard<std::mutex> lock(g_lipMutex);
+				g_csCharacters.clear();
+				g_mvInjectTries.clear();
+			}
+		}
 		void LipAdditionalBackground(void* arr, int count, int singer, float time, int tick) {
 			const auto* p = AdditionalPlan(g_lastMvSongId);
 			if (!p || g_lastSoloVocalMode != 2 || g_lipMode != "on" || !arr || singer <= 0 || !g_lipUpdateMethod || !g_setupLipStringMi) return;
