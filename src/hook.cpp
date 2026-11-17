@@ -5617,26 +5617,58 @@ namespace
 		int g_csActive = 0;                     // >0 while a cut scene is enabled
 		void LipSoloDrive(float time);
 
-		HOOK_ORIG_TYPE LiveSubSequence_ProcessTime_orig;
-		void LiveSubSequence_ProcessTime_hook(void* _this, float time, void* mtd) {
-			// The sequence owns the actual controller. Do not reuse a controller
-			// captured from another sequence or an earlier MV/cut-scene.
+		// Ordinary MVs update their owning LiveScene every frame; ProcessTime
+		// may be reserved for sub-sequences and is not sufficient by itself.
+		int g_sceneLipDiag = 0;
+		HOOK_ORIG_TYPE LiveScene_Update_orig;
+		void LiveScene_Update_hook(void* scene, void* mtd) {
+			HOOK_CAST_CALL(void, LiveScene_Update)(scene, mtd);
 			try {
-				if (_this && g_lastStartData && g_lastSoloVocalMode == 2) {
-					void* scene = RunwayDump::ReadPtr(_this, "liveScene");
-					void* data = scene ? RunwayDump::ReadPtr(scene, "liveMVStartData") : nullptr;
-					if (data == g_lastStartData) {
-						void* controller = RunwayDump::ReadPtr(_this, "liveCharacterController");
-						if (controller && RunwayDump::PlausiblePtr((uintptr_t)controller)) {
-							if (g_lccInstance != controller) {
-								g_lccInstance = controller;
-								Log(std::format("[sequence-lips] song={} controller acquired", g_lastMvSongId));
-							}
-							LipSoloDrive(time);
-						}
+				if (!scene || !g_lastStartData || g_lastSoloVocalMode != 2 ||
+					(g_lastMvSongId != 41 && g_lastMvSongId != 148)) return;
+				void* data = RunwayDump::ReadPtr(scene, "liveMVStartData");
+				if (!(g_sceneLipDiag & 1)) {
+					g_sceneLipDiag |= 1;
+					Log(std::format("[scene-lips] update song={} dataPresent={} dataMatches={}",
+						g_lastMvSongId, data ? 1 : 0, data == g_lastStartData ? 1 : 0));
+				}
+				if (data != g_lastStartData) return;
+				void* lcc = RunwayDump::ReadPtr(scene, "liveCharacterController");
+				void* timeline = RunwayDump::ReadPtr(scene, "_timelineController");
+				if (!lcc || !timeline || !RunwayDump::PlausiblePtr((uintptr_t)lcc) ||
+					!RunwayDump::PlausiblePtr((uintptr_t)timeline)) return;
+				static MethodInfo* timeMi = nullptr;
+				static int timeKind = 0;
+				if (!timeMi) {
+					auto* klass = (Il2CppClass*)ViewDiag::find_class_anywhere("PRISM", "TimelineController");
+					timeMi = klass ? il2cpp_class_get_method_from_name(klass, "get_time", 0) : nullptr;
+					if (timeMi && timeMi->methodPointer) {
+						auto type = il2cpp_method_get_return_type(timeMi);
+						const char* name = type ? il2cpp_type_get_name(type) : nullptr;
+						if (name && strcmp(name, "System.Single") == 0) timeKind = 1;
+						else if (name && strcmp(name, "System.Double") == 0) timeKind = 2;
+						Log(std::format("[scene-lips] timeline return={}", name ? name : "unknown"));
 					}
 				}
+				if (!timeMi || !timeMi->methodPointer || !timeKind) return;
+				float time = timeKind == 1
+					? ((float(*)(void*, void*))timeMi->methodPointer)(timeline, timeMi)
+					: (float)((double(*)(void*, void*))timeMi->methodPointer)(timeline, timeMi);
+				if (!(time >= 0.0f && time < 6000.0f)) return;
+				if (!(g_sceneLipDiag & 2)) {
+					g_sceneLipDiag |= 2;
+					Log(std::format("[scene-lips] controller acquired song={} time={:.3f}", g_lastMvSongId, time));
+				}
+				g_lccInstance = lcc;
+				LipSoloDrive(time);
 			} catch (...) {}
+		}
+		HOOK_ORIG_TYPE LiveSubSequence_ProcessTime_orig;
+		void LiveSubSequence_ProcessTime_hook(void* _this, float time, void* mtd) {
+			// Songs 41/148 are driven by LiveScene.Update above; avoid driving twice.
+			if (g_lastMvSongId != 41 && g_lastMvSongId != 148) {
+				try { LipSoloDrive(time); } catch (...) {}
+			}
 			return HOOK_CAST_CALL(void, LiveSubSequence_ProcessTime)(_this, time, mtd);
 		}
 
@@ -6503,6 +6535,7 @@ namespace
 		int g_extraBgSong = 0;
 		bool g_extraBgSpecial = false;
 		void ResetLipDriveSession() {
+			g_sceneLipDiag = 0;
 			g_lccInstance = nullptr;
 			g_lipDriveChars = nullptr;
 			g_lipInjectTried.clear();
@@ -7294,6 +7327,9 @@ namespace
 					(void*)ExpIk_SetResetLip_hook, ExpIk_SetResetLip_orig);
 			}
 			if (g_lipGroupUpdate) {
+				add("LiveScene.Update",
+					ViewDiag::find_method_anywhere("PRISM", "LiveScene", "Update", 0),
+					(void*)LiveScene_Update_hook, LiveScene_Update_orig);
 				add("LiveSubSequence.ProcessTime",
 					ViewDiag::find_method_anywhere("PRISM", "LiveSubSequence", "ProcessTime", 1),
 					(void*)LiveSubSequence_ProcessTime_hook, LiveSubSequence_ProcessTime_orig);
