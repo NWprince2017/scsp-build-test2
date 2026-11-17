@@ -7343,6 +7343,40 @@ namespace
 			} catch (...) {}
 		}
 
+		// Observe the selector inputs before it chooses a special-performance branch.
+		HOOK_ORIG_TYPE LiveCutSceneSelector_Select_orig;
+		void* LiveCutSceneSelector_Select_hook(int song, void* idols, bool isMv, void* method) {
+			try {
+				if (song == 118 && idols) {
+					const char* klass = RunwayDump::ClassNameOf(idols);
+					void* arr = nullptr; int count = 0;
+					if (klass && strstr(klass, "List`1")) {
+						arr = RunwayDump::ReadPtr(idols, "_items"); count = RunwayDump::ReadInt(idols, "_size");
+					} else if (klass && strstr(klass, "[]")) {
+						arr = idols; count = RunwayDump::ArrayLength(arr);
+					}
+					Log(std::format("[scene-select] song={} mv={} list={} count={}", song, isMv ? 1 : 0, klass ? klass : "null", count));
+					if (arr && count >= 0 && count <= 32 && RunwayDump::ArrayLength(arr) >= count) {
+						for (int i = 0; i < count; ++i) {
+							void* idol = il2cpp_symbols::array_get_value(arr, i); if (!idol) continue;
+							void* costume = RunwayDump::ReadPtr(idol, "<MstCostume>k__BackingField");
+							Log(std::format("[scene-select] slot={} idol={} cloth={} costume={} costumeOwner={} resource={}", i,
+								RunwayDump::ReadInt(idol, "charaId"), RunwayDump::ReadInt(idol, "clothId"),
+								costume ? RunwayDump::ReadInt(costume, "<Id>k__BackingField") : -1,
+								costume ? RunwayDump::ReadInt(costume, "<MstCharacterInfoId>k__BackingField") : -1,
+								costume ? RunwayDump::ReadInt(costume, "<ResourceId>k__BackingField") : -1));
+						}
+					}
+				}
+			} catch (...) { Log("[scene-select] input logging failed"); }
+			void* result = HOOK_CAST_CALL(void*, LiveCutSceneSelector_Select)(song, idols, isMv, method);
+			try { if (song == 118) {
+				const char* name = result ? RunwayDump::ClassNameOf(result) : nullptr;
+				Log(std::format("[scene-select] result class={}", name ? name : "null"));
+			} } catch (...) {}
+			return result;
+		}
+
 		// Read-only diagnostic: capture the game-provided volume toggle schedule.
 		// The original SetData remains responsible for all game behaviour.
 		HOOK_ORIG_TYPE VocalSchedule_SetData_orig;
@@ -7369,6 +7403,8 @@ namespace
 					Log(std::format("[v71] {} hooked @ {}", label, ViewDiag::ptr_str(addr)));
 				}
 			};
+			add("LiveCutSceneSelector.Select", ViewDiag::find_method_anywhere("PRISM", "LiveCutSceneSelector", "Select", 3),
+				(void*)LiveCutSceneSelector_Select_hook, LiveCutSceneSelector_Select_orig);
 			add("Character.SetupSwitchModel", ViewDiag::find_method_anywhere("PRISM", "Character", "SetupSwitchModel", 0),
 				(void*)Character_SetupSwitchModel_hook, Character_SetupSwitchModel_orig);
 			add("Character.SetSwitchModel", ViewDiag::find_method_anywhere("PRISM", "Character", "SetSwitchModel", 2),
