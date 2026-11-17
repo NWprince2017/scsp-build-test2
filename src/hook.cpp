@@ -7373,7 +7373,8 @@ namespace
 		HOOK_ORIG_TYPE LiveCutSceneSelector_MoveNext_orig;
 		bool LiveCutSceneSelector_MoveNext_hook(void* self, void* method) {
 			void* idol = nullptr; void* original = nullptr; FieldInfo* field = nullptr;
-			bool changed = false;
+			bool changed = false; int fromId = -1, toId = -1;
+			static const int swimsuits[28] = { 201011, 202011, 203011, 204010, 205010, 206010, 207010, 208010, 209011, 210011, 211011, 212011, 213011, 214011, 215011, 216011, 217011, 218010, 219010, 220008, 221008, 222008, 223008, 224007, 225007, 226006, 227006, 228006 };
 			try {
 				if (self && RunwayDump::ReadInt(self, "songId") == 118) {
 					FILE* f = fopen("costume-owner-fix.txt", "r"); bool enabled = false;
@@ -7381,22 +7382,27 @@ namespace
 					void* arr = RunwayDump::ReadPtr(self, "idols");
 					if (enabled && arr && RunwayDump::ArrayLength(arr) > 0) {
 						idol = il2cpp_symbols::array_get_value(arr, 0);
-						if (idol && RunwayDump::ReadInt(idol, "charaId") == 18) {
+						int actor = idol ? RunwayDump::ReadInt(idol, "charaId") : -1;
+						if (actor >= 1 && actor <= 28) {
 							field = FieldOf(KlassOf(idol), "<MstCostume>k__BackingField");
 							original = field ? il2cpp_symbols::read_field<void*>(idol, field) : nullptr;
-							if (original && RunwayDump::ReadInt(original, "<Id>k__BackingField") == 219010 &&
-								RunwayDump::ReadInt(original, "<ResourceId>k__BackingField") == 361) {
+							int owner = original ? RunwayDump::ReadInt(original, "<MstCharacterInfoId>k__BackingField") : -1;
+							if (original && owner >= 1 && owner <= 28 && owner != actor &&
+								RunwayDump::ReadInt(original, "<Id>k__BackingField") == swimsuits[owner - 1] &&
+								RunwayDump::ReadInt(original, "<ResourceId>k__BackingField") == 342 + owner) {
 								void* master = TryMasterData();
 								void* table = master ? RunwayDump::ReadPtr(master, "Costumes") : nullptr;
 								auto klass = table ? (Il2CppClass*)KlassOf(table) : nullptr;
 								auto mi = klass ? il2cpp_class_get_method_from_name(klass, "GetValueOrDefault", 1) : nullptr;
-								int candidateId = 218010;
+								int candidateId = swimsuits[actor - 1];
 								void* candidate = mi ? mi->Invoke<Il2CppObject*>((Il2CppObject*)table, { (Il2CppObject*)&candidateId }) : nullptr;
-								if (candidate && RunwayDump::ReadInt(candidate, "<Id>k__BackingField") == 218010 &&
-									RunwayDump::ReadInt(candidate, "<MstCharacterInfoId>k__BackingField") == 18 &&
-									RunwayDump::ReadInt(candidate, "<ResourceId>k__BackingField") == 360) {
+								if (candidate && RunwayDump::ReadInt(candidate, "<Id>k__BackingField") == candidateId &&
+									RunwayDump::ReadInt(candidate, "<MstCharacterInfoId>k__BackingField") == actor &&
+									RunwayDump::ReadInt(candidate, "<ResourceId>k__BackingField") == 342 + actor) {
+									fromId = swimsuits[owner - 1]; toId = candidateId;
 									il2cpp_field_set_value(idol, field, candidate);
 									changed = il2cpp_symbols::read_field<void*>(idol, field) == candidate;
+									if (!changed) il2cpp_field_set_value(idol, field, original);
 								}
 							}
 						}
@@ -7408,8 +7414,8 @@ namespace
 			catch (...) { if (changed) il2cpp_field_set_value(idol, field, original); throw; }
 			if (changed) {
 				il2cpp_field_set_value(idol, field, original);
-				Log(std::format("[scene-select-fix] 219010 -> 218010 for check; restored={} yielded={}",
-					il2cpp_symbols::read_field<void*>(idol, field) == original ? 1 : 0, result ? 1 : 0));
+				Log(std::format("[scene-select-fix] {} -> {} for check; restored={} yielded={}",
+					fromId, toId, il2cpp_symbols::read_field<void*>(idol, field) == original ? 1 : 0, result ? 1 : 0));
 			}
 			return result;
 		}
