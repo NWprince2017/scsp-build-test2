@@ -7343,6 +7343,31 @@ namespace
 			} catch (...) {}
 		}
 
+		// The nullable character/position parameters are two 8-byte value types.
+		// The experimental owner substitution stays disabled unless explicitly
+		// enabled with a local opt-in file; native behaviour is the default.
+		HOOK_ORIG_TYPE MstCostumePartExtensions_GetLiveCutScenes_orig;
+		void* MstCostumePartExtensions_GetLiveCutScenes_hook(void* costume, uint64_t characterArg, uint64_t positionArg, void* method) {
+			uint64_t useCharacter = characterArg;
+			try {
+				if (g_lastMvSongId == 118 && costume) {
+					int id = RunwayDump::ReadInt(costume, "<Id>k__BackingField");
+					int owner = RunwayDump::ReadInt(costume, "<MstCharacterInfoId>k__BackingField");
+					int resource = RunwayDump::ReadInt(costume, "<ResourceId>k__BackingField");
+					uint32_t has = (uint32_t)characterArg; int actor = (int32_t)(characterArg >> 32);
+					FILE* f = fopen("costume-owner-fix.txt", "r");
+					bool enabled = false;
+					if (f) { char buf[16] = {}; enabled = fgets(buf, sizeof(buf), f) && strncmp(buf, "on", 2) == 0; fclose(f); }
+					// This first experiment is scoped to the tested Mei swimsuit.
+					if (enabled && id == 219010 && owner == 19 && has == 1 && actor == 18)
+						useCharacter = ((uint64_t)(uint32_t)owner << 32) | 1;
+					Log(std::format("[costume-condition] id={} owner={} resource={} charRaw=0x{:x} posRaw=0x{:x} opt={} substituted={}",
+						id, owner, resource, characterArg, positionArg, enabled ? 1 : 0, useCharacter != characterArg ? 1 : 0));
+				}
+			} catch (...) {}
+			return HOOK_CAST_CALL(void*, MstCostumePartExtensions_GetLiveCutScenes)(costume, useCharacter, positionArg, method);
+		}
+
 		// Observe the selector inputs before it chooses a special-performance branch.
 		HOOK_ORIG_TYPE LiveCutSceneSelector_Select_orig;
 		void* LiveCutSceneSelector_Select_hook(int song, void* idols, bool isMv, void* method) {
@@ -7403,6 +7428,8 @@ namespace
 					Log(std::format("[v71] {} hooked @ {}", label, ViewDiag::ptr_str(addr)));
 				}
 			};
+			add("MstCostumePartExtensions.GetLiveCutScenes", ViewDiag::find_method_anywhere("PRISM.Definitions", "MstCostumePartExtensions", "GetLiveCutScenes", 3),
+				(void*)MstCostumePartExtensions_GetLiveCutScenes_hook, MstCostumePartExtensions_GetLiveCutScenes_orig);
 			add("LiveCutSceneSelector.Select", ViewDiag::find_method_anywhere("PRISM", "LiveCutSceneSelector", "Select", 3),
 				(void*)LiveCutSceneSelector_Select_hook, LiveCutSceneSelector_Select_orig);
 			add("Character.SetupSwitchModel", ViewDiag::find_method_anywhere("PRISM", "Character", "SetupSwitchModel", 0),
