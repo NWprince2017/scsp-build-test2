@@ -7359,13 +7359,59 @@ namespace
 					bool enabled = false;
 					if (f) { char buf[16] = {}; enabled = fgets(buf, sizeof(buf), f) && strncmp(buf, "on", 2) == 0; fclose(f); }
 					// This first experiment is scoped to the tested Mei swimsuit.
-					if (enabled && id == 219010 && owner == 19 && has == 1 && actor == 18)
+					if (false && enabled && id == 219010 && owner == 19 && has == 1 && actor == 18)
 						useCharacter = ((uint64_t)(uint32_t)owner << 32) | 1;
 					Log(std::format("[costume-condition] id={} owner={} resource={} charRaw=0x{:x} posRaw=0x{:x} opt={} substituted={}",
 						id, owner, resource, characterArg, positionArg, enabled ? 1 : 0, useCharacter != characterArg ? 1 : 0));
 				}
 			} catch (...) {}
 			return HOOK_CAST_CALL(void*, MstCostumePartExtensions_GetLiveCutScenes)(costume, useCharacter, positionArg, method);
+		}
+
+		// Candidate: translate only the predicate input, only for the tested
+		// cross-worn swimsuit. Restore the actual costume before returning.
+		HOOK_ORIG_TYPE LiveCutSceneSelector_MoveNext_orig;
+		bool LiveCutSceneSelector_MoveNext_hook(void* self, void* method) {
+			void* idol = nullptr; void* original = nullptr; FieldInfo* field = nullptr;
+			bool changed = false;
+			try {
+				if (self && RunwayDump::ReadInt(self, "songId") == 118) {
+					FILE* f = fopen("costume-owner-fix.txt", "r"); bool enabled = false;
+					if (f) { char buf[16] = {}; enabled = fgets(buf, sizeof(buf), f) && strncmp(buf, "on", 2) == 0; fclose(f); }
+					void* arr = RunwayDump::ReadPtr(self, "idols");
+					if (enabled && arr && RunwayDump::ArrayLength(arr) > 0) {
+						idol = il2cpp_symbols::array_get_value(arr, 0);
+						if (idol && RunwayDump::ReadInt(idol, "charaId") == 18) {
+							field = FieldOf(KlassOf(idol), "<MstCostume>k__BackingField");
+							original = field ? il2cpp_symbols::read_field<void*>(idol, field) : nullptr;
+							if (original && RunwayDump::ReadInt(original, "<Id>k__BackingField") == 219010 &&
+								RunwayDump::ReadInt(original, "<ResourceId>k__BackingField") == 361) {
+								void* master = TryMasterData();
+								void* table = master ? RunwayDump::ReadPtr(master, "Costumes") : nullptr;
+								auto klass = table ? (Il2CppClass*)KlassOf(table) : nullptr;
+								auto mi = klass ? il2cpp_class_get_method_from_name(klass, "GetValueOrDefault", 1) : nullptr;
+								int candidateId = 218010;
+								void* candidate = mi ? mi->Invoke<Il2CppObject*>((Il2CppObject*)table, { (Il2CppObject*)&candidateId }) : nullptr;
+								if (candidate && RunwayDump::ReadInt(candidate, "<Id>k__BackingField") == 218010 &&
+									RunwayDump::ReadInt(candidate, "<MstCharacterInfoId>k__BackingField") == 18 &&
+									RunwayDump::ReadInt(candidate, "<ResourceId>k__BackingField") == 360) {
+									il2cpp_field_set_value(idol, field, candidate);
+									changed = il2cpp_symbols::read_field<void*>(idol, field) == candidate;
+								}
+							}
+						}
+					}
+				}
+			} catch (...) {}
+			bool result = false;
+			try { result = HOOK_CAST_CALL(bool, LiveCutSceneSelector_MoveNext)(self, method); }
+			catch (...) { if (changed) il2cpp_field_set_value(idol, field, original); throw; }
+			if (changed) {
+				il2cpp_field_set_value(idol, field, original);
+				Log(std::format("[scene-select-fix] 219010 -> 218010 for check; restored={} yielded={}",
+					il2cpp_symbols::read_field<void*>(idol, field) == original ? 1 : 0, result ? 1 : 0));
+			}
+			return result;
 		}
 
 		// Observe the selector inputs before it chooses a special-performance branch.
@@ -7428,6 +7474,9 @@ namespace
 					Log(std::format("[v71] {} hooked @ {}", label, ViewDiag::ptr_str(addr)));
 				}
 			};
+			add("LiveCutSceneSelector.<Select>d__0.MoveNext",
+				ViewDiag::find_nested_move_next("PRISM", "LiveCutSceneSelector", "<Select>d__0"),
+				(void*)LiveCutSceneSelector_MoveNext_hook, LiveCutSceneSelector_MoveNext_orig);
 			add("MstCostumePartExtensions.GetLiveCutScenes", ViewDiag::find_method_anywhere("PRISM.Definitions", "MstCostumePartExtensions", "GetLiveCutScenes", 3),
 				(void*)MstCostumePartExtensions_GetLiveCutScenes_hook, MstCostumePartExtensions_GetLiveCutScenes_orig);
 			add("LiveCutSceneSelector.Select", ViewDiag::find_method_anywhere("PRISM", "LiveCutSceneSelector", "Select", 3),
