@@ -6742,6 +6742,24 @@ namespace
 						ofn(ctrl, true, g_lipSetOverwriteMi);
 					}
 				}
+				// Targeted test: during the four sung lines, the special scene sets
+				// isOverwrite=1 even after the song table has been rebound.
+				// Disable it only for the verified cross-worn swimsuit combination.
+				if (inCs && g_lastMvSongId == 118 && cid == 18 && i == 0 &&
+					time >= 80.924f && time < 98.8f && g_lipSetOverwriteMi && LipReadBool(ctrl, "isOverwrite")) {
+					void* idols = g_lastStartData ? RunwayDump::ReadPtr(g_lastStartData, "<OnStageIdols>k__BackingField") : nullptr;
+					void* head = idols && RunwayDump::ArrayLength(idols) > 0 ? il2cpp_symbols::array_get_value(idols, 0) : nullptr;
+					void* worn = head ? RunwayDump::ReadPtr(head, "<MstCostume>k__BackingField") : nullptr;
+					if (worn && RunwayDump::ReadInt(worn, "<Id>k__BackingField") == 219010 &&
+						RunwayDump::ReadInt(worn, "<ResourceId>k__BackingField") == 361) {
+						auto* mi = (MethodInfo*)g_lipSetOverwriteMi;
+						if (mi->methodPointer) {
+							((void(*)(void*, bool, void*))mi->methodPointer)(ctrl, false, mi);
+							static int logs = 0;
+							if (logs++ < 8) Log(std::format("[vocal-cs-overwrite] time={:.3f} remaining={}", time, LipReadBool(ctrl, "isOverwrite") ? 1 : 0));
+						}
+					}
+				}
 				g_lipDriving.insert(ctrl);
 				if (g_lipDriveLogs < 6) {
 					++g_lipDriveLogs;
