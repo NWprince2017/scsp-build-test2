@@ -6808,6 +6808,31 @@ namespace
 			try { LipAdditionalBackground(arr, n, singer, time, ticks); } catch (...) {}
 		}
 
+		// Reapply the singing mouth after the special scene's expression update.
+		// Target only Fuyuko as centre soloist and only the four sung lines.
+		HOOK_ORIG_TYPE ExpIk_LateUpdate_orig;
+		void ExpIk_LateUpdate_hook(void* self, void* method) {
+			HOOK_CAST_CALL(void, ExpIk_LateUpdate)(self, method);
+			try {
+				if (!self || g_lastMvSongId != 118 || g_lastSoloVocalMode != 2 || g_csActive <= 0 ||
+					g_lipLastTime < 80.924f || g_lipLastTime >= 98.8f || !g_lipUpdateMethod ||
+					!HOOK_GET_ORIG(LipSyncController_UpdateLip)) return;
+				void* ch = RunwayDump::ReadPtr(self, "_character");
+				if (!ch || LipCharaId(ch) != 0) return;
+				void* ctrl = LipControllerOf(ch);
+				if (!ctrl || LipCtlCharaId(ctrl) != 18) return;
+				auto it = g_lipInjectedTable.find(ch);
+				if (it == g_lipInjectedTable.end() || !it->second || LipTableOf(ctrl) != it->second) return;
+				if (g_lipSetOverwriteMi && LipReadBool(ctrl, "isOverwrite")) {
+					auto* mi = (MethodInfo*)g_lipSetOverwriteMi;
+					if (mi->methodPointer) ((void(*)(void*, bool, void*))mi->methodPointer)(ctrl, false, mi);
+				}
+				HOOK_CAST_CALL(void, LipSyncController_UpdateLip)(ctrl, g_lipLastTime, g_lipUpdateMethod);
+				static int samples = 0;
+				if (samples++ < 6) Log(std::format("[fuyuko-late-mouth] time={:.3f} table={}", g_lipLastTime, LipTableFrameCount(LipTableOf(ctrl))));
+			} catch (...) {}
+		}
+
 		// Safe fallback for a special-performance asset not cached during packaging.
 		// Clone via Unity, prove all 1216 entries are independent, and retain a GC
 		// handle. Never touch the source if the engine returns a shallow clone.
@@ -7563,6 +7588,9 @@ namespace
 					(void*)LipSyncController_SetupDiag_hook, LipSyncController_SetupDiag_orig);
 			}
 			if (g_lipGroupExpIk) {
+				add("ExpressionAndIkController.LateUpdate",
+					ViewDiag::find_method_anywhere("", "ExpressionAndIkController", "LateUpdate", 0),
+					(void*)ExpIk_LateUpdate_hook, ExpIk_LateUpdate_orig);
 				add("ExpressionAndIkController.SetOverwriteLip",
 					ViewDiag::find_method_anywhere("", "ExpressionAndIkController", "SetOverwriteLip", 2),
 					(void*)ExpIk_SetOverwriteLip_hook, ExpIk_SetOverwriteLip_orig);
