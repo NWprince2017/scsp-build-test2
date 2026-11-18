@@ -7607,8 +7607,11 @@ namespace
 			const auto name = Il2CppStrOf(RunwayDump::ReadPtr(scene, "<CutSceneName>k__BackingField"));
 			switch (song) {
 			case 118: case 148: return name == "Middle_UCS_01";
-			case 167: return name == "Middle_UCS_01" ||
-				(g_nightParadiseAlternateFilterInstalled && name == "Middle_UCS_04_1");
+			case 167:
+				// UCS_03_1 to UCS_04_1 share the same native centre-costume rule.
+				return name == "Middle_UCS_01" || name == "Middle_UCS_02" || (g_nightParadiseAlternateFilterInstalled &&
+					(name == "Middle_UCS_03_1" || name == "Middle_UCS_03_2" ||
+					 name == "Middle_UCS_03_3" || name == "Middle_UCS_04_1"));
 			case 210: return name == "Middle_UCS_03";
 			default: return false;
 			}
