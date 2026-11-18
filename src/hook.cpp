@@ -5667,7 +5667,12 @@ namespace
 		}
 		HOOK_ORIG_TYPE LiveSubSequence_ProcessTime_orig;
 		void LiveSubSequence_ProcessTime_hook(void* _this, float time, void* mtd) {
-			// Songs 41/148 are driven by LiveScene.Update above; avoid driving twice.
+			// During the special insert, apply solo mouth after the game updates the scene.
+			if (g_lastMvSongId == 118 && g_lastSoloVocalMode == 2 && time >= 80.8f && time <= 103.0f) {
+				HOOK_CAST_CALL(void, LiveSubSequence_ProcessTime)(_this, time, mtd);
+				try { LipSoloDrive(time); } catch (...) {}
+				return;
+			}
 			if (g_lastMvSongId != 41 && g_lastMvSongId != 148) {
 				try { LipSoloDrive(time); } catch (...) {}
 			}
@@ -6462,6 +6467,8 @@ namespace
 		std::string g_summerNativeHeadName;
 		float g_summerNativeHeadOffset = 0.0f, g_summerNativeHeadAdd = 0.0f;
 		bool g_summerNativeHeadRestored = false;
+		bool g_summerQuietTailBound = false;
+		bool g_summerQuietTailFinished = false;
 		void LipSummerBackgroundExpressions(void* arr, int count, int singer, float time, int tick) {
 			if (g_lastMvSongId != 118 || g_lastSoloVocalMode != 2 || g_lipMode != "on" ||
 				!arr || singer <= 0 || !g_lipUpdateMethod || !g_setupLipStringMi) return;
@@ -6556,6 +6563,7 @@ namespace
 			g_summerNativeHead = nullptr;
 			g_summerNativeHeadName.clear();
 			g_summerNativeHeadRestored = false;
+			g_summerQuietTailBound = false; g_summerQuietTailFinished = false;
 			{
 				std::lock_guard<std::mutex> lock(g_lipMutex);
 				g_csCharacters.clear();
@@ -6660,6 +6668,31 @@ namespace
 						g_summerNativeHeadRestored = true;
 					}
 				}
+				// Preserve the independent special table, suppress only the observed
+				// silent tail in a verified external copy, then restore the original.
+				if (singer == 18 && LipCharaFromSlot(0) == singer && g_summerNativeHeadRestored && g_summerNativeHead && HOOK_GET_ORIG(Character_SetupLipName)) {
+					void* head = nullptr; try { head = il2cpp_symbols::array_get_value(arr, 0); } catch (...) {}
+					if (head == g_summerNativeHead) {
+						void* ctrl = LipControllerOf(head);
+						if (time < 101.1f && !g_summerQuietTailBound && !g_summerQuietTailFinished && ctrl) {
+							void* original = LipTableOf(ctrl); auto klass = original ? KlassOf(original) : nullptr;
+							auto type = klass ? il2cpp_type_get_object(il2cpp_class_get_type(klass)) : nullptr;
+							const std::string path = "lip-118-cs-quiet-tail-18.bundle";
+							void* quiet = type && std::filesystem::exists(path) ? LoadExternAsset(path + "::cs_118summer_ucs_01_18fuyuko_01.asset", type) : nullptr;
+							auto field = FieldOf(KlassOf(ctrl), "_lipSyncTable");
+							if (field && quiet && LipTableFrameCount(quiet) == 1216 && RunwayDump::ReadInt(quiet, "frameRate") == 60 && RunwayDump::ReadInt(quiet, "offsetFrame") == 10) {
+								il2cpp_field_set_value(ctrl, field, quiet);
+								g_summerQuietTailBound = LipTableOf(ctrl) == quiet;
+								if (!g_summerQuietTailBound) il2cpp_field_set_value(ctrl, field, original);
+								Log(std::format("[fuyuko-tail] bound={}", g_summerQuietTailBound ? 1 : 0));
+							}
+						} else if (time >= 101.1f && g_summerQuietTailBound) {
+							HOOK_CAST_CALL(void, Character_SetupLipName)(head, il2cpp_string_new(g_summerNativeHeadName.c_str()), g_summerNativeHeadOffset, g_summerNativeHeadAdd, g_setupLipStringMi);
+							g_summerQuietTailBound = false; g_summerQuietTailFinished = true;
+							Log("[fuyuko-tail] restored native special table");
+						}
+					}
+				}
 				try { LipSummerBackgroundExpressions(arr, n, singer, time, ticks); } catch (...) {}
 				return;
 			}
@@ -6742,23 +6775,9 @@ namespace
 						ofn(ctrl, true, g_lipSetOverwriteMi);
 					}
 				}
-				// Targeted test: during the four sung lines, the special scene sets
-				// isOverwrite=1 even after the song table has been rebound.
-				// Disable it only for the verified cross-worn swimsuit combination.
-				if (inCs && g_lastMvSongId == 118 && cid == 18 && i == 0 &&
-					time >= 80.924f && time < 98.8f && g_lipSetOverwriteMi && LipReadBool(ctrl, "isOverwrite")) {
-					void* idols = g_lastStartData ? RunwayDump::ReadPtr(g_lastStartData, "<OnStageIdols>k__BackingField") : nullptr;
-					void* head = idols && RunwayDump::ArrayLength(idols) > 0 ? il2cpp_symbols::array_get_value(idols, 0) : nullptr;
-					void* worn = head ? RunwayDump::ReadPtr(head, "<MstCostume>k__BackingField") : nullptr;
-					if (worn && RunwayDump::ReadInt(worn, "<Id>k__BackingField") == 219010 &&
-						RunwayDump::ReadInt(worn, "<ResourceId>k__BackingField") == 361) {
-						auto* mi = (MethodInfo*)g_lipSetOverwriteMi;
-						if (mi->methodPointer) {
-							((void(*)(void*, bool, void*))mi->methodPointer)(ctrl, false, mi);
-							static int logs = 0;
-							if (logs++ < 8) Log(std::format("[vocal-cs-overwrite] time={:.3f} remaining={}", time, LipReadBool(ctrl, "isOverwrite") ? 1 : 0));
-						}
-					}
+				if (inCs && g_lastMvSongId == 118 && cid == 18 && i == 0 && time >= 80.924f && time < 98.8f && g_lipSetOverwriteMi && LipReadBool(ctrl, "isOverwrite")) {
+					auto* mi = (MethodInfo*)g_lipSetOverwriteMi;
+					if (mi->methodPointer) ((void(*)(void*, bool, void*))mi->methodPointer)(ctrl, false, mi);
 				}
 				g_lipDriving.insert(ctrl);
 				if (g_lipDriveLogs < 6) {
@@ -6875,6 +6894,7 @@ namespace
 				g_summerNativeHeadOffset = offsetTime;
 				g_summerNativeHeadAdd = addTime;
 				g_summerNativeHeadRestored = false;
+				g_summerQuietTailBound = false; g_summerQuietTailFinished = false;
 			}
 			// Retain the centre's own special expressions but neutralise the observed
 			// extra lyric only when another idol is singing solo.
