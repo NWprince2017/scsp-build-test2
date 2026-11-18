@@ -7432,6 +7432,179 @@ namespace
 			return HOOK_CAST_CALL(void*, MstCostumePartExtensions_GetLiveCutScenes)(costume, useCharacter, positionArg, method);
 		}
 
+		constexpr const char* kCenterCutSceneCostumeList = "center-cutscene-costumes.txt";
+		bool g_centerCostumePredicateInstalled = false;
+
+		bool CenterCutSceneSong(int song) {
+			return song == 118 || song == 148 || song == 167 || song == 210;
+		}
+
+		void* CenterCutSceneTableRows(void* master, const char* name) {
+			void* table = master ? RunwayDump::ReadPtr(master, name) : nullptr;
+			return table ? RunwayDump::ReadPtr(table, "data") : nullptr;
+		}
+
+		std::string CenterCutSceneTrimName(std::string_view name) {
+			constexpr std::string_view wideSpace = "\xe3\x80\x80";
+			while (!name.empty() && (name.starts_with(wideSpace) || name.front() == ' ' || name.front() == '\t'))
+				name.remove_prefix(name.starts_with(wideSpace) ? wideSpace.size() : 1);
+			while (!name.empty() && (name.ends_with(wideSpace) || name.back() == ' ' || name.back() == '\t' || name.back() == '\r'))
+				name.remove_suffix(name.ends_with(wideSpace) ? wideSpace.size() : 1);
+			return std::string(name);
+		}
+
+		void* CenterCutSceneTextManager() {
+			auto mi = il2cpp_symbols_logged::get_method("PRISM.Legacy.dll", "ENTERPRISE.Localization",
+				"LocalizationManager", "get_Instance", 0);
+			return mi ? mi->Invoke<Il2CppObject*>(nullptr, {}) : nullptr;
+		}
+
+		std::string CenterCutSceneText(void* manager, Il2CppString* category, int id) {
+			if (!manager || !category || id <= 0 || !HOOK_GET_ORIG(LocalizationManager_GetTextOrNull)) return {};
+			auto* text = HOOK_CAST_CALL(Il2CppString*, LocalizationManager_GetTextOrNull)(manager, category, id);
+			return text ? CenterCutSceneTrimName(text->ToUtf8String()) : std::string{};
+		}
+
+		std::string CenterCutSceneCostumeName(void* manager, void* costume) {
+			auto klass = costume ? KlassOf(costume) : nullptr;
+			auto getter = klass ? il2cpp_class_get_method_from_name(klass, "get_Name", 0) : nullptr;
+			void* key = getter ? getter->Invoke<Il2CppObject*>((Il2CppObject*)costume, {}) : nullptr;
+			auto* category = key ? (Il2CppString*)RunwayDump::ReadPtr(key, "<Category>k__BackingField") : nullptr;
+			return key ? CenterCutSceneText(manager, category, RunwayDump::ReadInt(key, "<Id>k__BackingField")) : std::string{};
+		}
+
+		bool CenterCutSceneHasTag(void* costume, const std::unordered_set<int>& swimTags) {
+			void* tags = RunwayDump::ReadPtr(costume, "<TagIdList>k__BackingField");
+			const char* type = tags ? RunwayDump::ClassNameOf(tags) : nullptr;
+			if (!type) return false;
+			int count = 0;
+			if (strcmp(type, "Int32[]") == 0) count = RunwayDump::ArrayLength(tags);
+			else if (strcmp(type, "List`1") == 0) {
+				count = RunwayDump::ReadInt(tags, "_size");
+				tags = RunwayDump::ReadPtr(tags, "_items");
+				const char* itemType = tags ? RunwayDump::ClassNameOf(tags) : nullptr;
+				if (!itemType || strcmp(itemType, "Int32[]") != 0 || RunwayDump::ArrayLength(tags) < count) return false;
+			}
+			for (int i = 0; i < count; ++i) {
+				if (swimTags.contains(*reinterpret_cast<const int*>(il2cpp_array_addr_with_size(tags, sizeof(int), i)))) return true;
+			}
+			return false;
+		}
+
+		void SeedCenterCutSceneCostumeList(void* master) {
+			if (std::filesystem::exists(kCenterCutSceneCostumeList)) return;
+			void* tags = CenterCutSceneTableRows(master, "CostumeTags");
+			void* costumes = CenterCutSceneTableRows(master, "Costumes");
+			if (!tags || !costumes) return;
+			void* manager = CenterCutSceneTextManager();
+			if (!manager) return;
+			std::unordered_set<int> swimTags;
+			for (int i = 0, count = RunwayDump::ArrayLength(tags); i < count; ++i) {
+				void* row = il2cpp_symbols::array_get_value(tags, i);
+				if (row && Il2CppStrOf(RunwayDump::ReadPtr(row, "<Name>k__BackingField")) == "\xe6\xb0\xb4\xe7\x9d\x80") {
+					const int id = RunwayDump::ReadInt(row, "<Id>k__BackingField");
+					if (id > 0) swimTags.insert(id);
+				}
+			}
+			if (swimTags.empty()) {
+				Log("[center-cutscene] swimsuit tag unavailable");
+				return;
+			}
+			std::set<std::string> names;
+			int taggedCount = 0;
+			for (int i = 0, count = RunwayDump::ArrayLength(costumes); i < count; ++i) {
+				void* row = il2cpp_symbols::array_get_value(costumes, i);
+				if (!row || !CenterCutSceneHasTag(row, swimTags)) continue;
+				++taggedCount;
+				const int id = RunwayDump::ReadInt(row, "<Id>k__BackingField");
+				auto name = CenterCutSceneCostumeName(manager, row);
+				if (name.empty()) name = CenterCutSceneText(manager, il2cpp_string_new("mlCostumeSet_Name"), id);
+				if (name.empty()) {
+					Log(std::format("[center-cutscene] no display name for tagged costume {}", id));
+					return; // Retry once the costume text data is available.
+				}
+				names.insert(std::move(name));
+			}
+			if (names.empty()) {
+				Log("[center-cutscene] no costumes use the swimsuit tag");
+				return;
+			}
+			const auto temp = std::filesystem::path(kCenterCutSceneCostumeList).concat(".tmp");
+			std::ofstream file(temp, std::ios::binary | std::ios::trunc);
+			if (!file) return;
+			file << "\xef\xbb\xbf" << "# One in-game costume name per line. Lines starting with # are ignored.\r\n";
+			for (const auto& name : names) file << name << "\r\n";
+			file.close();
+			if (!file) return;
+			std::error_code ec;
+			std::filesystem::rename(temp, kCenterCutSceneCostumeList, ec);
+			if (!ec) Log(std::format("[center-cutscene] seeded swimTags={} costumes={} distinctNames={}", swimTags.size(), taggedCount, names.size()));
+			else std::filesystem::remove(temp, ec);
+		}
+
+		bool CenterCutSceneCostumeRegistered(void* costume) {
+			if (!costume) return false;
+			std::ifstream file(kCenterCutSceneCostumeList, std::ios::binary);
+			if (!file) return false;
+			const int id = RunwayDump::ReadInt(costume, "<Id>k__BackingField");
+			void* manager = CenterCutSceneTextManager();
+			if (!manager) return false;
+			const auto costumeName = CenterCutSceneCostumeName(manager, costume);
+			const auto setName = CenterCutSceneText(manager, il2cpp_string_new("mlCostumeSet_Name"), id);
+			if (costumeName.empty() && setName.empty()) return false;
+			for (std::string line; std::getline(file, line);) {
+				if (line.starts_with("\xef\xbb\xbf")) line.erase(0, 3);
+				const auto name = CenterCutSceneTrimName(line);
+				if (name.empty() || name.front() == '#') continue;
+				if (name == costumeName || name == setName) return true;
+			}
+			return false;
+		}
+
+		bool CenterCutSceneAllowsCostumeList(int song, void* scene) {
+			if (!scene || RunwayDump::ReadInt(scene, "<MstSongId>k__BackingField") != song ||
+				RunwayDump::ReadInt(scene, "<ConditionType>k__BackingField") != 1) return false;
+			const auto name = Il2CppStrOf(RunwayDump::ReadPtr(scene, "<CutSceneName>k__BackingField"));
+			switch (song) {
+			case 118: case 148: case 167: return name == "Middle_UCS_01";
+			case 210: return name == "Middle_UCS_03";
+			default: return false;
+			}
+		}
+
+		HOOK_ORIG_TYPE LiveCutSceneSelector_GetCenterCharacterIdIfMatched_orig;
+		uint64_t LiveCutSceneSelector_GetCenterCharacterIdIfMatched_hook(void* self, void* method) {
+			const auto original = HOOK_CAST_CALL(uint64_t, LiveCutSceneSelector_GetCenterCharacterIdIfMatched)(self, method);
+			if ((original & 0xff) || !self) return original;
+			try {
+				void* branch = RunwayDump::ReadPtr(self, "CS$<>8__locals2");
+				void* selection = branch ? RunwayDump::ReadPtr(branch, "CS$<>8__locals1") : nullptr;
+				if (!selection || !LipReadBool(selection, "isMv")) return original;
+				const int song = RunwayDump::ReadInt(selection, "songId");
+				void* scene = RunwayDump::ReadPtr(branch, "cutScene");
+				if (!CenterCutSceneSong(song) || !CenterCutSceneAllowsCostumeList(song, scene)) return original;
+				void* idols = RunwayDump::ReadPtr(selection, "idols");
+				const char* type = idols ? RunwayDump::ClassNameOf(idols) : nullptr;
+				if (!type) return original;
+				if (strcmp(type, "List`1") == 0) {
+					if (RunwayDump::ReadInt(idols, "_size") <= 0) return original;
+					idols = RunwayDump::ReadPtr(idols, "_items");
+				} else if (strcmp(type, "UnitIdol[]") != 0) return original;
+				if (!idols || RunwayDump::ArrayLength(idols) <= 0) return original;
+				void* center = il2cpp_symbols::array_get_value(idols, 0);
+				if (!center) return original;
+				const int actor = RunwayDump::ReadInt(center, "charaId");
+				void* costume = RunwayDump::ReadPtr(center, "<MstCostume>k__BackingField");
+				// These native close-up assets have character variants for the 28 PRISM idols.
+				if (actor < 1 || actor > 28 || !CenterCutSceneCostumeRegistered(costume)) return original;
+				Log(std::format("[center-cutscene] song={} scene={} actor={} costume={}", song,
+					RunwayDump::ReadInt(scene, "<Id>k__BackingField"), actor,
+					RunwayDump::ReadInt(costume, "<Id>k__BackingField")));
+				// The IL2CPP x64 Nullable<int> holds hasValue at byte 0 and value at byte 4.
+				return (uint64_t(static_cast<uint32_t>(actor)) << 32) | 1;
+			} catch (...) { return original; }
+		}
+
 		// Candidate: translate only the predicate input, only for the tested
 		// cross-worn swimsuit. Restore the actual costume before returning.
 		HOOK_ORIG_TYPE LiveCutSceneSelector_MoveNext_orig;
@@ -7440,7 +7613,7 @@ namespace
 			bool changed = false; int fromId = -1, toId = -1;
 			static const int swimsuits[28] = { 201011, 202011, 203011, 204010, 205010, 206010, 207010, 208010, 209011, 210011, 211011, 212011, 213011, 214011, 215011, 216011, 217011, 218010, 219010, 220008, 221008, 222008, 223008, 224007, 225007, 226006, 227006, 228006 };
 			try {
-				if (self && RunwayDump::ReadInt(self, "songId") == 118) {
+				if (!g_centerCostumePredicateInstalled && self && RunwayDump::ReadInt(self, "songId") == 118) {
 					FILE* f = fopen("costume-owner-fix.txt", "r"); bool enabled = false;
 					if (f) { char buf[16] = {}; enabled = fgets(buf, sizeof(buf), f) && strncmp(buf, "on", 2) == 0; fclose(f); }
 					void* arr = RunwayDump::ReadPtr(self, "idols");
@@ -7488,6 +7661,8 @@ namespace
 		HOOK_ORIG_TYPE LiveCutSceneSelector_Select_orig;
 		void* LiveCutSceneSelector_Select_hook(int song, void* idols, bool isMv, void* method) {
 			try {
+				if (isMv && g_centerCostumePredicateInstalled && CenterCutSceneSong(song))
+					SeedCenterCutSceneCostumeList(TryMasterData());
 				if (song == 118 && idols) {
 					const char* klass = RunwayDump::ClassNameOf(idols);
 					void* arr = nullptr; int count = 0;
@@ -7544,6 +7719,20 @@ namespace
 					Log(std::format("[v71] {} hooked @ {}", label, ViewDiag::ptr_str(addr)));
 				}
 			};
+			auto* selector = (Il2CppClass*)ViewDiag::find_class_anywhere("PRISM", "LiveCutSceneSelector");
+			auto* condition = selector ? il2cpp_symbols::get_nested_class(selector, "<>c__DisplayClass0_2") : nullptr;
+			auto* centerMethod = condition ? il2cpp_class_get_method_from_name(condition,
+				"<Select>g__GetCenterCharacterIdIfMatched|3", 0) : nullptr;
+			if (centerMethod && centerMethod->methodPointer && centerMethod->return_type) {
+				const char* returnType = il2cpp_type_get_name(centerMethod->return_type);
+				if (returnType && strstr(returnType, "Nullable") && strstr(returnType, "Int32")) {
+					g_centerCostumePredicateInstalled = HookAt("LiveCutSceneSelector.GetCenterCharacterIdIfMatched",
+						(void*)centerMethod->methodPointer, (void*)LiveCutSceneSelector_GetCenterCharacterIdIfMatched_hook,
+						LiveCutSceneSelector_GetCenterCharacterIdIfMatched_orig);
+					if (g_centerCostumePredicateInstalled) ++installed;
+				}
+			}
+			Log(std::format("[center-cutscene] predicate installed={}", g_centerCostumePredicateInstalled ? 1 : 0));
 			add("LiveCutSceneSelector.<Select>d__0.MoveNext",
 				ViewDiag::find_nested_move_next("PRISM", "LiveCutSceneSelector", "<Select>d__0"),
 				(void*)LiveCutSceneSelector_MoveNext_hook, LiveCutSceneSelector_MoveNext_orig);
