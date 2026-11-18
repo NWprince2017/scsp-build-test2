@@ -6467,8 +6467,13 @@ namespace
 		std::string g_summerNativeHeadName;
 		float g_summerNativeHeadOffset = 0.0f, g_summerNativeHeadAdd = 0.0f;
 		bool g_summerNativeHeadRestored = false;
-		bool g_summerQuietTailBound = false;
-		bool g_summerQuietTailFinished = false;
+		// Song 118: CutScene.SetLipSync starts UCS_01 at 81.1 s. Fuyuko's
+		// original Cri Atom voice clip starts 1030 frames into that scene.
+		constexpr float kFuyukoUcsStart = 81.1f;
+		constexpr float kFuyukoUcsVoiceStart = kFuyukoUcsStart + 1030.0f / 60.0f;
+		constexpr float kFuyukoUcsEnd = kFuyukoUcsStart + 1216.0f / 60.0f;
+		constexpr const char* kFuyukoUcsLip = "Summer/CS_118Summer_UCS_01_18fuyuko_01";
+		bool g_fuyukoUcsMouthLogged = false;
 		void LipSummerBackgroundExpressions(void* arr, int count, int singer, float time, int tick) {
 			if (g_lastMvSongId != 118 || g_lastSoloVocalMode != 2 || g_lipMode != "on" ||
 				!arr || singer <= 0 || !g_lipUpdateMethod || !g_setupLipStringMi) return;
@@ -6563,7 +6568,7 @@ namespace
 			g_summerNativeHead = nullptr;
 			g_summerNativeHeadName.clear();
 			g_summerNativeHeadRestored = false;
-			g_summerQuietTailBound = false; g_summerQuietTailFinished = false;
+			g_fuyukoUcsMouthLogged = false;
 			{
 				std::lock_guard<std::mutex> lock(g_lipMutex);
 				g_csCharacters.clear();
@@ -6658,7 +6663,11 @@ namespace
 			}
 			int n = 0;
 			try { n = (int)il2cpp_array_length(arr); } catch (...) { return; }
-			if (inCs && g_lastMvSongId == 118 && time >= 98.8f && time <= 103.0f) {
+			const bool fuyukoUcs = inCs && g_lastMvSongId == 118 && singer == 18 &&
+				LipCharaFromSlot(0) == 18 && g_summerNativeHeadName == kFuyukoUcsLip;
+			const float specialMouthStart = fuyukoUcs ? kFuyukoUcsVoiceStart : 98.8f;
+			if (fuyukoUcs && time < specialMouthStart) g_summerNativeHeadRestored = false;
+			if (inCs && g_lastMvSongId == 118 && time >= specialMouthStart && time <= 103.0f) {
 				if (!g_summerNativeHeadRestored && LipCharaFromSlot(0) == singer &&
 					g_summerNativeHead && !g_summerNativeHeadName.empty() && HOOK_GET_ORIG(Character_SetupLipName)) {
 					void* head = nullptr;
@@ -6666,31 +6675,6 @@ namespace
 					if (head == g_summerNativeHead) {
 						HOOK_CAST_CALL(void, Character_SetupLipName)(head, il2cpp_string_new(g_summerNativeHeadName.c_str()), g_summerNativeHeadOffset, g_summerNativeHeadAdd, g_setupLipStringMi);
 						g_summerNativeHeadRestored = true;
-					}
-				}
-				// Preserve the independent special table, suppress only the observed
-				// silent tail in a verified external copy, then restore the original.
-				if (singer == 18 && LipCharaFromSlot(0) == singer && g_summerNativeHeadRestored && g_summerNativeHead && HOOK_GET_ORIG(Character_SetupLipName)) {
-					void* head = nullptr; try { head = il2cpp_symbols::array_get_value(arr, 0); } catch (...) {}
-					if (head == g_summerNativeHead) {
-						void* ctrl = LipControllerOf(head);
-						if (time < 101.1f && !g_summerQuietTailBound && !g_summerQuietTailFinished && ctrl) {
-							void* original = LipTableOf(ctrl); auto klass = original ? KlassOf(original) : nullptr;
-							auto type = klass ? il2cpp_type_get_object(il2cpp_class_get_type(klass)) : nullptr;
-							const std::string path = "lip-118-cs-quiet-tail-18.bundle";
-							void* quiet = type && std::filesystem::exists(path) ? LoadExternAsset(path + "::cs_118summer_ucs_01_18fuyuko_01.asset", type) : nullptr;
-							auto field = FieldOf(KlassOf(ctrl), "_lipSyncTable");
-							if (field && quiet && LipTableFrameCount(quiet) == 1216 && RunwayDump::ReadInt(quiet, "frameRate") == 60 && RunwayDump::ReadInt(quiet, "offsetFrame") == 10) {
-								il2cpp_field_set_value(ctrl, field, quiet);
-								g_summerQuietTailBound = LipTableOf(ctrl) == quiet;
-								if (!g_summerQuietTailBound) il2cpp_field_set_value(ctrl, field, original);
-								Log(std::format("[fuyuko-tail] bound={}", g_summerQuietTailBound ? 1 : 0));
-							}
-						} else if (time >= 101.1f && g_summerQuietTailBound) {
-							HOOK_CAST_CALL(void, Character_SetupLipName)(head, il2cpp_string_new(g_summerNativeHeadName.c_str()), g_summerNativeHeadOffset, g_summerNativeHeadAdd, g_setupLipStringMi);
-							g_summerQuietTailBound = false; g_summerQuietTailFinished = true;
-							Log("[fuyuko-tail] restored native special table");
-						}
 					}
 				}
 				try { LipSummerBackgroundExpressions(arr, n, singer, time, ticks); } catch (...) {}
@@ -6808,28 +6792,46 @@ namespace
 			try { LipAdditionalBackground(arr, n, singer, time, ticks); } catch (...) {}
 		}
 
-		// Reapply the singing mouth after the special scene's expression update.
-		// Target only Fuyuko as centre soloist and only the four sung lines.
+		// Apply the centre soloist's mouth after the scene's expression update.
+		// UCS_01 uses its own clock once Fuyuko's special voice clip begins.
 		HOOK_ORIG_TYPE ExpIk_LateUpdate_orig;
 		void ExpIk_LateUpdate_hook(void* self, void* method) {
 			HOOK_CAST_CALL(void, ExpIk_LateUpdate)(self, method);
 			try {
 				if (!self || g_lastMvSongId != 118 || g_lastSoloVocalMode != 2 || g_csActive <= 0 ||
-					g_lipLastTime < 80.924f || g_lipLastTime >= 98.8f || !g_lipUpdateMethod ||
+					g_lipLastTime < 80.924f || g_lipLastTime >= kFuyukoUcsEnd || !g_lipUpdateMethod ||
 					!HOOK_GET_ORIG(LipSyncController_UpdateLip)) return;
 				void* ch = RunwayDump::ReadPtr(self, "_character");
 				if (!ch || LipCharaId(ch) != 0) return;
 				void* ctrl = LipControllerOf(ch);
 				if (!ctrl || LipCtlCharaId(ctrl) != 18) return;
-				auto it = g_lipInjectedTable.find(ch);
-				if (it == g_lipInjectedTable.end() || !it->second || LipTableOf(ctrl) != it->second) return;
+				void* table = LipTableOf(ctrl);
+				const bool fuyukoUcs = g_summerNativeHead == ch && g_summerNativeHeadName == kFuyukoUcsLip;
+				const float specialMouthStart = fuyukoUcs ? kFuyukoUcsVoiceStart : 98.8f;
+				const bool useSpecialTable = g_lipLastTime >= specialMouthStart;
+				float lipTime = g_lipLastTime;
+				if (useSpecialTable) {
+					if (!fuyukoUcs || !g_summerNativeHeadRestored || LipTableFrameCount(table) != 1216 ||
+						RunwayDump::ReadInt(table, "frameRate") != 60 || RunwayDump::ReadInt(table, "offsetFrame") != 10) return;
+					lipTime -= kFuyukoUcsStart;
+				} else {
+					auto it = g_lipInjectedTable.find(ch);
+					if (it == g_lipInjectedTable.end() || !it->second || table != it->second) return;
+				}
 				if (g_lipSetOverwriteMi && LipReadBool(ctrl, "isOverwrite")) {
 					auto* mi = (MethodInfo*)g_lipSetOverwriteMi;
 					if (mi->methodPointer) ((void(*)(void*, bool, void*))mi->methodPointer)(ctrl, false, mi);
 				}
-				HOOK_CAST_CALL(void, LipSyncController_UpdateLip)(ctrl, g_lipLastTime, g_lipUpdateMethod);
-				static int samples = 0;
-				if (samples++ < 6) Log(std::format("[fuyuko-late-mouth] time={:.3f} table={}", g_lipLastTime, LipTableFrameCount(LipTableOf(ctrl))));
+				HOOK_CAST_CALL(void, LipSyncController_UpdateLip)(ctrl, lipTime, g_lipUpdateMethod);
+				if (useSpecialTable && !g_fuyukoUcsMouthLogged) {
+					g_fuyukoUcsMouthLogged = true;
+					Log(std::format("[fuyuko-special-mouth] song={:.3f} scene={:.3f} frames={}",
+						g_lipLastTime, lipTime, LipTableFrameCount(table)));
+				} else if (!useSpecialTable) {
+					static int samples = 0;
+					if (samples++ < 6) Log(std::format("[fuyuko-late-mouth] time={:.3f} table={}",
+						g_lipLastTime, LipTableFrameCount(table)));
+				}
 			} catch (...) {}
 		}
 
@@ -6919,7 +6921,6 @@ namespace
 				g_summerNativeHeadOffset = offsetTime;
 				g_summerNativeHeadAdd = addTime;
 				g_summerNativeHeadRestored = false;
-				g_summerQuietTailBound = false; g_summerQuietTailFinished = false;
 			}
 			// Retain the centre's own special expressions but neutralise the observed
 			// extra lyric only when another idol is singing solo.
