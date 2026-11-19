@@ -11,6 +11,8 @@ extern HOOK_ORIG_TYPE SetResolution_orig;
 extern std::map<std::string, CharaParam_t> charaParam;
 extern CharaParam_t baseParam;
 extern void saveGUIDataCache();
+extern bool MvCenterCloseupsAnyCostume();
+extern void SetMvCenterCloseupsAnyCostume(bool enabled);
 
 
 #define INPUT_AND_SLIDER_FLOAT(label, data, min, max) \
@@ -555,6 +557,11 @@ namespace SCGUILoop {
 			ImGui::Checkbox("Show hidden costumes (overwrite isAllDressOrdered)", &g_show_hidden_costumes);
 			ImGui::SameLine();
 			HELP_TOOLTIP("(?)", "在进入换装窗口前勾选有效。\nActive only when checked before entering costume changing view.");
+
+			bool anyCostume = MvCenterCloseupsAnyCostume();
+			if (ImGui::Checkbox("MV center close-ups with any costume", &anyCostume)) {
+				SetMvCenterCloseupsAnyCostume(anyCostume);
+			}
 
 			ImGui::Checkbox("Apply costume changes automatically", &g_apply_costumes_automatically);
 			ImGui::SameLine();

@@ -3,6 +3,7 @@
 #include <ranges>
 #include <set>
 #include <mutex>
+#include <atomic>
 #include <cstdint>
 #include <cstdlib>
 #include <cstdio>
@@ -26,6 +27,18 @@ std::function<void()> g_on_hook_ready;
 std::function<void()> g_on_close;
 std::function<void()> on_hotKey_0;
 bool needPrintStack = false;
+
+namespace {
+	std::atomic_bool mvCenterCloseupsAnyCostume{false};
+}
+
+bool MvCenterCloseupsAnyCostume() {
+	return mvCenterCloseupsAnyCostume.load(std::memory_order_relaxed);
+}
+
+void SetMvCenterCloseupsAnyCostume(bool enabled) {
+	mvCenterCloseupsAnyCostume.store(enabled, std::memory_order_relaxed);
+}
 std::vector<std::pair<std::pair<int, int>, int>> replaceDressResIds{};
 std::map<std::string, CharaParam_t> charaParam{};
 CharaParam_t baseParam(0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
@@ -7215,6 +7228,215 @@ namespace
 			Log("[v74] < CutScene.SetupControllers done");
 		}
 
+		void* CenterCutSceneTableRows(void* master, const char* name);
+
+		Il2CppObject* OutfitCall(void* instance, const char* name,
+			std::initializer_list<Il2CppObject*> args = {}) {
+			auto* klass = instance ? KlassOf(instance) : nullptr;
+			for (; klass; klass = (Il2CppClass*)il2cpp_class_get_parent(klass)) {
+				const auto* method = il2cpp_class_get_method_from_name(klass, name, static_cast<int>(args.size()));
+				if (method && method->methodPointer)
+					return method->Invoke<Il2CppObject*>((Il2CppObject*)instance, args);
+			}
+			return nullptr;
+		}
+
+		int OutfitNumber(void* instance, const char* getter) {
+			auto* value = OutfitCall(instance, getter);
+			return value ? value->unbox_value<int>() : 0;
+		}
+
+		struct OutfitArray {
+			void* data = nullptr;
+			int count = 0;
+		};
+
+		OutfitArray OutfitList(void* list) {
+			const char* type = list ? RunwayDump::ClassNameOf(list) : nullptr;
+			if (!type) return {};
+			if (strcmp(type, "List`1") == 0) {
+				const int count = RunwayDump::ReadInt(list, "_size");
+				void* items = RunwayDump::ReadPtr(list, "_items");
+				if (items && count >= 0 && RunwayDump::ArrayLength(items) >= count) return {items, count};
+				return {};
+			}
+			if (std::string_view(type).ends_with("[]")) return {list, RunwayDump::ArrayLength(list)};
+			return {};
+		}
+
+		bool OutfitIntListContains(void* values, int wanted) {
+			const auto list = OutfitList(values);
+			const char* type = list.data ? RunwayDump::ClassNameOf(list.data) : nullptr;
+			if (!type || strcmp(type, "Int32[]") != 0) return false;
+			for (int i = 0; i < list.count; ++i) {
+				if (*reinterpret_cast<const int*>(il2cpp_array_addr_with_size(list.data, sizeof(int), i)) == wanted)
+					return true;
+			}
+			return false;
+		}
+
+		bool OriginalOutfitForSong(void* set, int song) {
+			return set && song > 0 && OutfitIntListContains(RunwayDump::ReadPtr(set, "<MstSongIdList>k__BackingField"), song);
+		}
+
+		thread_local void* g_originalOutfitChanger = nullptr;
+
+		HOOK_ORIG_TYPE LiveUnitEasyCostumeChanger_MvOriginalCostumeExists_orig;
+		bool LiveUnitEasyCostumeChanger_MvOriginalCostumeExists_hook(void* self, void* method) {
+			if (HOOK_CAST_CALL(bool, LiveUnitEasyCostumeChanger_MvOriginalCostumeExists)(self, method)) return true;
+			try {
+				const int song = RunwayDump::ReadInt(self, "mstSongId");
+				const auto sets = OutfitList(CenterCutSceneTableRows(TryMasterData(), "CostumeSets"));
+				for (int i = 0; i < sets.count; ++i)
+					if (OriginalOutfitForSong(il2cpp_symbols::array_get_value(sets.data, i), song)) return true;
+			} catch (...) {}
+			return false;
+		}
+
+		HOOK_ORIG_TYPE LiveUnitEasyCostumeChanger_ChangeLiveIdolCostume_orig;
+		void LiveUnitEasyCostumeChanger_ChangeLiveIdolCostume_hook(void* self, int choice, void* idols,
+			bool allDressOrdered, void* method) {
+			// LiveUnitRecommendCostume.MvOriginal.
+			constexpr int mvOriginal = 1;
+			struct Restore {
+				void* previous = g_originalOutfitChanger;
+				~Restore() { g_originalOutfitChanger = previous; }
+			} restore;
+			g_originalOutfitChanger = choice == mvOriginal ? self : nullptr;
+			HOOK_CAST_CALL(void, LiveUnitEasyCostumeChanger_ChangeLiveIdolCostume)(self, choice, idols, allDressOrdered, method);
+		}
+
+		void ApplyMissingOriginalOutfit(void* changer, void* idol) {
+			const int song = RunwayDump::ReadInt(changer, "mstSongId");
+			const int actor = OutfitNumber(idol, "get_CharacterId");
+			void* current = OutfitCall(idol, "get_CostumeSet");
+			void* service = RunwayDump::ReadPtr(changer, "costumeService");
+			if (song <= 0 || actor <= 0 || !current || !service) return;
+			const int currentId = OutfitNumber(OutfitCall(current, "get_Costume"), "get_MstCostumeId");
+			const auto sets = OutfitList(CenterCutSceneTableRows(TryMasterData(), "CostumeSets"));
+			std::vector<std::pair<int, int>> candidates;
+			for (int i = 0; i < sets.count; ++i) {
+				void* set = il2cpp_symbols::array_get_value(sets.data, i);
+				if (!OriginalOutfitForSong(set, song)) continue;
+				void* costume = RunwayDump::ReadPtr(set, "<Costume>k__BackingField");
+				if (!costume || RunwayDump::ReadInt(costume, "<MstCharacterInfoId>k__BackingField") != actor) continue;
+				if (RunwayDump::ReadInt(set, "<MstCostumeId>k__BackingField") == currentId) return;
+				candidates.emplace_back(RunwayDump::ReadInt(set, "<SortId>k__BackingField"),
+					RunwayDump::ReadInt(set, "<Id>k__BackingField"));
+			}
+			std::sort(candidates.begin(), candidates.end());
+			for (const auto& candidate : candidates) {
+				int id = candidate.second;
+				void* outfit = OutfitCall(service, "GetCostumeSetData", {reinterpret_cast<Il2CppObject*>(&id)});
+				void* costume = OutfitCall(outfit, "get_Costume");
+				if (OutfitNumber(costume, "get_MstCharacterInfoId") != actor) continue;
+				const int targetId = OutfitNumber(costume, "get_MstCostumeId");
+				if (targetId <= 0 || !OutfitCall(outfit, "get_Hairstyle")) continue;
+				OutfitCall(current, "CopyFrom", {static_cast<Il2CppObject*>(outfit)});
+				if (OutfitNumber(OutfitCall(current, "get_Costume"), "get_MstCostumeId") != targetId) continue;
+				Log(std::format("[original-mv-outfit] song={} actor={} costume={} set={}", song, actor, targetId, id));
+				return;
+			}
+		}
+
+		HOOK_ORIG_TYPE LiveUnitEasyCostumeChanger_changeIdolCostume_orig;
+		void LiveUnitEasyCostumeChanger_changeIdolCostume_hook(void* self, void* idol, void* matcher, void* filter, void* method) {
+			HOOK_CAST_CALL(void, LiveUnitEasyCostumeChanger_changeIdolCostume)(self, idol, matcher, filter, method);
+			if (self != g_originalOutfitChanger || !self || !idol) return;
+			try { ApplyMissingOriginalOutfit(self, idol); } catch (...) { Log("[original-mv-outfit] fallback failed"); }
+		}
+
+		bool HasLiveCutSceneCostume(int sceneId, int costumeId) {
+			const auto rows = OutfitList(CenterCutSceneTableRows(TryMasterData(), "LiveCutSceneCostumes"));
+			for (int i = 0; i < rows.count; ++i) {
+				void* row = il2cpp_symbols::array_get_value(rows.data, i);
+				if (row && RunwayDump::ReadInt(row, "<MstLiveCutSceneId>k__BackingField") == sceneId &&
+					RunwayDump::ReadInt(row, "<MstCostumeId>k__BackingField") == costumeId) return true;
+			}
+			return false;
+		}
+
+		bool NightParadiseHasSwitchableHair(void* idol) {
+			const int actor = RunwayDump::ReadInt(idol, "charaId");
+			const int hairId = RunwayDump::ReadInt(idol, "hairId");
+			if (actor <= 0 || hairId <= 0) return false;
+			void* master = TryMasterData();
+			const auto rows = OutfitList(CenterCutSceneTableRows(master, "LiveCutSceneCostumes"));
+			std::unordered_set<int> originalCostumes;
+			for (int i = 0; i < rows.count; ++i) {
+				void* row = il2cpp_symbols::array_get_value(rows.data, i);
+				if (row && RunwayDump::ReadInt(row, "<MstLiveCutSceneId>k__BackingField") == 10)
+					originalCostumes.insert(RunwayDump::ReadInt(row, "<MstCostumeId>k__BackingField"));
+			}
+			const auto sets = OutfitList(CenterCutSceneTableRows(master, "CostumeSets"));
+			for (int i = 0; i < sets.count; ++i) {
+				void* set = il2cpp_symbols::array_get_value(sets.data, i);
+				if (!set || !originalCostumes.contains(RunwayDump::ReadInt(set, "<MstCostumeId>k__BackingField"))) continue;
+				void* hair = RunwayDump::ReadPtr(set, "<Hairstyle>k__BackingField");
+				if (hair && RunwayDump::ReadInt(hair, "<MstCharacterInfoId>k__BackingField") == actor &&
+					RunwayDump::ReadInt(hair, "<HairResourceIdForClient>k__BackingField") == hairId) return true;
+			}
+			return false;
+		}
+
+		struct CostumeSwitch {
+			const char* name;
+			int removed;
+		};
+
+		constexpr CostumeSwitch kSwimsuitSwitches[] = {
+			{"Swimsuit", 2},
+			{"NightP_RashGuard", 1},
+			{"Utakat_Paleo", 1},
+		};
+
+		const CostumeSwitch* RemovableSwimsuitSwitch(std::string_view name) {
+			for (const auto& entry : kSwimsuitSwitches)
+				if (entry.name == name) return &entry;
+			return nullptr;
+		}
+
+		struct SwimsuitSwitchRequest {
+			int state = 0;
+			void* id = nullptr;
+		};
+
+		SwimsuitSwitchRequest ResolveSwimsuitSwitch(void* character, int state, void* id) {
+			if (!character || !id) return {};
+			const auto* cue = RemovableSwimsuitSwitch(Il2CppStrOf(id));
+			if (!cue || (state != 0 && state != cue->removed)) return {};
+			const auto models = OutfitList(RunwayDump::ReadPtr(character, "switchModels"));
+			SwimsuitSwitchRequest alternate;
+			for (int i = 0; i < models.count; ++i) {
+				void* model = il2cpp_symbols::array_get_value(models.data, i);
+				void* modelId = model ? RunwayDump::ReadPtr(model, "switchID") : nullptr;
+				const auto* sw = modelId ? RemovableSwimsuitSwitch(Il2CppStrOf(modelId)) : nullptr;
+				if (!sw || OutfitList(RunwayDump::ReadPtr(model, "switchUnitData")).count <= sw->removed) continue;
+				if (sw == cue) return {}; // Compatible with the original cue.
+				if (!alternate.id) alternate = {state == 0 ? 0 : sw->removed, modelId};
+			}
+			return alternate;
+		}
+
+		HOOK_ORIG_TYPE RunwayUnitIdol_HasCutScene_orig;
+		bool RunwayUnitIdol_HasCutScene_hook(void* self, void* scene, bool withMotionCondition, void* method) {
+			if (HOOK_CAST_CALL(bool, RunwayUnitIdol_HasCutScene)(self, scene, withMotionCondition, method)) return true;
+			try {
+				if (!self || !scene ||
+					RunwayDump::ReadInt(scene, "<Id>k__BackingField") != 3 ||
+					Il2CppStrOf(RunwayDump::ReadPtr(scene, "<SceneName>k__BackingField")) != "900_DressO_Summer") return false;
+				if (withMotionCondition) {
+					void* walking = RunwayDump::ReadPtr(self, "<Walking>k__BackingField");
+					void* pose = RunwayDump::ReadPtr(self, "<Pose>k__BackingField");
+					if ((!walking || RunwayDump::ReadInt(walking, "<Id>k__BackingField") != 7) &&
+						(!pose || RunwayDump::ReadInt(pose, "<Id>k__BackingField") != 7)) return false;
+				}
+				void* outfit = RunwayDump::ReadPtr(self, "<CostumeSet>k__BackingField");
+				const int costume = OutfitNumber(OutfitCall(outfit, "get_Costume"), "get_MstCostumeId");
+				return costume > 0 && HasLiveCutSceneCostume(35, costume);
+			} catch (...) { return false; }
+		}
+
 		constexpr const char* kCenterCutSceneCostumeList = "center-cutscene-costumes.txt";
 		bool g_centerCostumePredicateInstalled = false;
 		bool g_nightParadiseAlternateFilterInstalled = false;
@@ -7384,16 +7606,12 @@ namespace
 			return costumeIds;
 		}
 
-		RegisteredCenter CenterCutSceneEligibleIdol(void* selection, int song) {
-			void* idols = RunwayDump::ReadPtr(selection, "idols");
-			const char* type = idols ? RunwayDump::ClassNameOf(idols) : nullptr;
-			if (!type) return {};
-			if (strcmp(type, "List`1") == 0) {
-				if (RunwayDump::ReadInt(idols, "_size") <= 0) return {};
-				idols = RunwayDump::ReadPtr(idols, "_items");
-			} else if (strcmp(type, "UnitIdol[]") != 0) return {};
-			if (!idols || RunwayDump::ArrayLength(idols) <= 0) return {};
-			void* center = il2cpp_symbols::array_get_value(idols, 0);
+		void* SelectedCenter(void* selection) {
+			const auto idols = OutfitList(RunwayDump::ReadPtr(selection, "idols"));
+			return idols.count > 0 ? il2cpp_symbols::array_get_value(idols.data, 0) : nullptr;
+		}
+
+		RegisteredCenter CenterCutSceneEligibleIdol(void* center, int song, bool anyCostume) {
 			if (!center) return {};
 			const int actor = RunwayDump::ReadInt(center, "charaId");
 			void* costume = RunwayDump::ReadPtr(center, "<MstCostume>k__BackingField");
@@ -7401,14 +7619,15 @@ namespace
 			if (actor < 1 || actor > 28 || !costume) return {};
 			const int id = RunwayDump::ReadInt(costume, "<Id>k__BackingField");
 			const bool originalCoat = song == 167 && NightParadiseOriginalCoats().contains(id);
-			if (!originalCoat && !CenterCutSceneCostumeRegistered(costume)) return {};
+			if (!anyCostume && !originalCoat && !CenterCutSceneCostumeRegistered(costume)) return {};
 			return { actor, id, originalCoat };
 		}
 
-		bool CenterCutSceneAllowsCostumeList(int song, void* scene) {
+		bool CenterCutSceneAllowsCostumeList(int song, void* scene, bool anyCostume) {
 			if (!scene || RunwayDump::ReadInt(scene, "<MstSongId>k__BackingField") != song ||
 				RunwayDump::ReadInt(scene, "<ConditionType>k__BackingField") != 1) return false;
 			const auto name = Il2CppStrOf(RunwayDump::ReadPtr(scene, "<CutSceneName>k__BackingField"));
+			if (name.empty()) return false;
 			switch (song) {
 			case 118: case 148: return name == "Middle_UCS_01";
 			case 167:
@@ -7417,29 +7636,40 @@ namespace
 					(name == "Middle_UCS_03_1" || name == "Middle_UCS_03_2" ||
 					 name == "Middle_UCS_03_3" || name == "Middle_UCS_04_1"));
 			case 210: return name == "Middle_UCS_03";
-			default: return false;
+			default: return anyCostume;
 			}
 		}
 
 		HOOK_ORIG_TYPE LiveCutSceneSelector_GetCenterCharacterIdIfMatched_orig;
 		uint64_t LiveCutSceneSelector_GetCenterCharacterIdIfMatched_hook(void* self, void* method) {
 			const auto original = HOOK_CAST_CALL(uint64_t, LiveCutSceneSelector_GetCenterCharacterIdIfMatched)(self, method);
-			if ((original & 0xff) || !self) return original;
+			if (!self) return original;
 			try {
 				void* branch = RunwayDump::ReadPtr(self, "CS$<>8__locals2");
 				void* selection = branch ? RunwayDump::ReadPtr(branch, "CS$<>8__locals1") : nullptr;
 				if (!selection || !LipReadBool(selection, "isMv")) return original;
 				const int song = RunwayDump::ReadInt(selection, "songId");
 				void* scene = RunwayDump::ReadPtr(branch, "cutScene");
-				if (!CenterCutSceneSong(song) || !CenterCutSceneAllowsCostumeList(song, scene)) return original;
-				const auto center = CenterCutSceneEligibleIdol(selection, song);
-				if (!center.actor) return original;
+				if (!scene) return original;
 				const int sceneId = RunwayDump::ReadInt(scene, "<Id>k__BackingField");
+				void* idol = SelectedCenter(selection);
+				const int actor = idol ? RunwayDump::ReadInt(idol, "charaId") : 0;
+				if (actor > 28) return 0;
+				if (actor <= 0) return original;
+
+				if (song == 167 && sceneId == 10)
+					return NightParadiseHasSwitchableHair(idol) ? (uint64_t(static_cast<uint32_t>(actor)) << 32) | 1 : 0;
+
+				const bool anyCostume = MvCenterCloseupsAnyCostume();
+				if (!CenterCutSceneAllowsCostumeList(song, scene, anyCostume)) return original;
+				const auto center = CenterCutSceneEligibleIdol(idol, song, anyCostume || (original & 0xff));
+				if (!center.actor) return original;
 				if (song == 167 && sceneId == 14 && g_lastMvSongId == 167) {
 					g_nightParadiseHideCoatProp = !NightParadiseOriginalCoats().empty() && !center.nativeNightParadiseCoat;
 					Log(std::format("[night-paradise-coat] actor={} costume={} originalCoat={} hide={}",
 						center.actor, center.costumeId, center.nativeNightParadiseCoat ? 1 : 0, g_nightParadiseHideCoatProp ? 1 : 0));
 				}
+				if (original & 0xff) return original;
 				Log(std::format("[center-cutscene] song={} scene={} actor={} costume={}", song,
 					sceneId, center.actor, center.costumeId));
 				// The IL2CPP x64 Nullable<int> holds hasValue at byte 0 and value at byte 4.
@@ -7452,17 +7682,15 @@ namespace
 			const bool original = HOOK_CAST_CALL(bool, LiveCutSceneSelector_IsBranchCandidate)(selection, scene, method);
 			if (!original || !g_centerCostumePredicateInstalled || !selection || !scene) return original;
 			try {
-				if (RunwayDump::ReadInt(selection, "songId") != 167 || !LipReadBool(selection, "isMv") ||
-					RunwayDump::ReadInt(scene, "<MstSongId>k__BackingField") != 167 ||
-					RunwayDump::ReadInt(scene, "<ConditionType>k__BackingField") != 3 ||
-					Il2CppStrOf(RunwayDump::ReadPtr(scene, "<CutSceneName>k__BackingField")) != "Middle_UCS_04_2") return original;
-				const auto center = CenterCutSceneEligibleIdol(selection, 167);
-				if (center.actor) {
-					// UCS_04_B overlaps the earlier centre close-up (UCS_04_A).
-					Log(std::format("[center-cutscene] song=167 selected UCS_04_A over UCS_04_B for actor={} costume={}",
-						center.actor, center.costumeId));
-					return false;
-				}
+				const int song = RunwayDump::ReadInt(selection, "songId");
+				if (!LipReadBool(selection, "isMv") ||
+					RunwayDump::ReadInt(scene, "<MstSongId>k__BackingField") != song ||
+					RunwayDump::ReadInt(scene, "<ConditionType>k__BackingField") != 3) return original;
+				const int id = RunwayDump::ReadInt(scene, "<Id>k__BackingField");
+				const bool anyCostume = MvCenterCloseupsAnyCostume();
+				// The alternate shots in these two songs overlap the center shots.
+				if ((song == 167 && id == 15) || (song == 181 && id == 22 && anyCostume))
+					return !CenterCutSceneEligibleIdol(SelectedCenter(selection), song, anyCostume).actor;
 			} catch (...) {}
 			return original;
 		}
@@ -7644,6 +7872,11 @@ namespace
 		HOOK_ORIG_TYPE Character_SetSwitchModel_orig;
 		int Character_SetSwitchModel_hook(void* self, int index, void* switchId, void* method) {
 			int ret = HOOK_CAST_CALL(int, Character_SetSwitchModel)(self, index, switchId, method);
+			try {
+				const auto alternate = ResolveSwimsuitSwitch(self, index, switchId);
+				if (alternate.id)
+					return HOOK_CAST_CALL(int, Character_SetSwitchModel)(self, alternate.state, alternate.id, method);
+			} catch (...) {}
 			try {
 				if (g_lastMvSongId == 118 && self && g_swDiagLines < 350) {
 					std::string id = Il2CppStrOf(switchId);
@@ -8676,7 +8909,27 @@ namespace
 			else LiveAck("unknown command: " + verb);
 		}
 
+		void InstallOutfitHooks() {
+			auto hook = [](const char* name, const char* ns, const char* klass, const char* method,
+				int count, void* detour, HOOK_ORIG_TYPE& original) {
+				void* address = ViewDiag::find_method_anywhere(ns, klass, method, count);
+				if (address && HookAt(name, address, detour, original))
+					Log(std::format("[mv-outfits] {} installed", name));
+			};
+			constexpr const char* ns = "PRISM.Service.Live";
+			constexpr const char* changer = "LiveUnitEasyCostumeChanger";
+			hook("LiveUnitEasyCostumeChanger.MvOriginalCostumeExists", ns, changer, "MvOriginalCostumeExists", 0,
+				(void*)LiveUnitEasyCostumeChanger_MvOriginalCostumeExists_hook, LiveUnitEasyCostumeChanger_MvOriginalCostumeExists_orig);
+			hook("LiveUnitEasyCostumeChanger.ChangeLiveIdolCostume", ns, changer, "ChangeLiveIdolCostume", 3,
+				(void*)LiveUnitEasyCostumeChanger_ChangeLiveIdolCostume_hook, LiveUnitEasyCostumeChanger_ChangeLiveIdolCostume_orig);
+			hook("LiveUnitEasyCostumeChanger._changeIdolCostume", ns, changer, "_changeIdolCostume", 3,
+				(void*)LiveUnitEasyCostumeChanger_changeIdolCostume_hook, LiveUnitEasyCostumeChanger_changeIdolCostume_orig);
+			hook("RunwayUnitIdol.HasCutScene", "PRISM.Adapters", "RunwayUnitIdol", "HasCutScene", 2,
+				(void*)RunwayUnitIdol_HasCutScene_hook, RunwayUnitIdol_HasCutScene_orig);
+		}
+
 		void Install() {
+			InstallOutfitHooks();
 			const char* e1 = getenv("SCSP_SOLO_UNLOCK");
 			if (e1 && *e1 == '0') {
 				g_enabled = false;
