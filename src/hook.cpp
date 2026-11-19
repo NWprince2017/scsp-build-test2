@@ -7333,7 +7333,7 @@ namespace
 			if (song <= 0 || actor <= 0 || !current || !service) return;
 			const int currentId = OutfitNumber(OutfitCall(current, "get_Costume"), "get_MstCostumeId");
 			const auto sets = OutfitList(CenterCutSceneTableRows(TryMasterData(), "CostumeSets"));
-			std::vector<std::pair<int, int>> candidates;
+			std::vector<std::tuple<int, int, int>> candidates;
 			int highestPriority = 0;
 			int currentPriority = 0;
 			for (int i = 0; i < sets.count; ++i) {
@@ -7342,7 +7342,8 @@ namespace
 				if (!priority) continue;
 				void* costume = RunwayDump::ReadPtr(set, "<Costume>k__BackingField");
 				if (!costume || RunwayDump::ReadInt(costume, "<MstCharacterInfoId>k__BackingField") != actor) continue;
-				if (RunwayDump::ReadInt(set, "<MstCostumeId>k__BackingField") == currentId)
+				const int costumeId = RunwayDump::ReadInt(set, "<MstCostumeId>k__BackingField");
+				if (costumeId == currentId)
 					currentPriority = std::max(currentPriority, priority);
 				if (priority < highestPriority) continue;
 				if (priority > highestPriority) {
@@ -7350,19 +7351,19 @@ namespace
 					highestPriority = priority;
 				}
 				candidates.emplace_back(RunwayDump::ReadInt(set, "<SortId>k__BackingField"),
-					RunwayDump::ReadInt(set, "<Id>k__BackingField"));
+					RunwayDump::ReadInt(set, "<Id>k__BackingField"), costumeId);
 			}
 			if (currentPriority >= highestPriority) return;
 			const auto* getSet = GetOutfitSetByIdMethod(service);
 			if (!getSet) return;
 			std::sort(candidates.begin(), candidates.end());
-			for (const auto& candidate : candidates) {
-				int id = candidate.second;
+			for (const auto& [sortId, setId, expectedCostume] : candidates) {
+				int id = setId;
 				void* outfit = getSet->Invoke<Il2CppObject*>((Il2CppObject*)service, {reinterpret_cast<Il2CppObject*>(&id)});
 				void* costume = OutfitCall(outfit, "get_Costume");
 				if (OutfitNumber(costume, "get_MstCharacterInfoId") != actor) continue;
 				const int targetId = OutfitNumber(costume, "get_MstCostumeId");
-				if (targetId <= 0 || !OutfitCall(outfit, "get_Hairstyle")) continue;
+				if (targetId != expectedCostume || targetId <= 0 || !OutfitCall(outfit, "get_Hairstyle")) continue;
 				OutfitCall(current, "CopyFrom", {static_cast<Il2CppObject*>(outfit)});
 				if (OutfitNumber(OutfitCall(current, "get_Costume"), "get_MstCostumeId") != targetId) continue;
 				Log(std::format("[original-mv-outfit] song={} actor={} costume={} set={}", song, actor, targetId, id));
@@ -7687,7 +7688,8 @@ namespace
 			switch (scene) {
 			case 18: return actor == 10 || actor == 15 || actor == 24 || actor == 27;
 			case 20: return actor == 8 || actor == 20;
-			case 23: return actor >= 1 && actor <= 4;
+			// The four Borderless Nonstress files are numbered by unit position.
+			case 23: return actor == 3 || actor == 4 || actor == 9 || actor == 23;
 			case 27: return actor == 1 || actor == 28;
 			case 28: return actor == 2 || actor == 6 || actor == 13 || actor == 16 || actor == 19;
 			case 38: return actor >= 14 && actor <= 16;
