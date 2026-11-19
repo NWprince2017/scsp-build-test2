@@ -7328,7 +7328,7 @@ namespace
 				void* old = RunwayDump::ReadPtr(set, "<MstSongIdList>k__BackingField");
 				if (OutfitIntListContains(old, song)) continue;
 				auto* field = FieldOf(KlassOf(set), "<MstSongIdList>k__BackingField");
-				const char* typeName = field ? il2cpp_type_get_name(il2cpp_field_get_type(field)) : nullptr;
+				const char* typeName = field && field->type ? il2cpp_type_get_name(field->type) : nullptr;
 				if (!typeName || (!strstr(typeName, "IReadOnlyList") && !strstr(typeName, "Int32[]"))) continue;
 				const auto ids = OutfitList(old);
 				const char* oldType = ids.data ? RunwayDump::ClassNameOf(ids.data) : nullptr;
