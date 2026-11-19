@@ -7246,6 +7246,19 @@ namespace
 			return value ? value->unbox_value<int>() : 0;
 		}
 
+		const MethodInfo* GetOutfitSetByIdMethod(void* service) {
+			for (void* klass = KlassOf(service); klass; klass = il2cpp_class_get_parent(klass)) {
+				void* iterator = nullptr;
+				while (const auto* method = il2cpp_class_get_methods(klass, &iterator)) {
+					if (!method->methodPointer || method->parameters_count != 1 ||
+						strcmp(method->name, "GetCostumeSetData") != 0) continue;
+					const char* type = il2cpp_symbols::il2cpp_method_get_param_type_name(method, 0);
+					if (type && (strcmp(type, "Int32") == 0 || strcmp(type, "System.Int32") == 0)) return method;
+				}
+			}
+			return nullptr;
+		}
+
 		struct OutfitArray {
 			void* data = nullptr;
 			int count = 0;
@@ -7275,8 +7288,14 @@ namespace
 			return false;
 		}
 
-		bool OriginalOutfitForSong(void* set, int song) {
-			return set && song > 0 && OutfitIntListContains(RunwayDump::ReadPtr(set, "<MstSongIdList>k__BackingField"), song);
+		const std::unordered_set<int>& NightParadiseOriginalCoats();
+
+		int OriginalOutfitPriority(void* set, int song) {
+			if (!set || song <= 0) return 0;
+			const int costume = RunwayDump::ReadInt(set, "<MstCostumeId>k__BackingField");
+			if (song == 167 && costume >= 200000 && costume < 300000 &&
+				NightParadiseOriginalCoats().contains(costume)) return 2;
+			return OutfitIntListContains(RunwayDump::ReadPtr(set, "<MstSongIdList>k__BackingField"), song) ? 1 : 0;
 		}
 
 		thread_local void* g_originalOutfitChanger = nullptr;
@@ -7288,7 +7307,7 @@ namespace
 				const int song = RunwayDump::ReadInt(self, "mstSongId");
 				const auto sets = OutfitList(CenterCutSceneTableRows(TryMasterData(), "CostumeSets"));
 				for (int i = 0; i < sets.count; ++i)
-					if (OriginalOutfitForSong(il2cpp_symbols::array_get_value(sets.data, i), song)) return true;
+					if (OriginalOutfitPriority(il2cpp_symbols::array_get_value(sets.data, i), song)) return true;
 			} catch (...) {}
 			return false;
 		}
@@ -7315,19 +7334,31 @@ namespace
 			const int currentId = OutfitNumber(OutfitCall(current, "get_Costume"), "get_MstCostumeId");
 			const auto sets = OutfitList(CenterCutSceneTableRows(TryMasterData(), "CostumeSets"));
 			std::vector<std::pair<int, int>> candidates;
+			int highestPriority = 0;
+			int currentPriority = 0;
 			for (int i = 0; i < sets.count; ++i) {
 				void* set = il2cpp_symbols::array_get_value(sets.data, i);
-				if (!OriginalOutfitForSong(set, song)) continue;
+				const int priority = OriginalOutfitPriority(set, song);
+				if (!priority) continue;
 				void* costume = RunwayDump::ReadPtr(set, "<Costume>k__BackingField");
 				if (!costume || RunwayDump::ReadInt(costume, "<MstCharacterInfoId>k__BackingField") != actor) continue;
-				if (RunwayDump::ReadInt(set, "<MstCostumeId>k__BackingField") == currentId) return;
+				if (RunwayDump::ReadInt(set, "<MstCostumeId>k__BackingField") == currentId)
+					currentPriority = std::max(currentPriority, priority);
+				if (priority < highestPriority) continue;
+				if (priority > highestPriority) {
+					candidates.clear();
+					highestPriority = priority;
+				}
 				candidates.emplace_back(RunwayDump::ReadInt(set, "<SortId>k__BackingField"),
 					RunwayDump::ReadInt(set, "<Id>k__BackingField"));
 			}
+			if (currentPriority >= highestPriority) return;
+			const auto* getSet = GetOutfitSetByIdMethod(service);
+			if (!getSet) return;
 			std::sort(candidates.begin(), candidates.end());
 			for (const auto& candidate : candidates) {
 				int id = candidate.second;
-				void* outfit = OutfitCall(service, "GetCostumeSetData", {reinterpret_cast<Il2CppObject*>(&id)});
+				void* outfit = getSet->Invoke<Il2CppObject*>((Il2CppObject*)service, {reinterpret_cast<Il2CppObject*>(&id)});
 				void* costume = OutfitCall(outfit, "get_Costume");
 				if (OutfitNumber(costume, "get_MstCharacterInfoId") != actor) continue;
 				const int targetId = OutfitNumber(costume, "get_MstCostumeId");
@@ -7390,6 +7421,15 @@ namespace
 			{"Utakat_Paleo", 1},
 		};
 
+		// Resource IDs from the swimsuit prefabs with actual SwitchModel removal states.
+		bool CompatibleRunwaySwimsuit(int resourceId) {
+			if ((resourceId >= 343 && resourceId <= 370) ||
+				(resourceId >= 979 && resourceId <= 999) ||
+				(resourceId >= 2000 && resourceId <= 2006)) return true;
+			constexpr int otherRashguards[] = {2083, 2085, 2087, 2089, 2091, 2093, 2095, 2097, 2099, 2101};
+			return std::find(std::begin(otherRashguards), std::end(otherRashguards), resourceId) != std::end(otherRashguards);
+		}
+
 		const CostumeSwitch* RemovableSwimsuitSwitch(std::string_view name) {
 			for (const auto& entry : kSwimsuitSwitches)
 				if (entry.name == name) return &entry;
@@ -7432,8 +7472,10 @@ namespace
 						(!pose || RunwayDump::ReadInt(pose, "<Id>k__BackingField") != 7)) return false;
 				}
 				void* outfit = RunwayDump::ReadPtr(self, "<CostumeSet>k__BackingField");
-				const int costume = OutfitNumber(OutfitCall(outfit, "get_Costume"), "get_MstCostumeId");
-				return costume > 0 && HasLiveCutSceneCostume(35, costume);
+				void* costume = OutfitCall(outfit, "get_Costume");
+				const int id = OutfitNumber(costume, "get_MstCostumeId");
+				const int resource = OutfitNumber(costume, "get_ResourceId");
+				return (id > 0 && HasLiveCutSceneCostume(35, id)) || CompatibleRunwaySwimsuit(resource);
 			} catch (...) { return false; }
 		}
 
@@ -7640,6 +7682,20 @@ namespace
 			}
 		}
 
+		bool CenterCutSceneHasActorAsset(int scene, int actor) {
+			// The character-suffixed prefabs use their own face, motion and voice data.
+			switch (scene) {
+			case 18: return actor == 10 || actor == 15 || actor == 24 || actor == 27;
+			case 20: return actor == 8 || actor == 20;
+			case 23: return actor >= 1 && actor <= 4;
+			case 27: return actor == 1 || actor == 28;
+			case 28: return actor == 2 || actor == 6 || actor == 13 || actor == 16 || actor == 19;
+			case 38: return actor >= 14 && actor <= 16;
+			case 39: return actor >= 1 && actor <= 3;
+			default: return true;
+			}
+		}
+
 		HOOK_ORIG_TYPE LiveCutSceneSelector_GetCenterCharacterIdIfMatched_orig;
 		uint64_t LiveCutSceneSelector_GetCenterCharacterIdIfMatched_hook(void* self, void* method) {
 			const auto original = HOOK_CAST_CALL(uint64_t, LiveCutSceneSelector_GetCenterCharacterIdIfMatched)(self, method);
@@ -7662,6 +7718,7 @@ namespace
 
 				const bool anyCostume = MvCenterCloseupsAnyCostume();
 				if (!CenterCutSceneAllowsCostumeList(song, scene, anyCostume)) return original;
+				if (!CenterCutSceneHasActorAsset(sceneId, actor)) return original;
 				const auto center = CenterCutSceneEligibleIdol(idol, song, anyCostume || (original & 0xff));
 				if (!center.actor) return original;
 				if (song == 167 && sceneId == 14 && g_lastMvSongId == 167) {
@@ -7689,8 +7746,11 @@ namespace
 				const int id = RunwayDump::ReadInt(scene, "<Id>k__BackingField");
 				const bool anyCostume = MvCenterCloseupsAnyCostume();
 				// The alternate shots in these two songs overlap the center shots.
-				if ((song == 167 && id == 15) || (song == 181 && id == 22 && anyCostume))
-					return !CenterCutSceneEligibleIdol(SelectedCenter(selection), song, anyCostume).actor;
+				if ((song == 167 && id == 15) || (song == 181 && id == 22 && anyCostume)) {
+					const auto center = CenterCutSceneEligibleIdol(SelectedCenter(selection), song, anyCostume);
+					if (center.actor && (song == 167 || CenterCutSceneHasActorAsset(23, center.actor)))
+						return false;
+				}
 			} catch (...) {}
 			return original;
 		}
