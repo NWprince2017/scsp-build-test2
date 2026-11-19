@@ -7238,6 +7238,15 @@ namespace
 				if (method && method->methodPointer)
 					return method->Invoke<Il2CppObject*>((Il2CppObject*)instance, args);
 			}
+			const std::string qualifiedSuffix = std::string(".") + name;
+			for (klass = instance ? KlassOf(instance) : nullptr; klass; klass = il2cpp_class_get_parent(klass)) {
+				void* next = nullptr;
+				while (const auto* method = il2cpp_class_get_methods(klass, &next)) {
+					if (method->methodPointer && method->parameters_count == args.size() &&
+						std::string_view(method->name).ends_with(qualifiedSuffix))
+						return method->Invoke<Il2CppObject*>((Il2CppObject*)instance, args);
+				}
+			}
 			return nullptr;
 		}
 
@@ -7250,8 +7259,9 @@ namespace
 			for (void* klass = KlassOf(service); klass; klass = il2cpp_class_get_parent(klass)) {
 				void* iterator = nullptr;
 				while (const auto* method = il2cpp_class_get_methods(klass, &iterator)) {
-					if (!method->methodPointer || method->parameters_count != 1 ||
-						strcmp(method->name, "GetCostumeSetData") != 0) continue;
+					if (!method->methodPointer || method->parameters_count != 1) continue;
+					const std::string_view name(method->name);
+					if (name != "GetCostumeSetData" && !name.ends_with(".GetCostumeSetData")) continue;
 					const char* type = il2cpp_symbols::il2cpp_method_get_param_type_name(method, 0);
 					if (type && (strcmp(type, "Int32") == 0 || strcmp(type, "System.Int32") == 0)) return method;
 				}
@@ -7298,10 +7308,47 @@ namespace
 			return OutfitIntListContains(RunwayDump::ReadPtr(set, "<MstSongIdList>k__BackingField"), song) ? 1 : 0;
 		}
 
-		thread_local void* g_originalOutfitChanger = nullptr;
+		void BindNightParadiseOriginalOutfits(void* changer) {
+			constexpr int song = 167;
+			if (RunwayDump::ReadInt(changer, "mstSongId") != song) return;
+			const auto sets = OutfitList(CenterCutSceneTableRows(TryMasterData(), "CostumeSets"));
+			static void* boundSets = nullptr;
+			if (!sets.data || sets.data == boundSets) return;
+			const auto& nativeCoats = NightParadiseOriginalCoats();
+			if (nativeCoats.empty()) return;
+			auto* intClass = il2cpp_class_from_name(il2cpp_get_corlib(), "System", "Int32");
+			if (!intClass) return;
+			int linked = 0;
+			for (int i = 0; i < sets.count; ++i) {
+				void* set = il2cpp_symbols::array_get_value(sets.data, i);
+				if (!set) continue;
+				const int costume = RunwayDump::ReadInt(set, "<MstCostumeId>k__BackingField");
+				if (costume < 200000 || costume >= 300000 || !nativeCoats.contains(costume) ||
+					RunwayDump::ReadInt(set, "<Id>k__BackingField") != costume) continue;
+				void* old = RunwayDump::ReadPtr(set, "<MstSongIdList>k__BackingField");
+				if (OutfitIntListContains(old, song)) continue;
+				auto* field = FieldOf(KlassOf(set), "<MstSongIdList>k__BackingField");
+				const char* typeName = field ? il2cpp_type_get_name(il2cpp_field_get_type(field)) : nullptr;
+				if (!typeName || (!strstr(typeName, "IReadOnlyList") && !strstr(typeName, "Int32[]"))) continue;
+				const auto ids = OutfitList(old);
+				const char* oldType = ids.data ? RunwayDump::ClassNameOf(ids.data) : nullptr;
+				if (old && (!oldType || strcmp(oldType, "Int32[]") != 0)) continue;
+				auto* songs = il2cpp_array_new(intClass, ids.count + 1);
+				if (!songs) continue;
+				for (int j = 0; j < ids.count; ++j)
+					*reinterpret_cast<int*>(il2cpp_array_addr_with_size(songs, sizeof(int), j)) =
+						*reinterpret_cast<const int*>(il2cpp_array_addr_with_size(ids.data, sizeof(int), j));
+				*reinterpret_cast<int*>(il2cpp_array_addr_with_size(songs, sizeof(int), ids.count)) = song;
+				il2cpp_field_set_value_object(set, field, songs);
+				++linked;
+			}
+			boundSets = sets.data;
+			Log(std::format("[original-mv-outfit] song={} registered {} native outfit sets", song, linked));
+		}
 
 		HOOK_ORIG_TYPE LiveUnitEasyCostumeChanger_MvOriginalCostumeExists_orig;
 		bool LiveUnitEasyCostumeChanger_MvOriginalCostumeExists_hook(void* self, void* method) {
+			try { BindNightParadiseOriginalOutfits(self); } catch (...) {}
 			if (HOOK_CAST_CALL(bool, LiveUnitEasyCostumeChanger_MvOriginalCostumeExists)(self, method)) return true;
 			try {
 				const int song = RunwayDump::ReadInt(self, "mstSongId");
@@ -7310,19 +7357,6 @@ namespace
 					if (OriginalOutfitPriority(il2cpp_symbols::array_get_value(sets.data, i), song)) return true;
 			} catch (...) {}
 			return false;
-		}
-
-		HOOK_ORIG_TYPE LiveUnitEasyCostumeChanger_ChangeLiveIdolCostume_orig;
-		void LiveUnitEasyCostumeChanger_ChangeLiveIdolCostume_hook(void* self, int choice, void* idols,
-			bool allDressOrdered, void* method) {
-			// LiveUnitRecommendCostume.MvOriginal.
-			constexpr int mvOriginal = 1;
-			struct Restore {
-				void* previous = g_originalOutfitChanger;
-				~Restore() { g_originalOutfitChanger = previous; }
-			} restore;
-			g_originalOutfitChanger = choice == mvOriginal ? self : nullptr;
-			HOOK_CAST_CALL(void, LiveUnitEasyCostumeChanger_ChangeLiveIdolCostume)(self, choice, idols, allDressOrdered, method);
 		}
 
 		void ApplyMissingOriginalOutfit(void* changer, void* idol) {
@@ -7371,11 +7405,33 @@ namespace
 			}
 		}
 
-		HOOK_ORIG_TYPE LiveUnitEasyCostumeChanger_changeIdolCostume_orig;
-		void LiveUnitEasyCostumeChanger_changeIdolCostume_hook(void* self, void* idol, void* matcher, void* filter, void* method) {
-			HOOK_CAST_CALL(void, LiveUnitEasyCostumeChanger_changeIdolCostume)(self, idol, matcher, filter, method);
-			if (self != g_originalOutfitChanger || !self || !idol) return;
-			try { ApplyMissingOriginalOutfit(self, idol); } catch (...) { Log("[original-mv-outfit] fallback failed"); }
+		HOOK_ORIG_TYPE LiveUnitEasyCostumeChanger_ChangeLiveIdolCostume_orig;
+		void LiveUnitEasyCostumeChanger_ChangeLiveIdolCostume_hook(void* self, int choice, void* idols,
+			bool allDressOrdered, void* method) {
+			constexpr int mvOriginal = 1;
+			if (choice == mvOriginal) {
+				try { BindNightParadiseOriginalOutfits(self); } catch (...) {}
+			}
+			HOOK_CAST_CALL(void, LiveUnitEasyCostumeChanger_ChangeLiveIdolCostume)(self, choice, idols, allDressOrdered, method);
+			if (choice != mvOriginal || !self || !idols) return;
+			try {
+				const auto list = OutfitList(idols);
+				Log(std::format("[original-mv-outfit] apply song={} lineup={}",
+					RunwayDump::ReadInt(self, "mstSongId"), RunwayDump::ClassNameOf(idols)));
+				if (list.data) {
+					for (int i = 0; i < list.count; ++i)
+						ApplyMissingOriginalOutfit(self, il2cpp_symbols::array_get_value(list.data, i));
+					return;
+				}
+				// The recommend popup can supply a LINQ projection of the edited lineup.
+				void* iterator = OutfitCall(idols, "GetEnumerator");
+				for (int i = 0; iterator && i < 16; ++i) {
+					auto* next = OutfitCall(iterator, "MoveNext");
+					if (!next || !next->unbox_value<bool>()) break;
+					ApplyMissingOriginalOutfit(self, OutfitCall(iterator, "get_Current"));
+				}
+				OutfitCall(iterator, "Dispose");
+			} catch (...) { Log("[original-mv-outfit] fallback failed"); }
 		}
 
 		bool HasLiveCutSceneCostume(int sceneId, int costumeId) {
@@ -8984,8 +9040,6 @@ namespace
 				(void*)LiveUnitEasyCostumeChanger_MvOriginalCostumeExists_hook, LiveUnitEasyCostumeChanger_MvOriginalCostumeExists_orig);
 			hook("LiveUnitEasyCostumeChanger.ChangeLiveIdolCostume", ns, changer, "ChangeLiveIdolCostume", 3,
 				(void*)LiveUnitEasyCostumeChanger_ChangeLiveIdolCostume_hook, LiveUnitEasyCostumeChanger_ChangeLiveIdolCostume_orig);
-			hook("LiveUnitEasyCostumeChanger._changeIdolCostume", ns, changer, "_changeIdolCostume", 3,
-				(void*)LiveUnitEasyCostumeChanger_changeIdolCostume_hook, LiveUnitEasyCostumeChanger_changeIdolCostume_orig);
 			hook("RunwayUnitIdol.HasCutScene", "PRISM.Adapters", "RunwayUnitIdol", "HasCutScene", 2,
 				(void*)RunwayUnitIdol_HasCutScene_hook, RunwayUnitIdol_HasCutScene_orig);
 		}
