@@ -1561,11 +1561,24 @@ namespace
 		}
 	}
 
+	namespace SoloUnlock { int DrySwimsuitCostumeId(int id); }
 	HOOK_ORIG_TYPE LocalizationManager_GetTextOrNull_orig;
 	Il2CppString* LocalizationManager_GetTextOrNull_hook(void* _this, Il2CppString* category, int id) {
 		if (g_max_fps != -1) set_fps_hook(g_max_fps);
 		if (g_vsync_count != -1) set_vsync_count_hook(g_vsync_count);
 		itLocalizationManagerDic(_this);
+		if (const int dry = SoloUnlock::DrySwimsuitCostumeId(id); dry && category) {
+			const auto key = category->ToUtf8String();
+			if (key.starts_with("mlCostume")) {
+				auto* original = LocalizationManager_GetTextOrNull_hook(_this, category, dry);
+				if (key.ends_with("_Name")) {
+					auto text = original ? original->ToUtf8String() : std::string("Swimsuit");
+					text += "\xef\xbc\x88\xe6\xbf\xa1\xe3\x82\x8c\xef\xbc\x89";
+					return il2cpp_string_new(text.c_str());
+				}
+				return original;
+			}
+		}
 		std::string resultText = "";
 		if (SCLocal::getLocalifyText(utility::conversions::to_utf8string(category->start_char), id, &resultText)) {
 			//updateDicText(_this, category, id, resultText);
@@ -8339,6 +8352,237 @@ namespace
 			} catch (...) { Log("[original-mv-outfit] fallback failed"); }
 		}
 
+		constexpr int kWetOutfitOffset = 40000000;
+		constexpr int kFirstSwimsuitModel = 343;
+		constexpr int kLastSwimsuitModel = 370;
+		constexpr int kWetSwimsuitCount = kLastSwimsuitModel - kFirstSwimsuitModel + 1;
+
+		int DrySwimsuitCostumeId(int id) {
+			if (id <= kWetOutfitOffset) return 0;
+			const int original = id - kWetOutfitOffset;
+			for (const auto& entry : kMvArchivedOriginalOutfits)
+				if (entry.song == 118 && entry.setId == original &&
+					entry.model >= kFirstSwimsuitModel && entry.model <= kLastSwimsuitModel) return original;
+			return 0;
+		}
+
+		int DrySwimsuitModelId(int id) {
+			if (id <= kWetOutfitOffset) return 0;
+			const int original = id - kWetOutfitOffset;
+			return original >= kFirstSwimsuitModel && original <= kLastSwimsuitModel ? original : 0;
+		}
+
+		bool IsCollaborationWardrobeActor(int id) {
+			return id >= 78 && id <= 90 && id != 82;
+		}
+
+		void* FindWardrobeMasterRow(void* rows, int id) {
+			if (!rows) return nullptr;
+			int first = 0, last = RunwayDump::ArrayLength(rows);
+			while (first < last) {
+				const int middle = first + (last - first) / 2;
+				void* row = il2cpp_symbols::array_get_value(rows, middle);
+				if (!row) return nullptr;
+				const int rowId = RunwayDump::ReadInt(row, "<Id>k__BackingField");
+				if (rowId == id) return row;
+				if (rowId < id) first = middle + 1;
+				else last = middle;
+			}
+			return nullptr;
+		}
+
+		bool SetWardrobeMasterId(void* row, const char* name, int id) {
+			auto* field = FieldOf(KlassOf(row), name);
+			if (!field) return false;
+			il2cpp_field_set_value(row, field, &id);
+			return true;
+		}
+
+		bool g_wetWardrobeReady = false;
+		void* g_wetMasterRows = nullptr;
+		std::unordered_set<void*> g_wetCharacters;
+		void InstallWardrobeHooks();
+
+		bool RegisterWetSwimsuitMasters(void* master) {
+			void* costumeTable = master ? RunwayDump::ReadPtr(master, "Costumes") : nullptr;
+			void* modelTable = master ? RunwayDump::ReadPtr(master, "CostumeResources") : nullptr;
+			void* costumes = costumeTable ? RunwayDump::ReadPtr(costumeTable, "data") : nullptr;
+			void* models = modelTable ? RunwayDump::ReadPtr(modelTable, "data") : nullptr;
+			if (!costumes || !models) return false;
+			if (costumes == g_wetMasterRows) return true;
+			const int costumeCount = RunwayDump::ArrayLength(costumes);
+			const int modelCount = RunwayDump::ArrayLength(models);
+			if (costumeCount <= 0 || modelCount <= 0 ||
+				RunwayDump::ReadInt(il2cpp_symbols::array_get_value(costumes, costumeCount - 1), "<Id>k__BackingField") >= kWetOutfitOffset ||
+				RunwayDump::ReadInt(il2cpp_symbols::array_get_value(models, modelCount - 1), "<Id>k__BackingField") >= kWetOutfitOffset)
+				return false;
+			auto* costumeData = FieldOf(KlassOf(costumeTable), "data");
+			auto* modelData = FieldOf(KlassOf(modelTable), "data");
+			const auto* clone = il2cpp_class_get_method_from_name(
+				il2cpp_class_from_name(il2cpp_get_corlib(), "System", "Object"), "MemberwiseClone", 0);
+			void* costumeClass = KlassOf(il2cpp_symbols::array_get_value(costumes, 0));
+			void* modelClass = KlassOf(il2cpp_symbols::array_get_value(models, 0));
+			if (!clone || !clone->methodPointer || !costumeClass || !modelClass || !costumeData || !modelData) return false;
+			void* allCostumes = il2cpp_array_new(costumeClass, costumeCount + kWetSwimsuitCount);
+			void* allModels = il2cpp_array_new(modelClass, modelCount + kWetSwimsuitCount);
+			if (!allCostumes || !allModels) return false;
+			for (int i = 0; i < costumeCount; ++i)
+				il2cpp_symbols::array_set_value(allCostumes, il2cpp_symbols::array_get_value(costumes, i), i);
+			for (int i = 0; i < modelCount; ++i)
+				il2cpp_symbols::array_set_value(allModels, il2cpp_symbols::array_get_value(models, i), i);
+			int added = 0, previousId = 0;
+			for (const auto& entry : kMvArchivedOriginalOutfits) {
+				if (entry.song != 118 || entry.model < kFirstSwimsuitModel || entry.model > kLastSwimsuitModel) continue;
+				if (added >= kWetSwimsuitCount || entry.setId <= previousId || entry.model != kFirstSwimsuitModel + added)
+					return false;
+				auto* costume = static_cast<Il2CppObject*>(FindWardrobeMasterRow(costumes, entry.setId));
+				auto* model = static_cast<Il2CppObject*>(FindWardrobeMasterRow(models, entry.model));
+				if (!costume || !model || entry.actor != RunwayDump::ReadInt(costume, "<MstCharacterInfoId>k__BackingField") ||
+					entry.model != RunwayDump::ReadInt(costume, "<ResourceId>k__BackingField")) return false;
+				auto* wetModel = clone->Invoke<Il2CppObject*>(model, {});
+				auto* wetCostume = clone->Invoke<Il2CppObject*>(costume, {});
+				if (!wetModel || !wetCostume) return false;
+				auto* resource = FieldOf(KlassOf(wetCostume), "<Resource>k__BackingField");
+				if (!resource ||
+					!SetWardrobeMasterId(wetModel, "<Id>k__BackingField", kWetOutfitOffset + entry.model) ||
+					!SetWardrobeMasterId(wetCostume, "<Id>k__BackingField", kWetOutfitOffset + entry.setId) ||
+					!SetWardrobeMasterId(wetCostume, "<ResourceId>k__BackingField", kWetOutfitOffset + entry.model)) return false;
+				il2cpp_field_set_value_object(wetCostume, resource, wetModel);
+				il2cpp_symbols::array_set_value(allModels, wetModel, modelCount + added);
+				il2cpp_symbols::array_set_value(allCostumes, wetCostume, costumeCount + added);
+				previousId = entry.setId;
+				++added;
+			}
+			if (added != kWetSwimsuitCount) return false;
+			il2cpp_field_set_value_object(modelTable, modelData, allModels);
+			il2cpp_field_set_value_object(costumeTable, costumeData, allCostumes);
+			g_wetMasterRows = allCostumes;
+			Log(std::format("[swimsuit-wardrobe] registered {} wet costume models", added));
+			return true;
+		}
+
+		void AddWetSwimsuitEntries(void* list) {
+			InstallWardrobeHooks();
+			if (!g_wetWardrobeReady || !list) return;
+			const int count = OutfitNumber(list, "get_Count");
+			if (count <= 0 || count > 30000) return;
+			auto* klass = KlassOf(list);
+			const MethodInfo* add = nullptr;
+			void* iterator = nullptr;
+			while (const auto* method = il2cpp_class_get_methods(klass, &iterator)) {
+				if (!method->methodPointer || method->parameters_count != 1 || strcmp(method->name, "Add") != 0) continue;
+				const char* type = il2cpp_symbols::il2cpp_method_get_param_type_name(method, 0);
+				if (type && (strcmp(type, "CostumeStatus") == 0 || strcmp(type, "T") == 0)) {
+					add = method;
+					break;
+				}
+			}
+			if (!add || !RegisterWetSwimsuitMasters(TryMasterData())) return;
+			std::unordered_map<int, Il2CppObject*> dry;
+			std::unordered_set<int> present;
+			for (int i = 0; i < count; ++i) {
+				auto* status = OutfitCall(list, "get_Item", {reinterpret_cast<Il2CppObject*>(&i)});
+				if (!status) continue;
+				const int id = RunwayDump::ReadInt(status, "mstCostumeId_");
+				if (DrySwimsuitCostumeId(id)) present.insert(id);
+				const int model = RunwayDump::ReadInt(status, "resourceId_");
+				if (model >= kFirstSwimsuitModel && model <= kLastSwimsuitModel &&
+					DrySwimsuitCostumeId(kWetOutfitOffset + id)) dry.emplace(id, status);
+			}
+			int added = 0;
+			for (const auto& [id, status] : dry) {
+				if (present.contains(kWetOutfitOffset + id)) continue;
+				auto* wet = OutfitCall(status, "Clone");
+				if (!wet ||
+					!SetWardrobeMasterId(wet, "mstCostumeId_", kWetOutfitOffset + id) ||
+					!SetWardrobeMasterId(wet, "resourceId_", kWetOutfitOffset + RunwayDump::ReadInt(status, "resourceId_"))) continue;
+				add->InvokeAsVoid(static_cast<Il2CppObject*>(list), {wet});
+				++added;
+			}
+			if (added) Log(std::format("[swimsuit-wardrobe] added {} wet costume entries", added));
+		}
+
+		bool IsWetSwimsuitCharacter(void* character) {
+			return g_wetCharacters.contains(character);
+		}
+
+		void ApplyWetSwimsuit(void* character) {
+			if (!IsWetSwimsuitCharacter(character) || !RunwayDump::ReadPtr(character, "switchModels")) return;
+			int wet = 1;
+			OutfitCall(character, "SetSwitchModel",
+				{reinterpret_cast<Il2CppObject*>(&wet), reinterpret_cast<Il2CppObject*>(il2cpp_string_new("Swimsuit"))});
+		}
+
+		HOOK_ORIG_TYPE AssembleCharacter_AssembleWet_orig;
+		void* AssembleCharacter_AssembleWet_hook(void* assembly, void* parent, void* method) {
+			void* character = HOOK_CAST_CALL(void*, AssembleCharacter_AssembleWet)(assembly, parent, method);
+			if (!character || !assembly) return character;
+			try {
+				void* model = RunwayDump::ReadPtr(assembly, "<CostumeResource>k__BackingField");
+				void* costume = RunwayDump::ReadPtr(assembly, "<Costume>k__BackingField");
+				if (DrySwimsuitModelId(RunwayDump::ReadInt(model, "<Id>k__BackingField")) ||
+					DrySwimsuitCostumeId(RunwayDump::ReadInt(costume, "<Id>k__BackingField"))) {
+					g_wetCharacters.insert(character);
+					ApplyWetSwimsuit(character);
+				} else {
+					g_wetCharacters.erase(character);
+				}
+			} catch (...) {}
+			return character;
+		}
+
+		HOOK_ORIG_TYPE Character_DestroyWet_orig;
+		void Character_DestroyWet_hook(void* self, void* method) {
+			g_wetCharacters.erase(self);
+			HOOK_CAST_CALL(void, Character_DestroyWet)(self, method);
+		}
+
+		HOOK_ORIG_TYPE WardrobeProductKey_orig;
+		uint64_t WardrobeProductKey_hook(void* self, void* method) {
+			const uint64_t key = HOOK_CAST_CALL(uint64_t, WardrobeProductKey)(self, method);
+			const int original = DrySwimsuitCostumeId(static_cast<int>(key >> 32));
+			return original ? (static_cast<uint64_t>(original) << 32) | (key & 0xffffffffu) : key;
+		}
+
+		HOOK_ORIG_TYPE WardrobeCollaborationCanWear_orig;
+		bool WardrobeCollaborationCanWear_hook(void* status, int actor, bool allDressOrdered, void* method) {
+			if (HOOK_CAST_CALL(bool, WardrobeCollaborationCanWear)(status, actor, allDressOrdered, method)) return true;
+			if (!status || actor <= 0) return false;
+			try {
+				const int id = RunwayDump::ReadInt(status, "mstCostumeId_");
+				if (!IsCollaborationWardrobeActor(actor) && !DrySwimsuitCostumeId(id)) return false;
+				const int owner = RunwayDump::ReadInt(status, "mstCharacterInfoId_");
+				if (id <= 0 || owner <= 0 || owner == actor) return false;
+				void* costume = FindWardrobeMasterRow(CenterCutSceneTableRows(TryMasterData(), "Costumes"), id);
+				return costume && RunwayDump::ReadInt(costume, "<MstCharacterInfoId>k__BackingField") == owner &&
+					RunwayDump::ReadInt(costume, "<ResourceId>k__BackingField") > 0 &&
+					RunwayDump::ReadPtr(costume, "<Resource>k__BackingField") &&
+					LipReadBool(costume, "<IsWearableLive>k__BackingField");
+			} catch (...) { return false; }
+		}
+
+		void InstallWardrobeHooks() {
+			static std::once_flag once;
+			std::call_once(once, [] {
+				auto hook = [](const char* label, const char* namesp, const char* type, const char* member,
+					int count, void* replacement, HOOK_ORIG_TYPE& original) {
+					void* target = ViewDiag::find_method_anywhere(namesp, type, member, count);
+					if (target && HookAt(label, target, replacement, original)) Log(std::format("[mv-outfits] {} installed", label));
+				};
+				hook("AssembleCharacter.Assemble", "PRISM", "AssembleCharacter", "Assemble", 2,
+					(void*)AssembleCharacter_AssembleWet_hook, AssembleCharacter_AssembleWet_orig);
+				hook("Character.OnDestroy", "PRISM", "Character", "OnDestroy", 0,
+					(void*)Character_DestroyWet_hook, Character_DestroyWet_orig);
+				hook("CostumePartViewModel.get_ProductKey", "PRISM.Adapters.CostumeChange",
+					"CostumePartViewModel", "get_ProductKey", 0,
+					(void*)WardrobeProductKey_hook, WardrobeProductKey_orig);
+				hook("CostumeStatusExtensions.CanWear", "PRISM.Domain", "CostumeStatusExtensions", "CanWear", 3,
+					(void*)WardrobeCollaborationCanWear_hook, WardrobeCollaborationCanWear_orig);
+				g_wetWardrobeReady = AssembleCharacter_AssembleWet_orig && Character_DestroyWet_orig && WardrobeProductKey_orig;
+				Log(std::format("[swimsuit-wardrobe] wet hooks ready={}", g_wetWardrobeReady));
+			});
+		}
+
 		bool HasLiveCutSceneCostume(int sceneId, int costumeId) {
 			const auto rows = OutfitList(CenterCutSceneTableRows(TryMasterData(), "LiveCutSceneCostumes"));
 			for (int i = 0; i < rows.count; ++i) {
@@ -8385,6 +8629,7 @@ namespace
 
 		// Resource IDs from the swimsuit prefabs with actual SwitchModel removal states.
 		bool CompatibleRunwaySwimsuit(int resourceId) {
+			if (DrySwimsuitModelId(resourceId)) return true;
 			if ((resourceId >= 343 && resourceId <= 370) ||
 				(resourceId >= 979 && resourceId <= 999) ||
 				(resourceId >= 2000 && resourceId <= 2006)) return true;
@@ -8486,6 +8731,7 @@ namespace
 
 		std::string CenterCutSceneText(void* manager, Il2CppString* category, int id) {
 			if (!manager || !category || id <= 0 || !HOOK_GET_ORIG(LocalizationManager_GetTextOrNull)) return {};
+			if (const int dry = DrySwimsuitCostumeId(id)) id = dry;
 			auto* text = HOOK_CAST_CALL(Il2CppString*, LocalizationManager_GetTextOrNull)(manager, category, id);
 			return text ? CenterCutSceneTrimName(text->ToUtf8String()) : std::string{};
 		}
@@ -8890,15 +9136,21 @@ namespace
 		HOOK_ORIG_TYPE Character_SetupSwitchModel_orig;
 		void Character_SetupSwitchModel_hook(void* self, void* method) {
 			HOOK_CAST_CALL(void, Character_SetupSwitchModel)(self, method);
+			try { ApplyWetSwimsuit(self); } catch (...) {}
 			try { SwitchDiagList(self, "setup"); } catch (...) {}
 		}
 		HOOK_ORIG_TYPE Character_SetSwitchModel_orig;
 		int Character_SetSwitchModel_hook(void* self, int index, void* switchId, void* method) {
+			const bool wetSwimsuit = IsWetSwimsuitCharacter(self);
+			if (wetSwimsuit && index == 0 && Il2CppStrOf(switchId) == "Swimsuit") index = 1;
 			int ret = HOOK_CAST_CALL(int, Character_SetSwitchModel)(self, index, switchId, method);
 			try {
-				const auto alternate = ResolveSwimsuitSwitch(self, index, switchId);
-				if (alternate.id)
+				auto alternate = ResolveSwimsuitSwitch(self, index, switchId);
+				if (alternate.id) {
+					if (wetSwimsuit && alternate.state == 0 && Il2CppStrOf(alternate.id) == "Swimsuit")
+						alternate.state = 1;
 					return HOOK_CAST_CALL(int, Character_SetSwitchModel)(self, alternate.state, alternate.id, method);
+				}
 			} catch (...) {}
 			try {
 				if (g_lastMvSongId == 118 && self && g_swDiagLines < 350) {
@@ -9947,6 +10199,7 @@ namespace
 				(void*)LiveUnitEasyCostumeChanger_ChangeLiveIdolCostume_hook, LiveUnitEasyCostumeChanger_ChangeLiveIdolCostume_orig);
 			hook("RunwayUnitIdol.HasCutScene", "PRISM.Adapters", "RunwayUnitIdol", "HasCutScene", 2,
 				(void*)RunwayUnitIdol_HasCutScene_hook, RunwayUnitIdol_HasCutScene_orig);
+			InstallWardrobeHooks();
 		}
 
 		void Install() {
@@ -10202,6 +10455,7 @@ namespace
 	HOOK_ORIG_TYPE GetCostumeListReply_get_CostumeList_orig;
 	void* GetCostumeListReply_get_CostumeList_hook(void* _this) {  // 添加服装到缓存表
 		auto ret = HOOK_CAST_CALL(void*, GetCostumeListReply_get_CostumeList)(_this);
+		try { SoloUnlock::AddWetSwimsuitEntries(ret); } catch (...) {}
 		checkCostumeListReply(_this, ret, "mstCostumeId_");
 		return ret;
 	}
@@ -11356,6 +11610,10 @@ namespace
 	HOOK_DEF(void, CostumeChangeViewModel__ctor)(void* _this, void* parameter, int characterId, void* settingCostumeSet, bool isAllDressOrdered, bool isEnableDressOrderTab, void* defaultCostumeSet) {
 		if (g_show_hidden_costumes) {
 			isAllDressOrdered = true;
+		}
+		if (SoloUnlock::IsCollaborationWardrobeActor(characterId)) {
+			isAllDressOrdered = true;
+			isEnableDressOrderTab = true;
 		}
 		HOOK_CAST_CALL(void, CostumeChangeViewModel__ctor)(_this, parameter, characterId, settingCostumeSet, isAllDressOrdered, isEnableDressOrderTab, defaultCostumeSet);
 	}
