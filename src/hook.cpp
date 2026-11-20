@@ -8599,13 +8599,28 @@ namespace
 		// The home screen uses the game's non-story outfit setting.
 		constexpr int kOtherOutfitScene = 2;
 		constexpr int kAllOutfitTypes = 15;
+		thread_local bool g_creatingHomeWardrobe = false;
+
+		bool IsHomeWardrobeBehaviour(void* self) {
+			void* idol = self ? RunwayDump::ReadPtr(self, "idol") : nullptr;
+			return idol && RunwayDump::ReadInt(idol, "<TargetSceneType>k__BackingField") == kOtherOutfitScene;
+		}
 
 		HOOK_ORIG_TYPE CasualCostumeChangeBehaviour_GetCostumeType_orig;
 		int CasualCostumeChangeBehaviour_GetCostumeType_hook(void* self, const MethodInfo* method) {
-			void* idol = self ? RunwayDump::ReadPtr(self, "idol") : nullptr;
-			if (idol && RunwayDump::ReadInt(idol, "<TargetSceneType>k__BackingField") == kOtherOutfitScene)
-				return kAllOutfitTypes;
+			if (IsHomeWardrobeBehaviour(self)) return kAllOutfitTypes;
 			return HOOK_CAST_CALL(int, CasualCostumeChangeBehaviour_GetCostumeType)(self, method);
+		}
+
+		HOOK_ORIG_TYPE CasualCostumeChangeBehaviour_CreateViewModel_orig;
+		void* CasualCostumeChangeBehaviour_CreateViewModel_hook(void* self, void* parameter, uintptr_t ct,
+			const MethodInfo* method) {
+			struct RestoreHomeWardrobe {
+				bool previous;
+				~RestoreHomeWardrobe() { g_creatingHomeWardrobe = previous; }
+			} restore{g_creatingHomeWardrobe};
+			g_creatingHomeWardrobe = IsHomeWardrobeBehaviour(self);
+			return HOOK_CAST_CALL(void*, CasualCostumeChangeBehaviour_CreateViewModel)(self, parameter, ct, method);
 		}
 
 		bool HasLiveCutSceneCostume(int sceneId, int costumeId) {
@@ -10227,6 +10242,9 @@ namespace
 			hook("CasualCostumeChangeBehaviour.get_CostumeType", "PRISM.Adapters",
 				"CasualCostumeChangeBehaviour", "get_CostumeType", 0,
 				(void*)CasualCostumeChangeBehaviour_GetCostumeType_hook, CasualCostumeChangeBehaviour_GetCostumeType_orig);
+			hook("CasualCostumeChangeBehaviour.CreateViewModel", "PRISM.Adapters",
+				"CasualCostumeChangeBehaviour", "CreateViewModel", 2,
+				(void*)CasualCostumeChangeBehaviour_CreateViewModel_hook, CasualCostumeChangeBehaviour_CreateViewModel_orig);
 			InstallWardrobeHooks();
 		}
 
@@ -11639,7 +11657,7 @@ namespace
 		if (g_show_hidden_costumes) {
 			isAllDressOrdered = true;
 		}
-		if (SoloUnlock::IsCollaborationWardrobeActor(characterId)) {
+		if (SoloUnlock::g_creatingHomeWardrobe || SoloUnlock::IsCollaborationWardrobeActor(characterId)) {
 			isAllDressOrdered = true;
 			isEnableDressOrderTab = true;
 		}
