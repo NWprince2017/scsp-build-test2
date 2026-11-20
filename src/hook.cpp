@@ -8537,11 +8537,20 @@ namespace
 			HOOK_CAST_CALL(void, Character_DestroyWet)(self, method);
 		}
 
-		HOOK_ORIG_TYPE WardrobeProductKey_orig;
-		uint64_t WardrobeProductKey_hook(void* self, void* method) {
-			const uint64_t key = HOOK_CAST_CALL(uint64_t, WardrobeProductKey)(self, method);
+		// The x64 IL2CPP calls return UniTask<Sprite> through a caller-owned buffer.
+		// Resolve the source thumbnail here, so the wardrobe still sees the wet costume's key.
+		HOOK_ORIG_TYPE WardrobeCostumeIcon_orig;
+		void* WardrobeCostumeIcon_hook(void* result, void* loader, int costumeId, uintptr_t ct, const MethodInfo* method) {
+			if (const int original = DrySwimsuitCostumeId(costumeId)) costumeId = original;
+			return HOOK_CAST_CALL(void*, WardrobeCostumeIcon)(result, loader, costumeId, ct, method);
+		}
+
+		HOOK_ORIG_TYPE WardrobeItemIcon_orig;
+		void* WardrobeItemIcon_hook(void* result, void* loader, uint64_t key, uintptr_t withFrame, uintptr_t ct,
+			const MethodInfo* method) {
 			const int original = DrySwimsuitCostumeId(static_cast<int>(key >> 32));
-			return original ? (static_cast<uint64_t>(original) << 32) | (key & 0xffffffffu) : key;
+			if (original) key = (static_cast<uint64_t>(original) << 32) | (key & 0xffffffffu);
+			return HOOK_CAST_CALL(void*, WardrobeItemIcon)(result, loader, key, withFrame, ct, method);
 		}
 
 		HOOK_ORIG_TYPE WardrobeCollaborationCanWear_orig;
@@ -8573,12 +8582,16 @@ namespace
 					(void*)AssembleCharacter_AssembleWet_hook, AssembleCharacter_AssembleWet_orig);
 				hook("Character.OnDestroy", "PRISM", "Character", "OnDestroy", 0,
 					(void*)Character_DestroyWet_hook, Character_DestroyWet_orig);
-				hook("CostumePartViewModel.get_ProductKey", "PRISM.Adapters.CostumeChange",
-					"CostumePartViewModel", "get_ProductKey", 0,
-					(void*)WardrobeProductKey_hook, WardrobeProductKey_orig);
+				hook("ResourceLoaderExtensions.LoadCostumeIconAsync", "PRISM.Interactions.Character",
+					"ResourceLoaderExtensions", "LoadCostumeIconAsync", 3,
+					(void*)WardrobeCostumeIcon_hook, WardrobeCostumeIcon_orig);
+				hook("ResourceLoaderExtensions.LoadItemIconAsync", "PRISM.Interactions",
+					"ResourceLoaderExtensions", "LoadItemIconAsync", 4,
+					(void*)WardrobeItemIcon_hook, WardrobeItemIcon_orig);
 				hook("CostumeStatusExtensions.CanWear", "PRISM.Domain", "CostumeStatusExtensions", "CanWear", 3,
 					(void*)WardrobeCollaborationCanWear_hook, WardrobeCollaborationCanWear_orig);
-				g_wetWardrobeReady = AssembleCharacter_AssembleWet_orig && Character_DestroyWet_orig && WardrobeProductKey_orig;
+				g_wetWardrobeReady = AssembleCharacter_AssembleWet_orig && Character_DestroyWet_orig &&
+					(WardrobeCostumeIcon_orig || WardrobeItemIcon_orig);
 				Log(std::format("[swimsuit-wardrobe] wet hooks ready={}", g_wetWardrobeReady));
 			});
 		}
