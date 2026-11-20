@@ -8596,6 +8596,18 @@ namespace
 			});
 		}
 
+		// The home screen uses the game's non-story outfit setting.
+		constexpr int kOtherOutfitScene = 2;
+		constexpr int kAllOutfitTypes = 15;
+
+		HOOK_ORIG_TYPE CasualCostumeChangeBehaviour_GetCostumeType_orig;
+		int CasualCostumeChangeBehaviour_GetCostumeType_hook(void* self, const MethodInfo* method) {
+			void* idol = self ? RunwayDump::ReadPtr(self, "idol") : nullptr;
+			if (idol && RunwayDump::ReadInt(idol, "<TargetSceneType>k__BackingField") == kOtherOutfitScene)
+				return kAllOutfitTypes;
+			return HOOK_CAST_CALL(int, CasualCostumeChangeBehaviour_GetCostumeType)(self, method);
+		}
+
 		bool HasLiveCutSceneCostume(int sceneId, int costumeId) {
 			const auto rows = OutfitList(CenterCutSceneTableRows(TryMasterData(), "LiveCutSceneCostumes"));
 			for (int i = 0; i < rows.count; ++i) {
@@ -10212,6 +10224,9 @@ namespace
 				(void*)LiveUnitEasyCostumeChanger_ChangeLiveIdolCostume_hook, LiveUnitEasyCostumeChanger_ChangeLiveIdolCostume_orig);
 			hook("RunwayUnitIdol.HasCutScene", "PRISM.Adapters", "RunwayUnitIdol", "HasCutScene", 2,
 				(void*)RunwayUnitIdol_HasCutScene_hook, RunwayUnitIdol_HasCutScene_orig);
+			hook("CasualCostumeChangeBehaviour.get_CostumeType", "PRISM.Adapters",
+				"CasualCostumeChangeBehaviour", "get_CostumeType", 0,
+				(void*)CasualCostumeChangeBehaviour_GetCostumeType_hook, CasualCostumeChangeBehaviour_GetCostumeType_orig);
 			InstallWardrobeHooks();
 		}
 
