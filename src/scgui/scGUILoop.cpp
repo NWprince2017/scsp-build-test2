@@ -683,6 +683,7 @@ namespace SCGUILoop {
 				}
 				if (ImGui::CollapsingHeader("Fixed framing")) {
 					ImGui::PushID("Fixed framing");
+					HELP_TOOLTIP("Controls (?)", "Right-drag / WASD: turn\nWheel / Z and X: zoom\nShift + right-drag / Shift + WASD: move\nQ and E: roll\nR: reset");
 					framingControls(true);
 					ImGui::PopID();
 				}

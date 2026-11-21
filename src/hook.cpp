@@ -35,12 +35,11 @@ namespace {
 	std::atomic<float> mvFocusRoll{0};
 	std::atomic<float> mvFocusHorizontal{0};
 	std::atomic<float> mvFocusVertical{0};
-	std::atomic<float> mvFixedYaw{0};
-	std::atomic<float> mvFixedPitch{0};
-	std::atomic<float> mvFixedRoll{0};
-	std::atomic<float> mvFixedHorizontal{0};
-	std::atomic<float> mvFixedVertical{0};
-	std::atomic<float> mvFixedZoom{0};
+	struct FixedFraming {
+		float yaw, pitch, roll, horizontal, vertical, zoom;
+	};
+	FixedFraming mvFixedFraming{};
+	std::mutex mvFixedFramingMutex;
 
 	float BoundFraming(float value, float maximum) {
 		return std::isfinite(value) ? std::clamp(value, -maximum, maximum) : 0.0f;
@@ -60,21 +59,29 @@ void SetMvFocusFraming(float roll, float horizontal, float vertical) {
 }
 
 void GetMvFixedFraming(float& yaw, float& pitch, float& roll, float& horizontal, float& vertical, float& zoom) {
-	yaw = mvFixedYaw.load(std::memory_order_relaxed);
-	pitch = mvFixedPitch.load(std::memory_order_relaxed);
-	roll = mvFixedRoll.load(std::memory_order_relaxed);
-	horizontal = mvFixedHorizontal.load(std::memory_order_relaxed);
-	vertical = mvFixedVertical.load(std::memory_order_relaxed);
-	zoom = mvFixedZoom.load(std::memory_order_relaxed);
+	std::lock_guard lock(mvFixedFramingMutex);
+	yaw = mvFixedFraming.yaw;
+	pitch = mvFixedFraming.pitch;
+	roll = mvFixedFraming.roll;
+	horizontal = mvFixedFraming.horizontal;
+	vertical = mvFixedFraming.vertical;
+	zoom = mvFixedFraming.zoom;
 }
 
 void SetMvFixedFraming(float yaw, float pitch, float roll, float horizontal, float vertical, float zoom) {
-	mvFixedYaw.store(BoundFraming(yaw, 180.0f), std::memory_order_relaxed);
-	mvFixedPitch.store(BoundFraming(pitch, 90.0f), std::memory_order_relaxed);
-	mvFixedRoll.store(BoundFraming(roll, 180.0f), std::memory_order_relaxed);
-	mvFixedHorizontal.store(BoundFraming(horizontal, 3.0f), std::memory_order_relaxed);
-	mvFixedVertical.store(BoundFraming(vertical, 3.0f), std::memory_order_relaxed);
-	mvFixedZoom.store(BoundFraming(zoom, 3.0f), std::memory_order_relaxed);
+	std::lock_guard lock(mvFixedFramingMutex);
+	mvFixedFraming = {BoundFraming(yaw, 180.0f), BoundFraming(pitch, 90.0f), BoundFraming(roll, 180.0f),
+		BoundFraming(horizontal, 3.0f), BoundFraming(vertical, 3.0f), BoundFraming(zoom, 3.0f)};
+}
+
+void NudgeMvFixedFraming(float yaw, float pitch, float roll, float horizontal, float vertical, float zoom) {
+	std::lock_guard lock(mvFixedFramingMutex);
+	mvFixedFraming.yaw = BoundFraming(std::remainder(mvFixedFraming.yaw + yaw, 360.0f), 180.0f);
+	mvFixedFraming.pitch = BoundFraming(mvFixedFraming.pitch + pitch, 90.0f);
+	mvFixedFraming.roll = BoundFraming(std::remainder(mvFixedFraming.roll + roll, 360.0f), 180.0f);
+	mvFixedFraming.horizontal = BoundFraming(mvFixedFraming.horizontal + horizontal, 3.0f);
+	mvFixedFraming.vertical = BoundFraming(mvFixedFraming.vertical + vertical, 3.0f);
+	mvFixedFraming.zoom = BoundFraming(mvFixedFraming.zoom + zoom, 3.0f);
 }
 
 bool MvCenterCloseupsAnyCostume() {
@@ -8829,7 +8836,26 @@ namespace
 			};
 			CameraOwner modernOwner;
 			void* modernType = nullptr;
+			void* legacyType = nullptr;
+			void* controlViewHandle = nullptr;
 			const MethodInfo* getOutputCamera = nullptr;
+
+			void* ControlView() {
+				return controlViewHandle ? il2cpp_gchandle_get_target(controlViewHandle) : nullptr;
+			}
+
+			bool HasFixedInput(void* owner) {
+				if (!owner || g_enable_free_camera) return false;
+				void* view = ControlView();
+				if (!view || RunwayDump::ReadPtr(view, "camerawork") != owner) return false;
+				const void* type = KlassOf(owner);
+				if (type == modernType) return modernOwner.access.Mode(owner) == CameraMode::Fixed;
+				if (type == legacyType) {
+					void* pattern = OutfitCall(owner, "get_CurrentPattern");
+					return RunwayDump::ReadInt(pattern, "Mode") == static_cast<int>(CameraMode::Fixed);
+				}
+				return false;
+			}
 
 			const MethodInfo* getProjection = nullptr;
 			const MethodInfo* setProjection = nullptr;
@@ -8986,9 +9012,13 @@ namespace
 
 			HOOK_ORIG_TYPE ControlUpdate_orig;
 			void ControlUpdate_hook(void* self, const MethodInfo* method) {
-				HOOK_CAST_CALL(void, ControlUpdate)(self, method);
+				if (ControlView() != self) {
+					if (controlViewHandle) il2cpp_gchandle_free(controlViewHandle);
+					controlViewHandle = newWeakHandle(self, false);
+				}
 				void* owner = RunwayDump::ReadPtr(self, "camerawork");
 				if (owner && KlassOf(owner) == modernType) modernOwner.Register(owner);
+				HOOK_CAST_CALL(void, ControlUpdate)(self, method);
 			}
 
 			HOOK_ORIG_TYPE BrainPush_orig;
@@ -9029,16 +9059,18 @@ namespace
 				const bool resize = hook("PRISM", "LiveInGameView", "<_setUpBox>b__6_0", 1, (void*)ResizeBoxes_hook, ResizeBoxes_orig);
 				const bool boxes = resize && hook("PRISM", "LiveInGameView", "_setUpBox", 1, (void*)SetupBoxes_hook, SetupBoxes_orig);
 				Log(std::format("[focus-framing] portrait masks installed={}", boxes));
+				constexpr const char* mv = "PRISM.Interactions.MV";
+				modernType = ViewDiag::find_class_anywhere(mv, "MvSceneCamerawork");
+				legacyType = ViewDiag::find_class_anywhere("", "CameraworkManager");
+				const bool control = hook("PRISM.Interactions.Live", "LiveMVCameraControlView", "Update", 0, (void*)ControlUpdate_hook, ControlUpdate_orig);
+				Log(std::format("[fixed-input] native MV controls installed={}", control));
 				const auto brain = ViewDiag::find_class_anywhere("Cinemachine", "CinemachineBrain");
 				if (!brain) return;
 				getOutputCamera = il2cpp_class_get_method_from_name(brain, "get_OutputCamera", 0);
 				if (!getOutputCamera || !getOutputCamera->methodPointer) return;
 				const bool output = hook("Cinemachine", "CinemachineBrain", "PushStateToUnityCamera", 1, (void*)BrainPush_hook, BrainPush_orig);
 				if (!output) return;
-				constexpr const char* mv = "PRISM.Interactions.MV";
-				modernType = ViewDiag::find_class_anywhere(mv, "MvSceneCamerawork");
 				const bool setup = hook(mv, "MvSceneCamerawork", "Setup", 1, (void*)ModernSetup_hook, ModernSetup_orig);
-				const bool control = hook("PRISM.Interactions.Live", "LiveMVCameraControlView", "Update", 0, (void*)ControlUpdate_hook, ControlUpdate_orig);
 				Log(std::format("[focus-framing] output camera hooks cinemachine={} setup={} controls={}", output, setup, control));
 			}
 		}
@@ -9203,6 +9235,114 @@ namespace
 			}
 
 			constexpr int kInputHandled = 2;
+
+			namespace FixedInput {
+				bool Key(const MethodInfo* method, int code) {
+					return method && method->methodPointer &&
+						reinterpret_cast<bool(*)(int, const MethodInfo*)>(method->methodPointer)(code, method);
+				}
+
+				bool Held(int code) {
+					static const auto* get = il2cpp_symbols_logged::get_method("UnityEngine.InputLegacyModule.dll", "UnityEngine", "Input", "GetKeyInt", 1);
+					return Key(get, code);
+				}
+
+				bool ResetPressed() {
+					static const auto* get = il2cpp_symbols_logged::get_method("UnityEngine.InputLegacyModule.dll", "UnityEngine", "Input", "GetKeyDownInt", 1);
+					return Key(get, 'r');
+				}
+
+				bool ShiftHeld() { return Held(303) || Held(304); }
+
+				void LogOnce(bool& logged, const char* action) {
+					if (std::exchange(logged, true)) return;
+					Log(std::format("[fixed-input] applied {}", action));
+				}
+
+				int Drag(Vector2_t delta) {
+					if (!std::isfinite(delta.x) || !std::isfinite(delta.y) || (delta.x == 0 && delta.y == 0)) return 0;
+					if (ShiftHeld()) {
+						constexpr float distancePerDegree = 0.03f;
+						NudgeMvFixedFraming(0, 0, 0, delta.x * distancePerDegree, delta.y * distancePerDegree, 0);
+						static bool logged = false;
+						LogOnce(logged, "mouse pan");
+					} else {
+						NudgeMvFixedFraming(delta.x, delta.y, 0, 0, 0, 0);
+						static bool logged = false;
+						LogOnce(logged, "mouse turn");
+					}
+					return kInputHandled;
+				}
+
+				int Zoom(float delta) {
+					if (!std::isfinite(delta) || delta == 0) return 0;
+					NudgeMvFixedFraming(0, 0, 0, 0, 0, delta * 3);
+					static bool logged = false;
+					LogOnce(logged, "native zoom");
+					return kInputHandled;
+				}
+
+				int MoveFromKeyboard() {
+					const float x = static_cast<float>(Held('d')) - static_cast<float>(Held('a'));
+					const float y = static_cast<float>(Held('w')) - static_cast<float>(Held('s'));
+					const float roll = static_cast<float>(Held('e')) - static_cast<float>(Held('q'));
+					if (x == 0 && y == 0 && roll == 0) return 0;
+					static const auto* timer = il2cpp_symbols_logged::get_method("UnityEngine.CoreModule.dll", "UnityEngine", "Time", "get_deltaTime", 0);
+					if (!timer || !timer->methodPointer) return 0;
+					float seconds = reinterpret_cast<float(*)(const MethodInfo*)>(timer->methodPointer)(timer);
+					if (!std::isfinite(seconds) || seconds <= 0) return 0;
+					seconds = std::min(seconds, 0.1f);
+					const float step = seconds / std::max(1.0f, std::hypot(x, y));
+					if (ShiftHeld()) {
+						NudgeMvFixedFraming(0, 0, 75 * roll * seconds, 1.5f * x * step, 1.5f * y * step, 0);
+						static bool logged = false;
+						LogOnce(logged, "keyboard pan");
+					} else {
+						NudgeMvFixedFraming(45 * x * step, 45 * y * step, 75 * roll * seconds, 0, 0, 0);
+						static bool logged = false;
+						LogOnce(logged, "keyboard turn or roll");
+					}
+					return kInputHandled;
+				}
+
+				int Reset() {
+					SetMvFixedFraming(0, 0, 0, 0, 0, 0);
+					static bool logged = false;
+					LogOnce(logged, "native reset");
+					return kInputHandled;
+				}
+			}
+
+			HOOK_ORIG_TYPE ModernCameraworkRotate_orig;
+			int ModernCameraworkRotate_hook(void* self, Vector2_t delta, const MethodInfo* method) {
+				if (FocusFraming::HasFixedInput(self)) return FixedInput::Drag(delta);
+				return HOOK_CAST_CALL(int, ModernCameraworkRotate)(self, delta, method);
+			}
+
+			HOOK_ORIG_TYPE ModernCameraworkZoom_orig;
+			int ModernCameraworkZoom_hook(void* self, float delta, const MethodInfo* method) {
+				if (FocusFraming::HasFixedInput(self)) return FixedInput::Zoom(delta);
+				return HOOK_CAST_CALL(int, ModernCameraworkZoom)(self, delta, method);
+			}
+
+			HOOK_ORIG_TYPE ModernCameraworkReset_orig;
+			int ModernCameraworkReset_hook(void* self, const MethodInfo* method) {
+				const int result = HOOK_CAST_CALL(int, ModernCameraworkReset)(self, method);
+				return FocusFraming::HasFixedInput(self) ? FixedInput::Reset() : result;
+			}
+
+			HOOK_ORIG_TYPE ModernKeyboardRotate_orig;
+			int ModernKeyboardRotate_hook(void* self, const MethodInfo* method) {
+				if (FocusFraming::HasFixedInput(self)) return FixedInput::MoveFromKeyboard();
+				return HOOK_CAST_CALL(int, ModernKeyboardRotate)(self, method);
+			}
+
+			HOOK_ORIG_TYPE ModernKeyboardReset_orig;
+			int ModernKeyboardReset_hook(void* self, const MethodInfo* method) {
+				const int result = HOOK_CAST_CALL(int, ModernKeyboardReset)(self, method);
+				return FixedInput::ResetPressed() && FocusFraming::HasFixedInput(self) ? FixedInput::Reset() : result;
+			}
+
 			struct LegacyFrame {
 				float extraZoom = 0;
 				void* outputCamera = nullptr;
@@ -9212,6 +9352,7 @@ namespace
 
 			HOOK_ORIG_TYPE LegacyRotate_orig;
 			int LegacyRotate_hook(void* self, Vector2_t delta, const MethodInfo* method) {
+				if (FocusFraming::HasFixedInput(self)) return FixedInput::Drag(delta);
 				if (!std::isfinite(delta.x) || !std::isfinite(delta.y)) return 1;
 				float* horizontal = FloatField(self, "focusRotateHorizontal");
 				float* vertical = FloatField(self, "focusRotateVertical");
@@ -9227,6 +9368,7 @@ namespace
 
 			HOOK_ORIG_TYPE LegacyKeyboardRotate_orig;
 			int LegacyKeyboardRotate_hook(void* self, const MethodInfo* method) {
+				if (FocusFraming::HasFixedInput(self)) return FixedInput::MoveFromKeyboard();
 				if (!LegacyRotate_orig) return HOOK_CAST_CALL(int, LegacyKeyboardRotate)(self, method);
 				static const auto* key = il2cpp_symbols_logged::get_method("UnityEngine.InputLegacyModule.dll", "UnityEngine", "Input", "GetKeyInt", 1);
 				static const auto* elapsed = il2cpp_symbols_logged::get_method("UnityEngine.CoreModule.dll", "UnityEngine", "Time", "get_deltaTime", 0);
@@ -9243,6 +9385,7 @@ namespace
 
 			HOOK_ORIG_TYPE LegacyZoom_orig;
 			int LegacyZoom_hook(void* self, float delta, const MethodInfo* method) {
+				if (FocusFraming::HasFixedInput(self)) return FixedInput::Zoom(delta);
 				if (!std::isfinite(delta)) return 1;
 				float* rate = FloatField(self, "focusZoomRate");
 				const float native = rate ? *rate : 0;
@@ -9255,14 +9398,14 @@ namespace
 			int LegacyReset_hook(void* self, const MethodInfo* method) {
 				const int handled = HOOK_CAST_CALL(int, LegacyReset)(self, method);
 				if (handled == kInputHandled) legacyZoom.erase(self);
-				return handled;
+				return FocusFraming::HasFixedInput(self) ? FixedInput::Reset() : handled;
 			}
 
 			HOOK_ORIG_TYPE LegacyKeyboardReset_orig;
 			int LegacyKeyboardReset_hook(void* self, const MethodInfo* method) {
 				const int handled = HOOK_CAST_CALL(int, LegacyKeyboardReset)(self, method);
 				if (handled == kInputHandled) legacyZoom.erase(self);
-				return handled;
+				return FixedInput::ResetPressed() && FocusFraming::HasFixedInput(self) ? FixedInput::Reset() : handled;
 			}
 
 			HOOK_ORIG_TYPE LegacyDestroy_orig;
@@ -9318,6 +9461,12 @@ namespace
 				hook(modern, focus, "Reset", 0, (void*)ModernReset_hook, ModernReset_orig);
 				hook(modern, focus, "OnDisable", 0, (void*)ModernDisable_hook, ModernDisable_orig);
 				hook(modern, focus, "UpdateSensorSize", 1, (void*)ModernSensorSize_hook, ModernSensorSize_orig);
+				constexpr const char* camerawork = "MvSceneCamerawork";
+				hook(modern, camerawork, "RotateCamera", 1, (void*)ModernCameraworkRotate_hook, ModernCameraworkRotate_orig);
+				hook(modern, camerawork, "ZoomCamera", 1, (void*)ModernCameraworkZoom_hook, ModernCameraworkZoom_orig);
+				hook(modern, camerawork, "ResetZoomAndRotate", 0, (void*)ModernCameraworkReset_hook, ModernCameraworkReset_orig);
+				hook(modern, camerawork, "ApplyRotateFromKeyboard", 0, (void*)ModernKeyboardRotate_hook, ModernKeyboardRotate_orig);
+				hook(modern, camerawork, "ApplyResetFromKeyboard", 0, (void*)ModernKeyboardReset_hook, ModernKeyboardReset_orig);
 				constexpr const char* legacy = "CameraworkManager";
 				hook("", legacy, "RotateCamera", 1, (void*)LegacyRotate_hook, LegacyRotate_orig);
 				hook("", legacy, "ApplyRotateFromKeyboard", 0, (void*)LegacyKeyboardRotate_hook, LegacyKeyboardRotate_orig);
