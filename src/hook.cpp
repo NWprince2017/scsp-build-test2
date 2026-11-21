@@ -8836,6 +8836,7 @@ namespace
 
 			struct PortraitMask {
 				void* viewHandle = nullptr;
+				bool portrait = false;
 				bool applied = false;
 				CameraPath path = CameraPath::Legacy;
 				float aspect = 0;
@@ -8853,6 +8854,7 @@ namespace
 				}
 
 				float Fit(float windowAspect, CameraPath source) {
+					if (!portrait) return 1.0f;
 					if (applied && windowAspect == aspect && source == path) return scale;
 					Restore();
 					void* view = View();
@@ -8883,19 +8885,46 @@ namespace
 				}
 			};
 			PortraitMask portraitMask;
+			bool liveViewClosing = false;
+
+			void ResetFramingSettings() {
+				SetMvFocusFraming(0, 0, 0);
+				SetMvFixedFraming(0, 0, 0, 0, 0, 0);
+				FixedInput::previous = {};
+			}
 
 			HOOK_ORIG_TYPE SetupBoxes_orig;
 			void SetupBoxes_hook(void* self, bool portrait, const MethodInfo* method) {
 				portraitMask.Restore();
-				if (portraitMask.viewHandle) il2cpp_gchandle_free(std::exchange(portraitMask.viewHandle, nullptr));
+				if (portraitMask.View() != self) {
+					if (portraitMask.viewHandle) {
+						ResetFramingSettings();
+						il2cpp_gchandle_free(portraitMask.viewHandle);
+					}
+					portraitMask.viewHandle = newWeakHandle(self, false);
+				}
 				HOOK_CAST_CALL(void, SetupBoxes)(self, portrait, method);
-				if (portrait) portraitMask.viewHandle = newWeakHandle(self, false);
+				portraitMask.portrait = portrait;
+				liveViewClosing = false;
 			}
 
 			HOOK_ORIG_TYPE ResizeBoxes_orig;
 			void ResizeBoxes_hook(void* self, uint8_t unit, const MethodInfo* method) {
 				if (portraitMask.View() == self) portraitMask.Restore();
 				HOOK_CAST_CALL(void, ResizeBoxes)(self, unit, method);
+			}
+
+			HOOK_ORIG_TYPE TerminateLiveView_orig;
+			void* TerminateLiveView_hook(void* result, void* self, const MethodInfo* method) {
+				if (portraitMask.View() == self) {
+					liveViewClosing = true;
+					ResetFramingSettings();
+					portraitMask.Restore();
+					portraitMask.portrait = false;
+					il2cpp_gchandle_free(std::exchange(portraitMask.viewHandle, nullptr));
+					Log("[mv-framing] reset on leaving live view");
+				}
+				return HOOK_CAST_CALL(void*, TerminateLiveView)(result, self, method);
 			}
 
 			struct CameraAccess {
@@ -9034,6 +9063,7 @@ namespace
 			}
 
 			void ApplyFraming(void* camera, CameraPath source, CameraMode mode) {
+				if (liveViewClosing) return;
 				float yaw = 0, pitch = 0, clockwise = 0, horizontal = 0, vertical = 0, zoom = 0;
 				if (mode == CameraMode::Focus) GetMvFocusFraming(clockwise, horizontal, vertical);
 				if (mode == CameraMode::Fixed) {
@@ -9143,6 +9173,8 @@ namespace
 				const bool resize = hook("PRISM", "LiveInGameView", "<_setUpBox>b__6_0", 1, (void*)ResizeBoxes_hook, ResizeBoxes_orig);
 				const bool boxes = resize && hook("PRISM", "LiveInGameView", "_setUpBox", 1, (void*)SetupBoxes_hook, SetupBoxes_orig);
 				Log(std::format("[focus-framing] portrait masks installed={}", boxes));
+				const bool exit = boxes && hook("PRISM", "LiveInGameView", "_terminateAsync", 0, (void*)TerminateLiveView_hook, TerminateLiveView_orig);
+				Log(std::format("[mv-framing] view exit reset installed={}", exit));
 				constexpr const char* mv = "PRISM.Interactions.MV";
 				modernType = ViewDiag::find_class_anywhere(mv, "MvSceneCamerawork");
 				const bool control = hook("PRISM.Interactions.Live", "LiveMVCameraControlView", "Update", 0, (void*)ControlUpdate_hook, ControlUpdate_orig);
