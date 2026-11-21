@@ -13,6 +13,8 @@ extern CharaParam_t baseParam;
 extern void saveGUIDataCache();
 extern bool MvCenterCloseupsAnyCostume();
 extern void SetMvCenterCloseupsAnyCostume(bool enabled);
+extern void GetMvFocusFraming(float& roll, float& horizontal, float& vertical);
+extern void SetMvFocusFraming(float roll, float horizontal, float vertical);
 
 
 #define INPUT_AND_SLIDER_FLOAT(label, data, min, max) \
@@ -649,6 +651,20 @@ namespace SCGUILoop {
 				ImGui::InputFloat3("Game Camera Pos (x, y, z)", &SCGUIData::sysCamPos.x);
 				ImGui::InputFloat3("Game Camera LookAt (x, y, z)", &SCGUIData::sysCamLookAt.x);
 				ImGui::InputFloat4("Game Camera Rotation (w, x, y, z)", &SCGUIData::sysCamRot.w);
+
+				if (ImGui::CollapsingHeader("Focus framing", ImGuiTreeNodeFlags_DefaultOpen)) {
+					float roll, horizontal, vertical;
+					GetMvFocusFraming(roll, horizontal, vertical);
+					bool changed = ImGui::SliderFloat("Roll (clockwise)", &roll, -180.0f, 180.0f, "%.0f deg");
+					changed |= ImGui::SliderFloat("Pan left / right", &horizontal, -100.0f, 100.0f, "%.0f%%");
+					changed |= ImGui::SliderFloat("Pan down / up", &vertical, -100.0f, 100.0f, "%.0f%%");
+					if (ImGui::Button("90 deg left")) { roll = -90.0f; changed = true; }
+					ImGui::SameLine();
+					if (ImGui::Button("90 deg right")) { roll = 90.0f; changed = true; }
+					ImGui::SameLine();
+					if (ImGui::Button("Reset framing")) { roll = horizontal = vertical = 0; changed = true; }
+					if (changed) SetMvFocusFraming(roll, horizontal, vertical);
+				}
 
 				if (ImGui::CollapsingHeader("Free Camera", ImGuiTreeNodeFlags_DefaultOpen)) {
 					ImGui::Checkbox("Enable Free Camera", &g_enable_free_camera);

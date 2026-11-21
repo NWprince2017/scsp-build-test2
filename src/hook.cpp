@@ -5,6 +5,7 @@
 #include <mutex>
 #include <atomic>
 #include <cmath>
+#include <cstring>
 #include <cstdint>
 #include <cstdlib>
 #include <cstdio>
@@ -31,6 +32,21 @@ bool needPrintStack = false;
 
 namespace {
 	std::atomic_bool mvCenterCloseupsAnyCostume{false};
+	std::atomic<float> mvFocusRoll{0};
+	std::atomic<float> mvFocusHorizontal{0};
+	std::atomic<float> mvFocusVertical{0};
+}
+
+void GetMvFocusFraming(float& roll, float& horizontal, float& vertical) {
+	roll = mvFocusRoll.load(std::memory_order_relaxed);
+	horizontal = mvFocusHorizontal.load(std::memory_order_relaxed);
+	vertical = mvFocusVertical.load(std::memory_order_relaxed);
+}
+
+void SetMvFocusFraming(float roll, float horizontal, float vertical) {
+	mvFocusRoll.store(roll, std::memory_order_relaxed);
+	mvFocusHorizontal.store(horizontal, std::memory_order_relaxed);
+	mvFocusVertical.store(vertical, std::memory_order_relaxed);
 }
 
 bool MvCenterCloseupsAnyCostume() {
@@ -8624,6 +8640,195 @@ namespace
 			return HOOK_CAST_CALL(void*, CasualCostumeChangeBehaviour_CreateViewModel)(self, parameter, ct, method);
 		}
 
+		namespace FocusFraming {
+			// Unity matrices store one column at a time, with x, y, z and w in each column.
+			struct Matrix { float columns[4][4]; };
+			static_assert(sizeof(Matrix) == 64);
+
+			Matrix Reframe(Matrix original, float aspect, float clockwise, float horizontal, float vertical) {
+				constexpr float radiansPerDegree = 0.017453292519943295f;
+				const float cosine = std::cos(clockwise * radiansPerDegree);
+				const float sine = std::sin(clockwise * radiansPerDegree);
+				Matrix result = original;
+				for (int column = 0; column < 4; ++column) {
+					const auto& clip = original.columns[column];
+					result.columns[column][0] = cosine * clip[0] + (sine / aspect) * clip[1] + (horizontal / 50) * clip[3];
+					result.columns[column][1] = -(sine * aspect) * clip[0] + cosine * clip[1] + (vertical / 50) * clip[3];
+				}
+				return result;
+			}
+
+			using WeakHandleNew = void*(*)(void* object, bool trackResurrection);
+			WeakHandleNew newWeakHandle = nullptr;
+			struct CameraOwner {
+				void* handle = nullptr;
+				const MethodInfo* getCamera = nullptr;
+				const MethodInfo* isFocus = nullptr;
+
+				void Register(void* owner) {
+					if (!newWeakHandle || !owner || (handle && il2cpp_gchandle_get_target(handle) == owner)) return;
+					void* klass = KlassOf(owner);
+					if (!klass) return;
+					const auto* cameraMethod = il2cpp_class_get_method_from_name(klass, "get_MainCamera", 0);
+					const auto* focusMethod = il2cpp_class_get_method_from_name(klass, "get_IsFocusMode", 0);
+					if (!cameraMethod || !focusMethod || !cameraMethod->methodPointer || !focusMethod->methodPointer) return;
+					Clear();
+					handle = newWeakHandle(owner, false);
+					getCamera = cameraMethod;
+					isFocus = focusMethod;
+				}
+
+				void Clear() {
+					if (handle) il2cpp_gchandle_free(std::exchange(handle, nullptr));
+				}
+
+				void Unregister(void* owner) {
+					if (handle && il2cpp_gchandle_get_target(handle) == owner) Clear();
+				}
+
+				bool OwnsFocused(void* camera) const {
+					void* owner = handle ? il2cpp_gchandle_get_target(handle) : nullptr;
+					if (!owner || !getCamera || !isFocus) return false;
+					const auto get = reinterpret_cast<void*(*)(void*, const MethodInfo*)>(getCamera->methodPointer);
+					const auto focused = reinterpret_cast<bool(*)(void*, const MethodInfo*)>(isFocus->methodPointer);
+					return get(owner, getCamera) == camera && focused(owner, isFocus);
+				}
+			};
+			CameraOwner modernOwner, legacyOwner;
+
+			const MethodInfo* getProjection = nullptr;
+			const MethodInfo* setProjection = nullptr;
+			const MethodInfo* resetProjection = nullptr;
+			const MethodInfo* getWidth = nullptr;
+			const MethodInfo* getHeight = nullptr;
+
+			bool ReadProjection(void* camera, Matrix& matrix) {
+				auto* boxed = getProjection->Invoke<Il2CppObject*>(static_cast<Il2CppObject*>(camera), {});
+				if (!boxed) return false;
+				matrix = boxed->unbox_value<Matrix>();
+				return true;
+			}
+
+			void WriteProjection(void* camera, Matrix& matrix) {
+				setProjection->InvokeAsVoid(static_cast<Il2CppObject*>(camera), {reinterpret_cast<Il2CppObject*>(&matrix)});
+			}
+
+			int PixelDimension(void* camera, const MethodInfo* method) {
+				return reinterpret_cast<int(*)(void*, const MethodInfo*)>(method->methodPointer)(camera, method);
+			}
+
+			struct RenderProjection {
+				void* camera = nullptr;
+				Matrix original{};
+				Matrix applied{};
+				bool wasCustom = false;
+			};
+			thread_local RenderProjection renderProjection;
+
+			void RestoreProjection(void* camera) {
+				if (!camera || renderProjection.camera != camera) return;
+				RenderProjection frame = std::exchange(renderProjection, RenderProjection{});
+				Matrix current{};
+				if (!ReadProjection(camera, current) || std::memcmp(&current, &frame.applied, sizeof(Matrix)) != 0) return;
+				if (frame.wasCustom) WriteProjection(camera, frame.original);
+				else resetProjection->InvokeAsVoid(static_cast<Il2CppObject*>(camera), {});
+			}
+
+			void ApplyProjection(void* camera) {
+				float clockwise, horizontal, vertical;
+				GetMvFocusFraming(clockwise, horizontal, vertical);
+				if (!camera || (clockwise == 0 && horizontal == 0 && vertical == 0) ||
+					(!modernOwner.OwnsFocused(camera) && !legacyOwner.OwnsFocused(camera))) return;
+
+				const int width = PixelDimension(camera, getWidth);
+				const int height = PixelDimension(camera, getHeight);
+				if (width <= 0 || height <= 0) return;
+
+				RenderProjection frame{};
+				frame.camera = camera;
+				if (!ReadProjection(camera, frame.original)) return;
+				// Restore implicit projection after drawing so native zoom still updates the lens.
+				resetProjection->InvokeAsVoid(static_cast<Il2CppObject*>(camera), {});
+				Matrix implicit{};
+				frame.wasCustom = !ReadProjection(camera, implicit) || std::memcmp(&implicit, &frame.original, sizeof(Matrix)) != 0;
+				frame.applied = Reframe(frame.original, static_cast<float>(width) / height, clockwise, horizontal, vertical);
+				WriteProjection(camera, frame.applied);
+				renderProjection = frame;
+				static bool logged = false;
+				if (!logged) {
+					logged = true;
+					Log(std::format("[focus-framing] applied roll={:.1f} pan=({:.1f},{:.1f}) viewport={}x{}",
+						clockwise, horizontal, vertical, width, height));
+				}
+			}
+
+			HOOK_ORIG_TYPE ModernSetup_orig;
+			void ModernSetup_hook(void* self, bool portrait, const MethodInfo* method) {
+				HOOK_CAST_CALL(void, ModernSetup)(self, portrait, method);
+				modernOwner.Register(self);
+			}
+
+			HOOK_ORIG_TYPE PreCull_orig;
+			HOOK_ORIG_TYPE PostRender_orig;
+			void PreCull_hook(void* camera, const MethodInfo* method) {
+				if (PostRender_orig) RestoreProjection(camera);
+				HOOK_CAST_CALL(void, PreCull)(camera, method);
+				if (PostRender_orig) ApplyProjection(camera);
+			}
+
+			void PostRender_hook(void* camera, const MethodInfo* method) {
+				HOOK_CAST_CALL(void, PostRender)(camera, method);
+				RestoreProjection(camera);
+			}
+
+			HOOK_ORIG_TYPE BeginCameraRendering_orig;
+			HOOK_ORIG_TYPE EndCameraRendering_orig;
+			void BeginCameraRendering_hook(uintptr_t context, void* camera, const MethodInfo* method) {
+				if (EndCameraRendering_orig) RestoreProjection(camera);
+				HOOK_CAST_CALL(void, BeginCameraRendering)(context, camera, method);
+				if (EndCameraRendering_orig) ApplyProjection(camera);
+			}
+			void EndCameraRendering_hook(uintptr_t context, void* camera, const MethodInfo* method) {
+				HOOK_CAST_CALL(void, EndCameraRendering)(context, camera, method);
+				RestoreProjection(camera);
+			}
+
+			void Install() {
+				const auto gameAssembly = GetModuleHandleW(L"GameAssembly.dll");
+				newWeakHandle = gameAssembly ? reinterpret_cast<WeakHandleNew>(GetProcAddress(gameAssembly, "il2cpp_gchandle_new_weakref")) : nullptr;
+				if (!newWeakHandle || !il2cpp_gchandle_get_target || !il2cpp_gchandle_free) {
+					Log("[focus-framing] weak camera references unavailable");
+					return;
+				}
+				const auto camera = ViewDiag::find_class_anywhere("UnityEngine", "Camera");
+				if (!camera) return;
+				getProjection = il2cpp_class_get_method_from_name(camera, "get_projectionMatrix", 0);
+				setProjection = il2cpp_class_get_method_from_name(camera, "set_projectionMatrix", 1);
+				resetProjection = il2cpp_class_get_method_from_name(camera, "ResetProjectionMatrix", 0);
+				getWidth = il2cpp_class_get_method_from_name(camera, "get_pixelWidth", 0);
+				getHeight = il2cpp_class_get_method_from_name(camera, "get_pixelHeight", 0);
+				for (const auto* method : {getProjection, setProjection, resetProjection, getWidth, getHeight})
+					if (!method || !method->methodPointer) return;
+
+				auto hook = [](const char* ns, const char* klass, const char* member, int count,
+					void* replacement, HOOK_ORIG_TYPE& original) {
+					void* target = ViewDiag::find_method_anywhere(ns, klass, member, count);
+					const auto name = std::format("{}.{}", klass, member);
+					return target && HookAt(name.c_str(), target, replacement, original);
+				};
+				const bool builtIn = hook("UnityEngine", "Camera", "FireOnPostRender", 1, (void*)PostRender_hook, PostRender_orig) &&
+					hook("UnityEngine", "Camera", "FireOnPreCull", 1, (void*)PreCull_hook, PreCull_orig);
+				constexpr const char* rendering = "UnityEngine.Rendering";
+				constexpr const char* manager = "RenderPipelineManager";
+				const bool scriptable = hook(rendering, manager, "EndCameraRendering", 2, (void*)EndCameraRendering_hook, EndCameraRendering_orig) &&
+					hook(rendering, manager, "BeginCameraRendering", 2, (void*)BeginCameraRendering_hook, BeginCameraRendering_orig);
+				if (!builtIn && !scriptable) return;
+				void* setup = ViewDiag::find_method_anywhere("PRISM.Interactions.MV", "MvSceneCamerawork", "Setup", 1);
+				const bool modern = setup && HookAt("MvSceneCamerawork.Setup", setup, (void*)ModernSetup_hook, ModernSetup_orig);
+				Log(std::format("[focus-framing] callbacks built-in={} scriptable={} modern={}", builtIn, scriptable, modern));
+			}
+		}
+
 		namespace FocusCamera {
 			constexpr float kExtraZoomStops = 3.0f;
 			constexpr float kRadians = 0.017453292519943295f;
@@ -8845,11 +9050,13 @@ namespace
 			HOOK_ORIG_TYPE LegacyDestroy_orig;
 			void LegacyDestroy_hook(void* self, const MethodInfo* method) {
 				legacyZoom.erase(self);
+				FocusFraming::legacyOwner.Unregister(self);
 				HOOK_CAST_CALL(void, LegacyDestroy)(self, method);
 			}
 
 			HOOK_ORIG_TYPE LegacyApply_orig;
 			void LegacyApply_hook(void* self, float time, const MethodInfo* method) {
+				FocusFraming::legacyOwner.Register(self);
 				struct RestoreExtra { float previous; ~RestoreExtra() { legacyExtra = previous; } } restore{legacyExtra};
 				legacyExtra = 0;
 				const auto found = legacyZoom.find(self);
@@ -10527,6 +10734,7 @@ namespace
 
 		void Install() {
 			InstallOutfitHooks();
+			FocusFraming::Install();
 			FocusCamera::Install();
 			const char* e1 = getenv("SCSP_SOLO_UNLOCK");
 			if (e1 && *e1 == '0') {
