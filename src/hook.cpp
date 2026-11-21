@@ -8663,41 +8663,51 @@ namespace
 
 			using WeakHandleNew = void*(*)(void* object, bool trackResurrection);
 			WeakHandleNew newWeakHandle = nullptr;
-			struct CameraOwner {
-				void* handle = nullptr;
-				const MethodInfo* getCamera = nullptr;
-				const MethodInfo* isFocus = nullptr;
+			bool ready = false;
 
-				void Register(void* owner) {
-					if (!newWeakHandle || !owner || (handle && il2cpp_gchandle_get_target(handle) == owner)) return;
+			struct CameraAccess {
+				const MethodInfo* getCamera;
+				const MethodInfo* isFocus;
+
+				static CameraAccess Resolve(void* owner) {
 					void* klass = KlassOf(owner);
-					if (!klass) return;
-					const auto* cameraMethod = il2cpp_class_get_method_from_name(klass, "get_MainCamera", 0);
-					const auto* focusMethod = il2cpp_class_get_method_from_name(klass, "get_IsFocusMode", 0);
-					if (!cameraMethod || !focusMethod || !cameraMethod->methodPointer || !focusMethod->methodPointer) return;
-					Clear();
-					handle = newWeakHandle(owner, false);
-					getCamera = cameraMethod;
-					isFocus = focusMethod;
+					if (!klass) return {};
+					return {il2cpp_class_get_method_from_name(klass, "get_MainCamera", 0),
+						il2cpp_class_get_method_from_name(klass, "get_IsFocusMode", 0)};
 				}
 
-				void Clear() {
-					if (handle) il2cpp_gchandle_free(std::exchange(handle, nullptr));
+				void* MainCamera(void* owner) const {
+					if (!owner || !getCamera || !getCamera->methodPointer) return nullptr;
+					return reinterpret_cast<void*(*)(void*, const MethodInfo*)>(getCamera->methodPointer)(owner, getCamera);
 				}
 
-				void Unregister(void* owner) {
-					if (handle && il2cpp_gchandle_get_target(handle) == owner) Clear();
-				}
-
-				bool OwnsFocused(void* camera) const {
-					void* owner = handle ? il2cpp_gchandle_get_target(handle) : nullptr;
-					if (!owner || !getCamera || !isFocus) return false;
-					const auto get = reinterpret_cast<void*(*)(void*, const MethodInfo*)>(getCamera->methodPointer);
-					const auto focused = reinterpret_cast<bool(*)(void*, const MethodInfo*)>(isFocus->methodPointer);
-					return get(owner, getCamera) == camera && focused(owner, isFocus);
+				bool IsFocused(void* owner) const {
+					return owner && isFocus && isFocus->methodPointer &&
+						reinterpret_cast<bool(*)(void*, const MethodInfo*)>(isFocus->methodPointer)(owner, isFocus);
 				}
 			};
-			CameraOwner modernOwner, legacyOwner;
+
+			struct CameraOwner {
+				void* handle = nullptr;
+				CameraAccess access{};
+
+				void Register(void* owner) {
+					if (!newWeakHandle || !owner || Target() == owner) return;
+					const auto methods = CameraAccess::Resolve(owner);
+					if (!methods.getCamera || !methods.isFocus) return;
+					if (handle) il2cpp_gchandle_free(handle);
+					handle = newWeakHandle(owner, false);
+					access = methods;
+				}
+
+				void* Target() const {
+					return handle ? il2cpp_gchandle_get_target(handle) : nullptr;
+				}
+			};
+			CameraOwner modernOwner;
+			CameraAccess legacyCamera;
+			void* modernType = nullptr;
+			const MethodInfo* getOutputCamera = nullptr;
 
 			const MethodInfo* getProjection = nullptr;
 			const MethodInfo* setProjection = nullptr;
@@ -8737,11 +8747,10 @@ namespace
 				else resetProjection->InvokeAsVoid(static_cast<Il2CppObject*>(camera), {});
 			}
 
-			void ApplyProjection(void* camera) {
+			void ApplyProjection(void* camera, const char* source, bool& logged) {
 				float clockwise, horizontal, vertical;
 				GetMvFocusFraming(clockwise, horizontal, vertical);
-				if (!camera || (clockwise == 0 && horizontal == 0 && vertical == 0) ||
-					(!modernOwner.OwnsFocused(camera) && !legacyOwner.OwnsFocused(camera))) return;
+				if (!ready || !camera || (clockwise == 0 && horizontal == 0 && vertical == 0)) return;
 
 				const int width = PixelDimension(camera, getWidth);
 				const int height = PixelDimension(camera, getHeight);
@@ -8750,19 +8759,31 @@ namespace
 				RenderProjection frame{};
 				frame.camera = camera;
 				if (!ReadProjection(camera, frame.original)) return;
-				// Restore implicit projection after drawing so native zoom still updates the lens.
+				// Remember whether the native lens used an implicit or custom projection.
 				resetProjection->InvokeAsVoid(static_cast<Il2CppObject*>(camera), {});
 				Matrix implicit{};
 				frame.wasCustom = !ReadProjection(camera, implicit) || std::memcmp(&implicit, &frame.original, sizeof(Matrix)) != 0;
 				frame.applied = Reframe(frame.original, static_cast<float>(width) / height, clockwise, horizontal, vertical);
 				WriteProjection(camera, frame.applied);
 				renderProjection = frame;
-				static bool logged = false;
 				if (!logged) {
 					logged = true;
-					Log(std::format("[focus-framing] applied roll={:.1f} pan=({:.1f},{:.1f}) viewport={}x{}",
-						clockwise, horizontal, vertical, width, height));
+					Matrix written{};
+					const bool verified = ReadProjection(camera, written) && std::memcmp(&written, &frame.applied, sizeof(Matrix)) == 0;
+					Log(std::format("[focus-framing] applied path={} verified={} roll={:.1f} pan=({:.1f},{:.1f}) viewport={}x{}",
+						source, verified, clockwise, horizontal, vertical, width, height));
 				}
+			}
+
+			void* LegacyOutput(void* self) {
+				if (!ready) return nullptr;
+				if (!legacyCamera.getCamera) legacyCamera = CameraAccess::Resolve(self);
+				return legacyCamera.MainCamera(self);
+			}
+
+			void ApplyLegacy(void* self, void* camera) {
+				static bool logged = false;
+				if (camera && legacyCamera.IsFocused(self)) ApplyProjection(camera, "legacy", logged);
 			}
 
 			HOOK_ORIG_TYPE ModernSetup_orig;
@@ -8771,38 +8792,29 @@ namespace
 				modernOwner.Register(self);
 			}
 
-			HOOK_ORIG_TYPE PreCull_orig;
-			HOOK_ORIG_TYPE PostRender_orig;
-			void PreCull_hook(void* camera, const MethodInfo* method) {
-				if (PostRender_orig) RestoreProjection(camera);
-				HOOK_CAST_CALL(void, PreCull)(camera, method);
-				if (PostRender_orig) ApplyProjection(camera);
+			HOOK_ORIG_TYPE ControlUpdate_orig;
+			void ControlUpdate_hook(void* self, const MethodInfo* method) {
+				HOOK_CAST_CALL(void, ControlUpdate)(self, method);
+				void* owner = RunwayDump::ReadPtr(self, "camerawork");
+				if (owner && KlassOf(owner) == modernType) modernOwner.Register(owner);
 			}
 
-			void PostRender_hook(void* camera, const MethodInfo* method) {
-				HOOK_CAST_CALL(void, PostRender)(camera, method);
+			HOOK_ORIG_TYPE BrainPush_orig;
+			void BrainPush_hook(void* self, void* state, const MethodInfo* method) {
+				const auto get = reinterpret_cast<void*(*)(void*, const MethodInfo*)>(getOutputCamera->methodPointer);
+				void* camera = get(self, getOutputCamera);
 				RestoreProjection(camera);
-			}
-
-			HOOK_ORIG_TYPE BeginCameraRendering_orig;
-			HOOK_ORIG_TYPE EndCameraRendering_orig;
-			void BeginCameraRendering_hook(uintptr_t context, void* camera, const MethodInfo* method) {
-				if (EndCameraRendering_orig) RestoreProjection(camera);
-				HOOK_CAST_CALL(void, BeginCameraRendering)(context, camera, method);
-				if (EndCameraRendering_orig) ApplyProjection(camera);
-			}
-			void EndCameraRendering_hook(uintptr_t context, void* camera, const MethodInfo* method) {
-				HOOK_CAST_CALL(void, EndCameraRendering)(context, camera, method);
-				RestoreProjection(camera);
+				HOOK_CAST_CALL(void, BrainPush)(self, state, method);
+				void* owner = modernOwner.Target();
+				if (camera && modernOwner.access.MainCamera(owner) == camera && modernOwner.access.IsFocused(owner)) {
+					static bool logged = false;
+					ApplyProjection(camera, "cinemachine", logged);
+				}
 			}
 
 			void Install() {
 				const auto gameAssembly = GetModuleHandleW(L"GameAssembly.dll");
 				newWeakHandle = gameAssembly ? reinterpret_cast<WeakHandleNew>(GetProcAddress(gameAssembly, "il2cpp_gchandle_new_weakref")) : nullptr;
-				if (!newWeakHandle || !il2cpp_gchandle_get_target || !il2cpp_gchandle_free) {
-					Log("[focus-framing] weak camera references unavailable");
-					return;
-				}
 				const auto camera = ViewDiag::find_class_anywhere("UnityEngine", "Camera");
 				if (!camera) return;
 				getProjection = il2cpp_class_get_method_from_name(camera, "get_projectionMatrix", 0);
@@ -8812,6 +8824,11 @@ namespace
 				getHeight = il2cpp_class_get_method_from_name(camera, "get_pixelHeight", 0);
 				for (const auto* method : {getProjection, setProjection, resetProjection, getWidth, getHeight})
 					if (!method || !method->methodPointer) return;
+				ready = true;
+				if (!newWeakHandle || !il2cpp_gchandle_get_target || !il2cpp_gchandle_free) {
+					Log("[focus-framing] weak camera references unavailable");
+					return;
+				}
 
 				auto hook = [](const char* ns, const char* klass, const char* member, int count,
 					void* replacement, HOOK_ORIG_TYPE& original) {
@@ -8819,16 +8836,17 @@ namespace
 					const auto name = std::format("{}.{}", klass, member);
 					return target && HookAt(name.c_str(), target, replacement, original);
 				};
-				const bool builtIn = hook("UnityEngine", "Camera", "FireOnPostRender", 1, (void*)PostRender_hook, PostRender_orig) &&
-					hook("UnityEngine", "Camera", "FireOnPreCull", 1, (void*)PreCull_hook, PreCull_orig);
-				constexpr const char* rendering = "UnityEngine.Rendering";
-				constexpr const char* manager = "RenderPipelineManager";
-				const bool scriptable = hook(rendering, manager, "EndCameraRendering", 2, (void*)EndCameraRendering_hook, EndCameraRendering_orig) &&
-					hook(rendering, manager, "BeginCameraRendering", 2, (void*)BeginCameraRendering_hook, BeginCameraRendering_orig);
-				if (!builtIn && !scriptable) return;
-				void* setup = ViewDiag::find_method_anywhere("PRISM.Interactions.MV", "MvSceneCamerawork", "Setup", 1);
-				const bool modern = setup && HookAt("MvSceneCamerawork.Setup", setup, (void*)ModernSetup_hook, ModernSetup_orig);
-				Log(std::format("[focus-framing] callbacks built-in={} scriptable={} modern={}", builtIn, scriptable, modern));
+				const auto brain = ViewDiag::find_class_anywhere("Cinemachine", "CinemachineBrain");
+				if (!brain) return;
+				getOutputCamera = il2cpp_class_get_method_from_name(brain, "get_OutputCamera", 0);
+				if (!getOutputCamera || !getOutputCamera->methodPointer) return;
+				const bool output = hook("Cinemachine", "CinemachineBrain", "PushStateToUnityCamera", 1, (void*)BrainPush_hook, BrainPush_orig);
+				if (!output) return;
+				constexpr const char* mv = "PRISM.Interactions.MV";
+				modernType = ViewDiag::find_class_anywhere(mv, "MvSceneCamerawork");
+				const bool setup = hook(mv, "MvSceneCamerawork", "Setup", 1, (void*)ModernSetup_hook, ModernSetup_orig);
+				const bool control = hook("PRISM.Interactions.Live", "LiveMVCameraControlView", "Update", 0, (void*)ControlUpdate_hook, ControlUpdate_orig);
+				Log(std::format("[focus-framing] output camera hooks cinemachine={} setup={} controls={}", output, setup, control));
 			}
 		}
 
@@ -9053,13 +9071,14 @@ namespace
 			HOOK_ORIG_TYPE LegacyDestroy_orig;
 			void LegacyDestroy_hook(void* self, const MethodInfo* method) {
 				legacyZoom.erase(self);
-				FocusFraming::legacyOwner.Unregister(self);
+				FocusFraming::RestoreProjection(FocusFraming::LegacyOutput(self));
 				HOOK_CAST_CALL(void, LegacyDestroy)(self, method);
 			}
 
 			HOOK_ORIG_TYPE LegacyApply_orig;
 			void LegacyApply_hook(void* self, float time, const MethodInfo* method) {
-				FocusFraming::legacyOwner.Register(self);
+				void* camera = FocusFraming::LegacyOutput(self);
+				FocusFraming::RestoreProjection(camera);
 				struct RestoreExtra { float previous; ~RestoreExtra() { legacyExtra = previous; } } restore{legacyExtra};
 				legacyExtra = 0;
 				const auto found = legacyZoom.find(self);
@@ -9068,6 +9087,7 @@ namespace
 					if (rate && *rate == found->second.native) legacyExtra = found->second.raw - found->second.native;
 				}
 				HOOK_CAST_CALL(void, LegacyApply)(self, time, method);
+				FocusFraming::ApplyLegacy(self, camera);
 			}
 
 			HOOK_ORIG_TYPE LegacyApplyPattern_orig;
