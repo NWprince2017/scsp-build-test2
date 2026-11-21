@@ -44,9 +44,12 @@ void GetMvFocusFraming(float& roll, float& horizontal, float& vertical) {
 }
 
 void SetMvFocusFraming(float roll, float horizontal, float vertical) {
-	mvFocusRoll.store(roll, std::memory_order_relaxed);
-	mvFocusHorizontal.store(horizontal, std::memory_order_relaxed);
-	mvFocusVertical.store(vertical, std::memory_order_relaxed);
+	const auto bounded = [](float value, float maximum) {
+		return std::isfinite(value) ? std::clamp(value, -maximum, maximum) : 0.0f;
+	};
+	mvFocusRoll.store(bounded(roll, 180.0f), std::memory_order_relaxed);
+	mvFocusHorizontal.store(bounded(horizontal, 100.0f), std::memory_order_relaxed);
+	mvFocusVertical.store(bounded(vertical, 100.0f), std::memory_order_relaxed);
 }
 
 bool MvCenterCloseupsAnyCostume() {
