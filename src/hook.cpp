@@ -35,6 +35,16 @@ namespace {
 	std::atomic<float> mvFocusRoll{0};
 	std::atomic<float> mvFocusHorizontal{0};
 	std::atomic<float> mvFocusVertical{0};
+	std::atomic<float> mvFixedYaw{0};
+	std::atomic<float> mvFixedPitch{0};
+	std::atomic<float> mvFixedRoll{0};
+	std::atomic<float> mvFixedHorizontal{0};
+	std::atomic<float> mvFixedVertical{0};
+	std::atomic<float> mvFixedZoom{0};
+
+	float BoundFraming(float value, float maximum) {
+		return std::isfinite(value) ? std::clamp(value, -maximum, maximum) : 0.0f;
+	}
 }
 
 void GetMvFocusFraming(float& roll, float& horizontal, float& vertical) {
@@ -44,12 +54,27 @@ void GetMvFocusFraming(float& roll, float& horizontal, float& vertical) {
 }
 
 void SetMvFocusFraming(float roll, float horizontal, float vertical) {
-	const auto bounded = [](float value, float maximum) {
-		return std::isfinite(value) ? std::clamp(value, -maximum, maximum) : 0.0f;
-	};
-	mvFocusRoll.store(bounded(roll, 180.0f), std::memory_order_relaxed);
-	mvFocusHorizontal.store(bounded(horizontal, 3.0f), std::memory_order_relaxed);
-	mvFocusVertical.store(bounded(vertical, 3.0f), std::memory_order_relaxed);
+	mvFocusRoll.store(BoundFraming(roll, 180.0f), std::memory_order_relaxed);
+	mvFocusHorizontal.store(BoundFraming(horizontal, 3.0f), std::memory_order_relaxed);
+	mvFocusVertical.store(BoundFraming(vertical, 3.0f), std::memory_order_relaxed);
+}
+
+void GetMvFixedFraming(float& yaw, float& pitch, float& roll, float& horizontal, float& vertical, float& zoom) {
+	yaw = mvFixedYaw.load(std::memory_order_relaxed);
+	pitch = mvFixedPitch.load(std::memory_order_relaxed);
+	roll = mvFixedRoll.load(std::memory_order_relaxed);
+	horizontal = mvFixedHorizontal.load(std::memory_order_relaxed);
+	vertical = mvFixedVertical.load(std::memory_order_relaxed);
+	zoom = mvFixedZoom.load(std::memory_order_relaxed);
+}
+
+void SetMvFixedFraming(float yaw, float pitch, float roll, float horizontal, float vertical, float zoom) {
+	mvFixedYaw.store(BoundFraming(yaw, 180.0f), std::memory_order_relaxed);
+	mvFixedPitch.store(BoundFraming(pitch, 90.0f), std::memory_order_relaxed);
+	mvFixedRoll.store(BoundFraming(roll, 180.0f), std::memory_order_relaxed);
+	mvFixedHorizontal.store(BoundFraming(horizontal, 3.0f), std::memory_order_relaxed);
+	mvFixedVertical.store(BoundFraming(vertical, 3.0f), std::memory_order_relaxed);
+	mvFixedZoom.store(BoundFraming(zoom, 3.0f), std::memory_order_relaxed);
 }
 
 bool MvCenterCloseupsAnyCostume() {
@@ -8650,7 +8675,7 @@ namespace
 
 			constexpr float radiansPerDegree = 0.017453292519943295f;
 
-			Matrix RollProjection(Matrix original, float aspect, float clockwise, float scale) {
+			Matrix AdjustProjection(Matrix original, float aspect, float clockwise, float scale) {
 				const float cosine = std::cos(clockwise * radiansPerDegree);
 				const float sine = std::sin(clockwise * radiansPerDegree);
 				Matrix result = original;
@@ -8680,6 +8705,7 @@ namespace
 			}
 
 			enum class CameraPath { Legacy, Cinemachine };
+			enum class CameraMode { Normal = 0, Focus = 1, Fixed = 2 };
 
 			struct BarLayout {
 				Vector2_t minAnchor, maxAnchor, minOffset, maxOffset;
@@ -8763,13 +8789,13 @@ namespace
 
 			struct CameraAccess {
 				const MethodInfo* getCamera;
-				const MethodInfo* isFocus;
+				const MethodInfo* getMode;
 
 				static CameraAccess Resolve(void* owner) {
 					void* klass = KlassOf(owner);
 					if (!klass) return {};
 					return {il2cpp_class_get_method_from_name(klass, "get_MainCamera", 0),
-						il2cpp_class_get_method_from_name(klass, "get_IsFocusMode", 0)};
+						il2cpp_class_get_method_from_name(klass, "get_Mode", 0)};
 				}
 
 				void* MainCamera(void* owner) const {
@@ -8777,9 +8803,10 @@ namespace
 					return reinterpret_cast<void*(*)(void*, const MethodInfo*)>(getCamera->methodPointer)(owner, getCamera);
 				}
 
-				bool IsFocused(void* owner) const {
-					return owner && isFocus && isFocus->methodPointer &&
-						reinterpret_cast<bool(*)(void*, const MethodInfo*)>(isFocus->methodPointer)(owner, isFocus);
+				CameraMode Mode(void* owner) const {
+					if (!owner || !getMode || !getMode->methodPointer) return CameraMode::Normal;
+					const auto get = reinterpret_cast<int(*)(void*, const MethodInfo*)>(getMode->methodPointer);
+					return static_cast<CameraMode>(get(owner, getMode));
 				}
 			};
 
@@ -8790,7 +8817,7 @@ namespace
 				void Register(void* owner) {
 					if (!newWeakHandle || !owner || Target() == owner) return;
 					const auto methods = CameraAccess::Resolve(owner);
-					if (!methods.getCamera || !methods.isFocus) return;
+					if (!methods.getCamera || !methods.getMode) return;
 					if (handle) il2cpp_gchandle_free(handle);
 					handle = newWeakHandle(owner, false);
 					access = methods;
@@ -8830,9 +8857,13 @@ namespace
 				void* transform = nullptr;
 				Vector3_t originalPosition{};
 				Vector3_t appliedPosition{};
+				Quaternion_t originalRotation{};
+				Quaternion_t appliedRotation{};
 				Matrix originalProjection{};
 				Matrix appliedProjection{};
-				bool hasRoll = false;
+				bool moved = false;
+				bool turned = false;
+				bool projectionChanged = false;
 				bool wasCustom = false;
 			};
 			thread_local RenderFrame renderFrame;
@@ -8840,46 +8871,79 @@ namespace
 			void RestoreFraming(void* camera) {
 				if (!camera || renderFrame.camera != camera) return;
 				RenderFrame frame = std::exchange(renderFrame, RenderFrame{});
-				if (frame.transform) {
+				if (frame.moved) {
 					Vector3_t current{};
-					if (ReadValue(frame.transform, "get_position", current) &&
+					if (ReadValue(frame.transform, "get_localPosition", current) &&
 						std::memcmp(&current, &frame.appliedPosition, sizeof(current)) == 0)
-						WriteValue(frame.transform, "set_position", frame.originalPosition);
+						WriteValue(frame.transform, "set_localPosition", frame.originalPosition);
 				}
-				if (!frame.hasRoll) return;
+				if (frame.turned) {
+					Quaternion_t current{};
+					if (ReadValue(frame.transform, "get_localRotation", current) &&
+						std::memcmp(&current, &frame.appliedRotation, sizeof(current)) == 0)
+						WriteValue(frame.transform, "set_localRotation", frame.originalRotation);
+				}
+				if (!frame.projectionChanged) return;
 				Matrix current{};
 				if (!ReadProjection(camera, current) || std::memcmp(&current, &frame.appliedProjection, sizeof(Matrix)) != 0) return;
 				if (frame.wasCustom) WriteProjection(camera, frame.originalProjection);
 				else resetProjection->InvokeAsVoid(static_cast<Il2CppObject*>(camera), {});
 			}
 
+			void Turn(RenderFrame& frame, float yaw, float pitch) {
+				if (!ReadValue(frame.transform, "get_localRotation", frame.originalRotation)) return;
+				const float y = yaw * radiansPerDegree / 2;
+				const float p = -pitch * radiansPerDegree / 2;
+				const float cy = std::cos(y), sy = std::sin(y), cp = std::cos(p), sp = std::sin(p);
+				const Quaternion_t offset{cy * sp, sy * cp, -sy * sp, cy * cp};
+				const auto& r = frame.originalRotation;
+				const Quaternion_t rotation{
+					r.w * offset.x + r.x * offset.w + r.y * offset.z - r.z * offset.y,
+					r.w * offset.y - r.x * offset.z + r.y * offset.w + r.z * offset.x,
+					r.w * offset.z + r.x * offset.y - r.y * offset.x + r.z * offset.w,
+					r.w * offset.w - r.x * offset.x - r.y * offset.y - r.z * offset.z};
+				WriteValue(frame.transform, "set_localRotation", rotation);
+				frame.turned = ReadValue(frame.transform, "get_localRotation", frame.appliedRotation);
+			}
+
 			void Translate(RenderFrame& frame, float clockwise, float horizontal, float vertical) {
-				void* transform = OutfitCall(frame.camera, "get_transform");
-				Vector3_t right{}, up{};
-				if (!ReadValue(transform, "get_position", frame.originalPosition) ||
+				void* transform = frame.transform;
+				Vector3_t position{}, right{}, up{};
+				if (!ReadValue(transform, "get_localPosition", frame.originalPosition) ||
+					!ReadValue(transform, "get_position", position) ||
 					!ReadValue(transform, "get_right", right) || !ReadValue(transform, "get_up", up)) return;
 				const float cosine = std::cos(clockwise * radiansPerDegree);
 				const float sine = std::sin(clockwise * radiansPerDegree);
 				const float x = horizontal * cosine - vertical * sine;
 				const float y = horizontal * sine + vertical * cosine;
-				const auto& original = frame.originalPosition;
-				frame.appliedPosition = {original.x + x * right.x + y * up.x,
-					original.y + x * right.y + y * up.y, original.z + x * right.z + y * up.z};
-				WriteValue(transform, "set_position", frame.appliedPosition);
-				frame.transform = transform;
+				const Vector3_t translated{position.x + x * right.x + y * up.x,
+					position.y + x * right.y + y * up.y, position.z + x * right.z + y * up.z};
+				WriteValue(transform, "set_position", translated);
+				frame.moved = ReadValue(transform, "get_localPosition", frame.appliedPosition);
 			}
 
-			void ApplyFraming(void* camera, CameraPath source) {
-				float clockwise, horizontal, vertical;
-				GetMvFocusFraming(clockwise, horizontal, vertical);
+			void ApplyFraming(void* camera, CameraPath source, CameraMode mode) {
+				float yaw = 0, pitch = 0, clockwise = 0, horizontal = 0, vertical = 0, zoom = 0;
+				if (mode == CameraMode::Focus) GetMvFocusFraming(clockwise, horizontal, vertical);
+				if (mode == CameraMode::Fixed) GetMvFixedFraming(yaw, pitch, clockwise, horizontal, vertical, zoom);
 				const bool quarterTurn = camera && std::abs(std::abs(clockwise) - 90.0f) < 0.01f;
 				if (!quarterTurn && portraitMask.applied && portraitMask.path == source) portraitMask.Restore();
-				if (!ready || !camera || (clockwise == 0 && horizontal == 0 && vertical == 0)) return;
+				const bool turn = yaw != 0 || pitch != 0;
+				const bool translate = horizontal != 0 || vertical != 0;
+				const bool adjustProjection = clockwise != 0 || zoom != 0;
+				if (!ready || !camera || (!turn && !translate && !adjustProjection)) return;
 
 				RenderFrame frame{};
 				frame.camera = camera;
-				if (horizontal != 0 || vertical != 0) Translate(frame, clockwise, horizontal, vertical);
-				if (clockwise != 0) {
+				static unsigned fixedFrames[2]{};
+				unsigned& fixedFrame = fixedFrames[static_cast<int>(source)];
+				const bool sample = mode == CameraMode::Fixed && fixedFrame < 300 && (++fixedFrame == 1 || fixedFrame == 120 || fixedFrame == 300);
+				Vector3_t nativePosition{};
+				if (turn || translate || sample) frame.transform = OutfitCall(camera, "get_transform");
+				if (sample) ReadValue(frame.transform, "get_position", nativePosition);
+				if (turn) Turn(frame, yaw, pitch);
+				if (translate) Translate(frame, clockwise, horizontal, vertical);
+				if (adjustProjection) {
 					const int width = PixelDimension(camera, getWidth);
 					const int height = PixelDimension(camera, getHeight);
 					if (width > 0 && height > 0 && ReadProjection(camera, frame.originalProjection)) {
@@ -8890,21 +8954,19 @@ namespace
 						Matrix implicit{};
 						frame.wasCustom = !ReadProjection(camera, implicit) ||
 							std::memcmp(&implicit, &frame.originalProjection, sizeof(Matrix)) != 0;
-						frame.appliedProjection = RollProjection(frame.originalProjection, aspect, clockwise, scale);
+						frame.appliedProjection = AdjustProjection(frame.originalProjection, aspect, clockwise, scale * std::exp2(zoom));
 						WriteProjection(camera, frame.appliedProjection);
-						frame.hasRoll = true;
+						frame.projectionChanged = true;
 					}
 				}
-				if (frame.hasRoll || frame.transform) renderFrame = frame;
-				static bool loggedTranslation[2]{};
-				bool& logged = loggedTranslation[static_cast<int>(source)];
-				if (frame.transform && !logged) {
-					logged = true;
-					Vector3_t written{};
-					const bool verified = ReadValue(frame.transform, "get_position", written) &&
-						std::memcmp(&written, &frame.appliedPosition, sizeof(written)) == 0;
-					Log(std::format("[focus-framing] moved camera path={} verified={} position=({:.2f},{:.2f},{:.2f})",
-						source == CameraPath::Legacy ? "legacy" : "cinemachine", verified, written.x, written.y, written.z));
+				if (frame.projectionChanged || frame.turned || frame.moved) renderFrame = frame;
+				if (sample) {
+					Matrix written{};
+					const bool projectionApplied = frame.projectionChanged && ReadProjection(camera, written) &&
+						std::memcmp(&written, &frame.appliedProjection, sizeof(written)) == 0;
+					Log(std::format("[fixed-framing] path={} frame={} native=({:.3f},{:.3f},{:.3f}) moved={} turned={} projection={}",
+						source == CameraPath::Legacy ? "legacy" : "cinemachine", fixedFrame,
+						nativePosition.x, nativePosition.y, nativePosition.z, frame.moved, frame.turned, projectionApplied));
 				}
 			}
 
@@ -8912,8 +8974,8 @@ namespace
 				if (renderFrame.camera) RestoreFraming(RunwayDump::ReadPtr(self, "cameraCache"));
 			}
 
-			void ApplyLegacy(void* camera) {
-				ApplyFraming(camera, CameraPath::Legacy);
+			void ApplyLegacy(void* camera, CameraMode mode) {
+				ApplyFraming(camera, CameraPath::Legacy, mode);
 			}
 
 			HOOK_ORIG_TYPE ModernSetup_orig;
@@ -8937,7 +8999,7 @@ namespace
 				HOOK_CAST_CALL(void, BrainPush)(self, state, method);
 				void* owner = modernOwner.Target();
 				if (camera && modernOwner.access.MainCamera(owner) == camera)
-					ApplyFraming(modernOwner.access.IsFocused(owner) ? camera : nullptr, CameraPath::Cinemachine);
+					ApplyFraming(camera, CameraPath::Cinemachine, modernOwner.access.Mode(owner));
 			}
 
 			void Install() {
@@ -9140,11 +9202,11 @@ namespace
 				if (modernZoom.contains(self) && ModernApplyZoom_orig) ModernApplyZoom_hook(self, nullptr);
 			}
 
-			constexpr int kLegacyFocus = 1;
 			constexpr int kInputHandled = 2;
 			struct LegacyFrame {
 				float extraZoom = 0;
-				void* focusCamera = nullptr;
+				void* outputCamera = nullptr;
+				FocusFraming::CameraMode mode = FocusFraming::CameraMode::Normal;
 			};
 			thread_local LegacyFrame* legacyFrame = nullptr;
 
@@ -9222,14 +9284,16 @@ namespace
 					if (rate && *rate == found->second.native) frame.extraZoom = found->second.raw - found->second.native;
 				}
 				HOOK_CAST_CALL(void, LegacyApply)(self, time, method);
-				FocusFraming::ApplyLegacy(frame.focusCamera);
+				FocusFraming::ApplyLegacy(frame.outputCamera, frame.mode);
 			}
 
 			HOOK_ORIG_TYPE LegacyApplyPattern_orig;
 			void LegacyApplyPattern_hook(void* self, void* camera, float time, float zoom, const MethodInfo* method) {
 				HOOK_CAST_CALL(void, LegacyApplyPattern)(self, camera, time, zoom, method);
-				if (!legacyFrame || !camera || RunwayDump::ReadInt(self, "Mode") != kLegacyFocus) return;
-				legacyFrame->focusCamera = camera;
+				if (!legacyFrame || !camera) return;
+				legacyFrame->outputCamera = camera;
+				legacyFrame->mode = static_cast<FocusFraming::CameraMode>(RunwayDump::ReadInt(self, "Mode"));
+				if (legacyFrame->mode != FocusFraming::CameraMode::Focus) return;
 				if (legacyFrame->extraZoom == 0 || g_enable_free_camera) return;
 				static const auto* get = il2cpp_class_get_method_from_name(KlassOf(camera), "get_fieldOfView", 0);
 				static const auto* set = il2cpp_class_get_method_from_name(KlassOf(camera), "set_fieldOfView", 1);

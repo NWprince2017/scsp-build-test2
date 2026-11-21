@@ -15,6 +15,8 @@ extern bool MvCenterCloseupsAnyCostume();
 extern void SetMvCenterCloseupsAnyCostume(bool enabled);
 extern void GetMvFocusFraming(float& roll, float& horizontal, float& vertical);
 extern void SetMvFocusFraming(float roll, float horizontal, float vertical);
+extern void GetMvFixedFraming(float& yaw, float& pitch, float& roll, float& horizontal, float& vertical, float& zoom);
+extern void SetMvFixedFraming(float yaw, float pitch, float roll, float horizontal, float vertical, float zoom);
 
 
 #define INPUT_AND_SLIDER_FLOAT(label, data, min, max) \
@@ -652,18 +654,37 @@ namespace SCGUILoop {
 				ImGui::InputFloat3("Game Camera LookAt (x, y, z)", &SCGUIData::sysCamLookAt.x);
 				ImGui::InputFloat4("Game Camera Rotation (w, x, y, z)", &SCGUIData::sysCamRot.w);
 
-				if (ImGui::CollapsingHeader("Focus framing", ImGuiTreeNodeFlags_DefaultOpen)) {
+				const auto framingControls = [](bool fixed) {
+					float yaw = 0, pitch = 0, zoom = 0;
 					float roll, horizontal, vertical;
-					GetMvFocusFraming(roll, horizontal, vertical);
-					bool changed = ImGui::SliderFloat("Roll (clockwise)", &roll, -180.0f, 180.0f, "%.0f deg");
+					bool changed = false;
+					if (fixed) {
+						GetMvFixedFraming(yaw, pitch, roll, horizontal, vertical, zoom);
+						changed |= ImGui::SliderFloat("Zoom", &zoom, -3.0f, 3.0f, "%+.2f stops");
+						changed |= ImGui::SliderFloat("Turn left / right", &yaw, -180.0f, 180.0f, "%.0f deg");
+						changed |= ImGui::SliderFloat("Look down / up", &pitch, -90.0f, 90.0f, "%.0f deg");
+					} else {
+						GetMvFocusFraming(roll, horizontal, vertical);
+					}
+					changed |= ImGui::SliderFloat("Roll (clockwise)", &roll, -180.0f, 180.0f, "%.0f deg");
 					changed |= ImGui::SliderFloat("Move camera left / right", &horizontal, -3.0f, 3.0f, "%.2f");
 					changed |= ImGui::SliderFloat("Move camera down / up", &vertical, -3.0f, 3.0f, "%.2f");
 					if (ImGui::Button("90 deg left")) { roll = -90.0f; changed = true; }
 					ImGui::SameLine();
 					if (ImGui::Button("90 deg right")) { roll = 90.0f; changed = true; }
 					ImGui::SameLine();
-					if (ImGui::Button("Reset framing")) { roll = horizontal = vertical = 0; changed = true; }
-					if (changed) SetMvFocusFraming(roll, horizontal, vertical);
+					if (ImGui::Button("Reset framing")) { yaw = pitch = zoom = roll = horizontal = vertical = 0; changed = true; }
+					if (!changed) return;
+					if (fixed) SetMvFixedFraming(yaw, pitch, roll, horizontal, vertical, zoom);
+					else SetMvFocusFraming(roll, horizontal, vertical);
+				};
+				if (ImGui::CollapsingHeader("Focus framing", ImGuiTreeNodeFlags_DefaultOpen)) {
+					framingControls(false);
+				}
+				if (ImGui::CollapsingHeader("Fixed framing")) {
+					ImGui::PushID("Fixed framing");
+					framingControls(true);
+					ImGui::PopID();
 				}
 
 				if (ImGui::CollapsingHeader("Free Camera", ImGuiTreeNodeFlags_DefaultOpen)) {
