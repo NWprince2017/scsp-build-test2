@@ -8705,7 +8705,6 @@ namespace
 				}
 			};
 			CameraOwner modernOwner;
-			CameraAccess legacyCamera;
 			void* modernType = nullptr;
 			const MethodInfo* getOutputCamera = nullptr;
 
@@ -8775,15 +8774,15 @@ namespace
 				}
 			}
 
-			void* LegacyOutput(void* self) {
-				if (!ready) return nullptr;
-				if (!legacyCamera.getCamera) legacyCamera = CameraAccess::Resolve(self);
-				return legacyCamera.MainCamera(self);
+			void RestoreLegacy(void* self) {
+				if (!renderProjection.camera) return;
+				static const auto access = CameraAccess::Resolve(self);
+				RestoreProjection(access.MainCamera(self));
 			}
 
-			void ApplyLegacy(void* self, void* camera) {
+			void ApplyLegacy(void* camera) {
 				static bool logged = false;
-				if (camera && legacyCamera.IsFocused(self)) ApplyProjection(camera, "legacy", logged);
+				ApplyProjection(camera, "legacy", logged);
 			}
 
 			HOOK_ORIG_TYPE ModernSetup_orig;
@@ -9011,7 +9010,11 @@ namespace
 
 			constexpr int kLegacyFocus = 1;
 			constexpr int kInputHandled = 2;
-			thread_local float legacyExtra = 0;
+			struct LegacyFrame {
+				float extraZoom = 0;
+				void* focusCamera = nullptr;
+			};
+			thread_local LegacyFrame* legacyFrame = nullptr;
 
 			HOOK_ORIG_TYPE LegacyRotate_orig;
 			int LegacyRotate_hook(void* self, Vector2_t delta, const MethodInfo* method) {
@@ -9071,34 +9074,36 @@ namespace
 			HOOK_ORIG_TYPE LegacyDestroy_orig;
 			void LegacyDestroy_hook(void* self, const MethodInfo* method) {
 				legacyZoom.erase(self);
-				FocusFraming::RestoreProjection(FocusFraming::LegacyOutput(self));
+				FocusFraming::RestoreLegacy(self);
 				HOOK_CAST_CALL(void, LegacyDestroy)(self, method);
 			}
 
 			HOOK_ORIG_TYPE LegacyApply_orig;
 			void LegacyApply_hook(void* self, float time, const MethodInfo* method) {
-				void* camera = FocusFraming::LegacyOutput(self);
-				FocusFraming::RestoreProjection(camera);
-				struct RestoreExtra { float previous; ~RestoreExtra() { legacyExtra = previous; } } restore{legacyExtra};
-				legacyExtra = 0;
+				FocusFraming::RestoreLegacy(self);
+				LegacyFrame frame;
+				struct RestoreFrame { LegacyFrame* previous; ~RestoreFrame() { legacyFrame = previous; } } restore{
+					std::exchange(legacyFrame, &frame)};
 				const auto found = legacyZoom.find(self);
 				if (found != legacyZoom.end()) {
 					float* rate = FloatField(self, "focusZoomRate");
-					if (rate && *rate == found->second.native) legacyExtra = found->second.raw - found->second.native;
+					if (rate && *rate == found->second.native) frame.extraZoom = found->second.raw - found->second.native;
 				}
 				HOOK_CAST_CALL(void, LegacyApply)(self, time, method);
-				FocusFraming::ApplyLegacy(self, camera);
+				FocusFraming::ApplyLegacy(frame.focusCamera);
 			}
 
 			HOOK_ORIG_TYPE LegacyApplyPattern_orig;
 			void LegacyApplyPattern_hook(void* self, void* camera, float time, float zoom, const MethodInfo* method) {
 				HOOK_CAST_CALL(void, LegacyApplyPattern)(self, camera, time, zoom, method);
-				if (!camera || legacyExtra == 0 || g_enable_free_camera || RunwayDump::ReadInt(self, "Mode") != kLegacyFocus) return;
+				if (!legacyFrame || !camera || RunwayDump::ReadInt(self, "Mode") != kLegacyFocus) return;
+				legacyFrame->focusCamera = camera;
+				if (legacyFrame->extraZoom == 0 || g_enable_free_camera) return;
 				static const auto* get = il2cpp_class_get_method_from_name(KlassOf(camera), "get_fieldOfView", 0);
 				static const auto* set = il2cpp_class_get_method_from_name(KlassOf(camera), "set_fieldOfView", 1);
 				if (!get || !set || !get->methodPointer || !set->methodPointer) return;
 				const float old = reinterpret_cast<float(*)(void*, const MethodInfo*)>(get->methodPointer)(camera, get);
-				reinterpret_cast<void(*)(void*, float, const MethodInfo*)>(set->methodPointer)(camera, ExtendedFov(old, legacyExtra), set);
+				reinterpret_cast<void(*)(void*, float, const MethodInfo*)>(set->methodPointer)(camera, ExtendedFov(old, legacyFrame->extraZoom), set);
 			}
 
 			void Install() {
