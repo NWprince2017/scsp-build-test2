@@ -48,8 +48,8 @@ void SetMvFocusFraming(float roll, float horizontal, float vertical) {
 		return std::isfinite(value) ? std::clamp(value, -maximum, maximum) : 0.0f;
 	};
 	mvFocusRoll.store(bounded(roll, 180.0f), std::memory_order_relaxed);
-	mvFocusHorizontal.store(bounded(horizontal, 100.0f), std::memory_order_relaxed);
-	mvFocusVertical.store(bounded(vertical, 100.0f), std::memory_order_relaxed);
+	mvFocusHorizontal.store(bounded(horizontal, 3.0f), std::memory_order_relaxed);
+	mvFocusVertical.store(bounded(vertical, 3.0f), std::memory_order_relaxed);
 }
 
 bool MvCenterCloseupsAnyCostume() {
@@ -8648,15 +8648,16 @@ namespace
 			struct Matrix { float columns[4][4]; };
 			static_assert(sizeof(Matrix) == 64);
 
-			Matrix Reframe(Matrix original, float aspect, float clockwise, float horizontal, float vertical) {
-				constexpr float radiansPerDegree = 0.017453292519943295f;
+			constexpr float radiansPerDegree = 0.017453292519943295f;
+
+			Matrix RollProjection(Matrix original, float aspect, float clockwise, float scale) {
 				const float cosine = std::cos(clockwise * radiansPerDegree);
 				const float sine = std::sin(clockwise * radiansPerDegree);
 				Matrix result = original;
 				for (int column = 0; column < 4; ++column) {
 					const auto& clip = original.columns[column];
-					result.columns[column][0] = cosine * clip[0] + (sine / aspect) * clip[1] + (horizontal / 50) * clip[3];
-					result.columns[column][1] = -(sine * aspect) * clip[0] + cosine * clip[1] + (vertical / 50) * clip[3];
+					result.columns[column][0] = scale * (cosine * clip[0] + (sine / aspect) * clip[1]);
+					result.columns[column][1] = scale * (-(sine * aspect) * clip[0] + cosine * clip[1]);
 				}
 				return result;
 			}
@@ -8664,6 +8665,101 @@ namespace
 			using WeakHandleNew = void*(*)(void* object, bool trackResurrection);
 			WeakHandleNew newWeakHandle = nullptr;
 			bool ready = false;
+
+			template <typename T>
+			bool ReadValue(void* instance, const char* getter, T& value) {
+				auto* boxed = OutfitCall(instance, getter);
+				if (!boxed) return false;
+				value = boxed->unbox_value<T>();
+				return true;
+			}
+
+			template <typename T>
+			void WriteValue(void* instance, const char* setter, T value) {
+				OutfitCall(instance, setter, {reinterpret_cast<Il2CppObject*>(&value)});
+			}
+
+			enum class CameraPath { Legacy, Cinemachine };
+
+			struct BarLayout {
+				Vector2_t minAnchor, maxAnchor, minOffset, maxOffset;
+
+				bool Read(void* rect) {
+					return ReadValue(rect, "get_anchorMin", minAnchor) && ReadValue(rect, "get_anchorMax", maxAnchor) &&
+						ReadValue(rect, "get_offsetMin", minOffset) && ReadValue(rect, "get_offsetMax", maxOffset);
+				}
+
+				void Write(void* rect) const {
+					WriteValue(rect, "set_anchorMin", minAnchor);
+					WriteValue(rect, "set_anchorMax", maxAnchor);
+					WriteValue(rect, "set_offsetMin", minOffset);
+					WriteValue(rect, "set_offsetMax", maxOffset);
+				}
+			};
+
+			struct PortraitMask {
+				void* viewHandle = nullptr;
+				bool applied = false;
+				CameraPath path = CameraPath::Legacy;
+				float aspect = 0;
+				float scale = 1;
+				BarLayout native[2]{};
+
+				void* View() const { return viewHandle ? il2cpp_gchandle_get_target(viewHandle) : nullptr; }
+
+				void Restore() {
+					if (!std::exchange(applied, false)) return;
+					void* view = View();
+					if (!view) return;
+					native[0].Write(RunwayDump::ReadPtr(view, "leftBox"));
+					native[1].Write(RunwayDump::ReadPtr(view, "rightBox"));
+				}
+
+				float Fit(float windowAspect, CameraPath source) {
+					if (applied && windowAspect == aspect && source == path) return scale;
+					Restore();
+					void* view = View();
+					if (!view) return 1;
+					void* left = RunwayDump::ReadPtr(view, "leftBox");
+					void* right = RunwayDump::ReadPtr(view, "rightBox");
+					void* parent = OutfitCall(left, "get_parent");
+					if (!parent || OutfitCall(right, "get_parent") != parent ||
+						!native[0].Read(left) || !native[1].Read(right)) return 1;
+
+					// The stock LiveInGameView masks a portrait aperture at 3:4 on wider displays.
+					const float portraitWidth = std::min(windowAspect, 0.75f);
+					scale = std::min(windowAspect, 1 / portraitWidth);
+					const float marginX = std::max(0.0f, (1 - scale / windowAspect) / 2);
+					const float marginY = std::max(0.0f, (1 - scale * portraitWidth) / 2);
+					if (marginX > marginY) {
+						BarLayout{{0, 0}, {marginX, 1}, {}, {}}.Write(left);
+						BarLayout{{1 - marginX, 0}, {1, 1}, {}, {}}.Write(right);
+					} else {
+						BarLayout{{0, 0}, {1, marginY}, {}, {}}.Write(left);
+						BarLayout{{0, 1 - marginY}, {1, 1}, {}, {}}.Write(right);
+					}
+					applied = true;
+					aspect = windowAspect;
+					path = source;
+					Log(std::format("[focus-framing] portrait frame scale={:.3f} side={:.3f} top={:.3f}", scale, marginX, marginY));
+					return scale;
+				}
+			};
+			PortraitMask portraitMask;
+
+			HOOK_ORIG_TYPE SetupBoxes_orig;
+			void SetupBoxes_hook(void* self, bool portrait, const MethodInfo* method) {
+				portraitMask.Restore();
+				if (portraitMask.viewHandle) il2cpp_gchandle_free(std::exchange(portraitMask.viewHandle, nullptr));
+				HOOK_CAST_CALL(void, SetupBoxes)(self, portrait, method);
+				if (portrait) portraitMask.viewHandle = newWeakHandle(self, false);
+			}
+
+			HOOK_ORIG_TYPE ResizeBoxes_orig;
+			void ResizeBoxes_hook(void* self, uint8_t unit, const MethodInfo* method) {
+				if (portraitMask.View() == self) portraitMask.Restore();
+				HOOK_CAST_CALL(void, ResizeBoxes)(self, unit, method);
+			}
 
 			struct CameraAccess {
 				const MethodInfo* getCamera;
@@ -8729,60 +8825,95 @@ namespace
 				return reinterpret_cast<int(*)(void*, const MethodInfo*)>(method->methodPointer)(camera, method);
 			}
 
-			struct RenderProjection {
+			struct RenderFrame {
 				void* camera = nullptr;
-				Matrix original{};
-				Matrix applied{};
+				void* transform = nullptr;
+				Vector3_t originalPosition{};
+				Vector3_t appliedPosition{};
+				Matrix originalProjection{};
+				Matrix appliedProjection{};
+				bool hasRoll = false;
 				bool wasCustom = false;
 			};
-			thread_local RenderProjection renderProjection;
+			thread_local RenderFrame renderFrame;
 
-			void RestoreProjection(void* camera) {
-				if (!camera || renderProjection.camera != camera) return;
-				RenderProjection frame = std::exchange(renderProjection, RenderProjection{});
+			void RestoreFraming(void* camera) {
+				if (!camera || renderFrame.camera != camera) return;
+				RenderFrame frame = std::exchange(renderFrame, RenderFrame{});
+				if (frame.transform) {
+					Vector3_t current{};
+					if (ReadValue(frame.transform, "get_position", current) &&
+						std::memcmp(&current, &frame.appliedPosition, sizeof(current)) == 0)
+						WriteValue(frame.transform, "set_position", frame.originalPosition);
+				}
+				if (!frame.hasRoll) return;
 				Matrix current{};
-				if (!ReadProjection(camera, current) || std::memcmp(&current, &frame.applied, sizeof(Matrix)) != 0) return;
-				if (frame.wasCustom) WriteProjection(camera, frame.original);
+				if (!ReadProjection(camera, current) || std::memcmp(&current, &frame.appliedProjection, sizeof(Matrix)) != 0) return;
+				if (frame.wasCustom) WriteProjection(camera, frame.originalProjection);
 				else resetProjection->InvokeAsVoid(static_cast<Il2CppObject*>(camera), {});
 			}
 
-			void ApplyProjection(void* camera, const char* source, bool& logged) {
+			void Translate(RenderFrame& frame, float clockwise, float horizontal, float vertical) {
+				void* transform = OutfitCall(frame.camera, "get_transform");
+				Vector3_t right{}, up{};
+				if (!ReadValue(transform, "get_position", frame.originalPosition) ||
+					!ReadValue(transform, "get_right", right) || !ReadValue(transform, "get_up", up)) return;
+				const float cosine = std::cos(clockwise * radiansPerDegree);
+				const float sine = std::sin(clockwise * radiansPerDegree);
+				const float x = horizontal * cosine - vertical * sine;
+				const float y = horizontal * sine + vertical * cosine;
+				const auto& original = frame.originalPosition;
+				frame.appliedPosition = {original.x + x * right.x + y * up.x,
+					original.y + x * right.y + y * up.y, original.z + x * right.z + y * up.z};
+				WriteValue(transform, "set_position", frame.appliedPosition);
+				frame.transform = transform;
+			}
+
+			void ApplyFraming(void* camera, CameraPath source) {
 				float clockwise, horizontal, vertical;
 				GetMvFocusFraming(clockwise, horizontal, vertical);
+				const bool quarterTurn = camera && std::abs(std::abs(clockwise) - 90.0f) < 0.01f;
+				if (!quarterTurn && portraitMask.applied && portraitMask.path == source) portraitMask.Restore();
 				if (!ready || !camera || (clockwise == 0 && horizontal == 0 && vertical == 0)) return;
 
-				const int width = PixelDimension(camera, getWidth);
-				const int height = PixelDimension(camera, getHeight);
-				if (width <= 0 || height <= 0) return;
-
-				RenderProjection frame{};
+				RenderFrame frame{};
 				frame.camera = camera;
-				if (!ReadProjection(camera, frame.original)) return;
-				// Remember whether the native lens used an implicit or custom projection.
-				resetProjection->InvokeAsVoid(static_cast<Il2CppObject*>(camera), {});
-				Matrix implicit{};
-				frame.wasCustom = !ReadProjection(camera, implicit) || std::memcmp(&implicit, &frame.original, sizeof(Matrix)) != 0;
-				frame.applied = Reframe(frame.original, static_cast<float>(width) / height, clockwise, horizontal, vertical);
-				WriteProjection(camera, frame.applied);
-				renderProjection = frame;
-				if (!logged) {
+				if (horizontal != 0 || vertical != 0) Translate(frame, clockwise, horizontal, vertical);
+				if (clockwise != 0) {
+					const int width = PixelDimension(camera, getWidth);
+					const int height = PixelDimension(camera, getHeight);
+					if (width > 0 && height > 0 && ReadProjection(camera, frame.originalProjection)) {
+						const float aspect = static_cast<float>(width) / height;
+						const float scale = quarterTurn ? portraitMask.Fit(aspect, source) : 1.0f;
+						// Keep the native camera's implicit or custom projection across frame updates.
+						resetProjection->InvokeAsVoid(static_cast<Il2CppObject*>(camera), {});
+						Matrix implicit{};
+						frame.wasCustom = !ReadProjection(camera, implicit) ||
+							std::memcmp(&implicit, &frame.originalProjection, sizeof(Matrix)) != 0;
+						frame.appliedProjection = RollProjection(frame.originalProjection, aspect, clockwise, scale);
+						WriteProjection(camera, frame.appliedProjection);
+						frame.hasRoll = true;
+					}
+				}
+				if (frame.hasRoll || frame.transform) renderFrame = frame;
+				static bool loggedTranslation[2]{};
+				bool& logged = loggedTranslation[static_cast<int>(source)];
+				if (frame.transform && !logged) {
 					logged = true;
-					Matrix written{};
-					const bool verified = ReadProjection(camera, written) && std::memcmp(&written, &frame.applied, sizeof(Matrix)) == 0;
-					Log(std::format("[focus-framing] applied path={} verified={} roll={:.1f} pan=({:.1f},{:.1f}) viewport={}x{}",
-						source, verified, clockwise, horizontal, vertical, width, height));
+					Vector3_t written{};
+					const bool verified = ReadValue(frame.transform, "get_position", written) &&
+						std::memcmp(&written, &frame.appliedPosition, sizeof(written)) == 0;
+					Log(std::format("[focus-framing] moved camera path={} verified={} position=({:.2f},{:.2f},{:.2f})",
+						source == CameraPath::Legacy ? "legacy" : "cinemachine", verified, written.x, written.y, written.z));
 				}
 			}
 
 			void RestoreLegacy(void* self) {
-				if (!renderProjection.camera) return;
-				static const auto access = CameraAccess::Resolve(self);
-				RestoreProjection(access.MainCamera(self));
+				if (renderFrame.camera) RestoreFraming(RunwayDump::ReadPtr(self, "cameraCache"));
 			}
 
 			void ApplyLegacy(void* camera) {
-				static bool logged = false;
-				ApplyProjection(camera, "legacy", logged);
+				ApplyFraming(camera, CameraPath::Legacy);
 			}
 
 			HOOK_ORIG_TYPE ModernSetup_orig;
@@ -8802,13 +8933,11 @@ namespace
 			void BrainPush_hook(void* self, void* state, const MethodInfo* method) {
 				const auto get = reinterpret_cast<void*(*)(void*, const MethodInfo*)>(getOutputCamera->methodPointer);
 				void* camera = get(self, getOutputCamera);
-				RestoreProjection(camera);
+				RestoreFraming(camera);
 				HOOK_CAST_CALL(void, BrainPush)(self, state, method);
 				void* owner = modernOwner.Target();
-				if (camera && modernOwner.access.MainCamera(owner) == camera && modernOwner.access.IsFocused(owner)) {
-					static bool logged = false;
-					ApplyProjection(camera, "cinemachine", logged);
-				}
+				if (camera && modernOwner.access.MainCamera(owner) == camera)
+					ApplyFraming(modernOwner.access.IsFocused(owner) ? camera : nullptr, CameraPath::Cinemachine);
 			}
 
 			void Install() {
@@ -8835,6 +8964,9 @@ namespace
 					const auto name = std::format("{}.{}", klass, member);
 					return target && HookAt(name.c_str(), target, replacement, original);
 				};
+				const bool resize = hook("PRISM", "LiveInGameView", "<_setUpBox>b__6_0", 1, (void*)ResizeBoxes_hook, ResizeBoxes_orig);
+				const bool boxes = resize && hook("PRISM", "LiveInGameView", "_setUpBox", 1, (void*)SetupBoxes_hook, SetupBoxes_orig);
+				Log(std::format("[focus-framing] portrait masks installed={}", boxes));
 				const auto brain = ViewDiag::find_class_anywhere("Cinemachine", "CinemachineBrain");
 				if (!brain) return;
 				getOutputCamera = il2cpp_class_get_method_from_name(brain, "get_OutputCamera", 0);

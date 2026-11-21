@@ -656,8 +656,8 @@ namespace SCGUILoop {
 					float roll, horizontal, vertical;
 					GetMvFocusFraming(roll, horizontal, vertical);
 					bool changed = ImGui::SliderFloat("Roll (clockwise)", &roll, -180.0f, 180.0f, "%.0f deg");
-					changed |= ImGui::SliderFloat("Pan left / right", &horizontal, -100.0f, 100.0f, "%.0f%%");
-					changed |= ImGui::SliderFloat("Pan down / up", &vertical, -100.0f, 100.0f, "%.0f%%");
+					changed |= ImGui::SliderFloat("Move camera left / right", &horizontal, -3.0f, 3.0f, "%.2f");
+					changed |= ImGui::SliderFloat("Move camera down / up", &vertical, -3.0f, 3.0f, "%.2f");
 					if (ImGui::Button("90 deg left")) { roll = -90.0f; changed = true; }
 					ImGui::SameLine();
 					if (ImGui::Button("90 deg right")) { roll = 90.0f; changed = true; }
