@@ -4,6 +4,7 @@
 #include <set>
 #include <mutex>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstdio>
@@ -8623,6 +8624,282 @@ namespace
 			return HOOK_CAST_CALL(void*, CasualCostumeChangeBehaviour_CreateViewModel)(self, parameter, ct, method);
 		}
 
+		namespace FocusCamera {
+			constexpr float kExtraZoomStops = 3.0f;
+			constexpr float kRadians = 0.017453292519943295f;
+
+			float WrappedAngle(float angle) { return std::remainder(angle, 360.0f); }
+			float NativeZoom(float rate) { return std::clamp(rate, 0.0f, 1.0f); }
+			float ExtendedZoom(float previous, float delta) {
+				return std::clamp(previous + delta, -kExtraZoomStops, 1.0f + kExtraZoomStops);
+			}
+			float ExtendedFov(float angle, float extraStops) {
+				if (!std::isfinite(angle) || angle <= 0 || angle >= 180 || extraStops == 0) return angle;
+				const float halfAngle = std::tan(angle * (kRadians / 2));
+				return std::clamp(std::atan(halfAngle * std::exp2(-extraStops)) * (2 / kRadians), 1.0f, 150.0f);
+			}
+
+			float* FloatField(void* object, const char* name) {
+				const auto* field = FieldOf(KlassOf(object), name);
+				return field && field->offset >= 16 ? reinterpret_cast<float*>(static_cast<char*>(object) + field->offset) : nullptr;
+			}
+
+			struct ZoomState {
+				float raw;
+				float native;
+			};
+			std::unordered_map<void*, ZoomState> modernZoom;
+			std::unordered_map<void*, ZoomState> legacyZoom;
+
+			ZoomState UpdateZoom(std::unordered_map<void*, ZoomState>& states, void* camera, float native, float delta) {
+				const auto previous = states.find(camera);
+				const float raw = ExtendedZoom(previous != states.end() && previous->second.native == native
+					? previous->second.raw : native, delta);
+				const ZoomState state{raw, NativeZoom(raw)};
+				states.insert_or_assign(camera, state);
+				return state;
+			}
+
+			template <typename Action>
+			void ForEachVirtualCamera(void* focus, Action action) {
+				void* dictionary = RunwayDump::ReadPtr(focus, "cameraDictionary");
+				if (!dictionary) return;
+				void* entries = RunwayDump::ReadPtr(dictionary, "_entries");
+				if (!entries) return;
+				const int count = std::clamp(RunwayDump::ReadInt(dictionary, "_count"), 0, 512);
+				const int size = std::min(count, RunwayDump::ArrayLength(entries));
+				for (int i = 0; i < size; ++i) {
+					void* entry = il2cpp_symbols::array_get_value(entries, i);
+					void* camera = entry ? RunwayDump::ReadPtr(entry, "key") : nullptr;
+					if (camera) action(camera);
+				}
+			}
+
+			float* VirtualCameraFov(void* camera) {
+				const auto* lens = FieldOf(KlassOf(camera), "m_Lens");
+				if (!lens || lens->offset != 0xb8) return nullptr;
+				const auto* fov = FieldOf(il2cpp_class_from_il2cpp_type(lens->type), "FieldOfView");
+				return fov && fov->offset == 16 ? reinterpret_cast<float*>(static_cast<char*>(camera) + lens->offset) : nullptr;
+			}
+
+			struct Axis {
+				float* value;
+				float* minimum;
+				float* maximum;
+				bool* wrap;
+			};
+			Axis ResolveAxis(void* pov, const char* name, int expectedOffset) {
+				const auto* axis = FieldOf(KlassOf(pov), name);
+				if (!axis || axis->offset != expectedOffset) return {};
+				auto* klass = il2cpp_class_from_il2cpp_type(axis->type);
+				const auto* value = FieldOf(klass, "Value");
+				const auto* minimum = FieldOf(klass, "m_MinValue");
+				const auto* maximum = FieldOf(klass, "m_MaxValue");
+				const auto* wrap = FieldOf(klass, "m_Wrap");
+				if (!value || value->offset != 16 || !minimum || minimum->offset != 0x38 ||
+					!maximum || maximum->offset != 0x3c || !wrap || wrap->offset < 16) return {};
+				char* fields = static_cast<char*>(pov) + axis->offset - 16;
+				return {reinterpret_cast<float*>(fields + value->offset), reinterpret_cast<float*>(fields + minimum->offset),
+					reinterpret_cast<float*>(fields + maximum->offset), reinterpret_cast<bool*>(fields + wrap->offset)};
+			}
+
+			HOOK_ORIG_TYPE ModernRotate_orig;
+			void ModernRotate_hook(void* self, Vector2_t delta, const MethodInfo* method) {
+				if (!std::isfinite(delta.x) || !std::isfinite(delta.y)) return;
+				std::vector<Axis> axes;
+				ForEachVirtualCamera(self, [&](void* camera) {
+					int aim = 1;
+					void* pov = OutfitCall(camera, "GetCinemachineComponent", {reinterpret_cast<Il2CppObject*>(&aim)});
+					if (!pov) return;
+					for (const auto axis : {ResolveAxis(pov, "m_HorizontalAxis", 0xc0), ResolveAxis(pov, "m_VerticalAxis", 0x30)}) {
+						if (axis.value) axes.push_back(axis);
+					}
+				});
+				if (!axes.empty()) delta = {WrappedAngle(delta.x), WrappedAngle(delta.y)};
+				for (const auto& axis : axes) {
+					*axis.minimum = -360;
+					*axis.maximum = 360;
+				}
+				HOOK_CAST_CALL(void, ModernRotate)(self, delta, method);
+				for (const auto& axis : axes) {
+					*axis.value = WrappedAngle(*axis.value);
+					*axis.minimum = -180;
+					*axis.maximum = 180;
+					*axis.wrap = true;
+				}
+			}
+
+			HOOK_ORIG_TYPE ModernApplyZoom_orig;
+			void ModernApplyZoom_hook(void*, const MethodInfo*);
+
+			void ScaleVirtualCameras(void* self) {
+				const auto found = modernZoom.find(self);
+				if (found == modernZoom.end()) return;
+				const float extra = found->second.raw - found->second.native;
+				if (extra == 0) return;
+				ForEachVirtualCamera(self, [&](void* camera) {
+					if (float* angle = VirtualCameraFov(camera)) *angle = ExtendedFov(*angle, extra);
+				});
+			}
+
+			void ModernApplyZoom_hook(void* self, const MethodInfo* method) {
+				HOOK_CAST_CALL(void, ModernApplyZoom)(self, method);
+				ScaleVirtualCameras(self);
+			}
+
+			HOOK_ORIG_TYPE ModernZoom_orig;
+			void ModernZoom_hook(void* self, float delta, const MethodInfo* method) {
+				if (!std::isfinite(delta)) return;
+				float* rate = FloatField(self, "zoomRate");
+				if (!rate || !ModernApplyZoom_orig || std::abs(delta) < 0.001f) {
+					HOOK_CAST_CALL(void, ModernZoom)(self, delta, method);
+					return;
+				}
+				const auto state = UpdateZoom(modernZoom, self, *rate, delta);
+				const float nativeDelta = state.native - *rate;
+				if (std::abs(nativeDelta) >= 0.001f) {
+					HOOK_CAST_CALL(void, ModernZoom)(self, nativeDelta, method);
+				} else {
+					*rate = state.native;
+					ModernApplyZoom_hook(self, nullptr);
+				}
+			}
+
+			HOOK_ORIG_TYPE ModernReset_orig;
+			void ModernReset_hook(void* self, const MethodInfo* method) {
+				modernZoom.erase(self);
+				HOOK_CAST_CALL(void, ModernReset)(self, method);
+			}
+
+			HOOK_ORIG_TYPE ModernDisable_orig;
+			void ModernDisable_hook(void* self, const MethodInfo* method) {
+				modernZoom.erase(self);
+				HOOK_CAST_CALL(void, ModernDisable)(self, method);
+			}
+
+			HOOK_ORIG_TYPE ModernSensorSize_orig;
+			void ModernSensorSize_hook(void* self, bool portrait, const MethodInfo* method) {
+				HOOK_CAST_CALL(void, ModernSensorSize)(self, portrait, method);
+				if (modernZoom.contains(self) && ModernApplyZoom_orig) ModernApplyZoom_hook(self, nullptr);
+			}
+
+			constexpr int kLegacyFocus = 1;
+			constexpr int kInputHandled = 2;
+			thread_local float legacyExtra = 0;
+
+			HOOK_ORIG_TYPE LegacyRotate_orig;
+			int LegacyRotate_hook(void* self, Vector2_t delta, const MethodInfo* method) {
+				if (!std::isfinite(delta.x) || !std::isfinite(delta.y)) return 1;
+				float* horizontal = FloatField(self, "focusRotateHorizontal");
+				float* vertical = FloatField(self, "focusRotateVertical");
+				const float previousHorizontal = horizontal ? *horizontal : 0;
+				const float previousVertical = vertical ? *vertical : 0;
+				const int handled = HOOK_CAST_CALL(int, LegacyRotate)(self, delta, method);
+				if (handled == kInputHandled && horizontal && vertical) {
+					*horizontal = WrappedAngle(previousHorizontal + delta.x);
+					*vertical = WrappedAngle(previousVertical - delta.y);
+				}
+				return handled;
+			}
+
+			HOOK_ORIG_TYPE LegacyKeyboardRotate_orig;
+			int LegacyKeyboardRotate_hook(void* self, const MethodInfo* method) {
+				if (!LegacyRotate_orig) return HOOK_CAST_CALL(int, LegacyKeyboardRotate)(self, method);
+				static const auto* key = il2cpp_symbols_logged::get_method("UnityEngine.InputLegacyModule.dll", "UnityEngine", "Input", "GetKeyInt", 1);
+				static const auto* elapsed = il2cpp_symbols_logged::get_method("UnityEngine.CoreModule.dll", "UnityEngine", "Time", "get_deltaTime", 0);
+				if (!key || !elapsed || !key->methodPointer || !elapsed->methodPointer)
+					return HOOK_CAST_CALL(int, LegacyKeyboardRotate)(self, method);
+				const auto held = [&](int code) { return reinterpret_cast<bool(*)(int, const MethodInfo*)>(key->methodPointer)(code, key); };
+				const float x = held('a') ? 1.0f : held('d') ? -1.0f : 0.0f;
+				const float y = held('w') ? -1.0f : held('s') ? 1.0f : 0.0f;
+				if (x == 0 && y == 0) return 0;
+				const float dt = reinterpret_cast<float(*)(const MethodInfo*)>(elapsed->methodPointer)(elapsed);
+				const float scale = (30.0f * dt) / std::hypot(x, y);
+				return LegacyRotate_hook(self, {x * scale, y * scale}, nullptr);
+			}
+
+			HOOK_ORIG_TYPE LegacyZoom_orig;
+			int LegacyZoom_hook(void* self, float delta, const MethodInfo* method) {
+				if (!std::isfinite(delta)) return 1;
+				float* rate = FloatField(self, "focusZoomRate");
+				const float native = rate ? *rate : 0;
+				const int handled = HOOK_CAST_CALL(int, LegacyZoom)(self, delta, method);
+				if (handled == kInputHandled && rate) *rate = UpdateZoom(legacyZoom, self, native, delta).native;
+				return handled;
+			}
+
+			HOOK_ORIG_TYPE LegacyReset_orig;
+			int LegacyReset_hook(void* self, const MethodInfo* method) {
+				const int handled = HOOK_CAST_CALL(int, LegacyReset)(self, method);
+				if (handled == kInputHandled) legacyZoom.erase(self);
+				return handled;
+			}
+
+			HOOK_ORIG_TYPE LegacyKeyboardReset_orig;
+			int LegacyKeyboardReset_hook(void* self, const MethodInfo* method) {
+				const int handled = HOOK_CAST_CALL(int, LegacyKeyboardReset)(self, method);
+				if (handled == kInputHandled) legacyZoom.erase(self);
+				return handled;
+			}
+
+			HOOK_ORIG_TYPE LegacyDestroy_orig;
+			void LegacyDestroy_hook(void* self, const MethodInfo* method) {
+				legacyZoom.erase(self);
+				HOOK_CAST_CALL(void, LegacyDestroy)(self, method);
+			}
+
+			HOOK_ORIG_TYPE LegacyApply_orig;
+			void LegacyApply_hook(void* self, float time, const MethodInfo* method) {
+				struct RestoreExtra { float previous; ~RestoreExtra() { legacyExtra = previous; } } restore{legacyExtra};
+				legacyExtra = 0;
+				const auto found = legacyZoom.find(self);
+				if (found != legacyZoom.end()) {
+					float* rate = FloatField(self, "focusZoomRate");
+					if (rate && *rate == found->second.native) legacyExtra = found->second.raw - found->second.native;
+				}
+				HOOK_CAST_CALL(void, LegacyApply)(self, time, method);
+			}
+
+			HOOK_ORIG_TYPE LegacyApplyPattern_orig;
+			void LegacyApplyPattern_hook(void* self, void* camera, float time, float zoom, const MethodInfo* method) {
+				HOOK_CAST_CALL(void, LegacyApplyPattern)(self, camera, time, zoom, method);
+				if (!camera || legacyExtra == 0 || g_enable_free_camera || RunwayDump::ReadInt(self, "Mode") != kLegacyFocus) return;
+				static const auto* get = il2cpp_class_get_method_from_name(KlassOf(camera), "get_fieldOfView", 0);
+				static const auto* set = il2cpp_class_get_method_from_name(KlassOf(camera), "set_fieldOfView", 1);
+				if (!get || !set || !get->methodPointer || !set->methodPointer) return;
+				const float old = reinterpret_cast<float(*)(void*, const MethodInfo*)>(get->methodPointer)(camera, get);
+				reinterpret_cast<void(*)(void*, float, const MethodInfo*)>(set->methodPointer)(camera, ExtendedFov(old, legacyExtra), set);
+			}
+
+			void Install() {
+				auto hook = [](const char* ns, const char* klass, const char* member, int count, void* replacement,
+					HOOK_ORIG_TYPE& original) {
+					void* target = ViewDiag::find_method_anywhere(ns, klass, member, count);
+					const auto name = std::format("{}.{}", klass, member);
+					if (target && HookAt(name.c_str(), target, replacement, original))
+						Log(std::format("[focus-camera] installed {}", name));
+				};
+				constexpr const char* modern = "PRISM.Interactions.MV";
+				constexpr const char* focus = "MvSceneFocusCamera";
+				hook(modern, focus, "Rotate", 1, (void*)ModernRotate_hook, ModernRotate_orig);
+				hook(modern, focus, "ApplyZoom", 0, (void*)ModernApplyZoom_hook, ModernApplyZoom_orig);
+				hook(modern, focus, "Zoom", 1, (void*)ModernZoom_hook, ModernZoom_orig);
+				hook(modern, focus, "Reset", 0, (void*)ModernReset_hook, ModernReset_orig);
+				hook(modern, focus, "OnDisable", 0, (void*)ModernDisable_hook, ModernDisable_orig);
+				hook(modern, focus, "UpdateSensorSize", 1, (void*)ModernSensorSize_hook, ModernSensorSize_orig);
+				constexpr const char* legacy = "CameraworkManager";
+				hook("", legacy, "RotateCamera", 1, (void*)LegacyRotate_hook, LegacyRotate_orig);
+				hook("", legacy, "ApplyRotateFromKeyboard", 0, (void*)LegacyKeyboardRotate_hook, LegacyKeyboardRotate_orig);
+				hook("", legacy, "ZoomCamera", 1, (void*)LegacyZoom_hook, LegacyZoom_orig);
+				hook("", legacy, "ResetZoomAndRotate", 0, (void*)LegacyReset_hook, LegacyReset_orig);
+				hook("", legacy, "ApplyResetFromKeyboard", 0, (void*)LegacyKeyboardReset_hook, LegacyKeyboardReset_orig);
+				hook("", legacy, "OnDestroy", 0, (void*)LegacyDestroy_hook, LegacyDestroy_orig);
+				hook("", legacy, "ApplyCamera", 1, (void*)LegacyApply_hook, LegacyApply_orig);
+				hook("PRISM.Legacy", "CameraPatternControllerSet", "ApplyCamera", 3,
+					(void*)LegacyApplyPattern_hook, LegacyApplyPattern_orig);
+			}
+		}
+
 		bool HasLiveCutSceneCostume(int sceneId, int costumeId) {
 			const auto rows = OutfitList(CenterCutSceneTableRows(TryMasterData(), "LiveCutSceneCostumes"));
 			for (int i = 0; i < rows.count; ++i) {
@@ -10250,6 +10527,7 @@ namespace
 
 		void Install() {
 			InstallOutfitHooks();
+			FocusCamera::Install();
 			const char* e1 = getenv("SCSP_SOLO_UNLOCK");
 			if (e1 && *e1 == '0') {
 				g_enabled = false;
