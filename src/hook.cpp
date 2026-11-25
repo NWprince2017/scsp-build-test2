@@ -9534,8 +9534,11 @@ namespace
 				resetProjection->InvokeAsVoid(camera, {});
 				if (roll || zoom) {
 					Matrix projection{};
-					if (ReadProjection(camera, projection)) WriteProjection(camera,
-						AdjustProjection(projection, static_cast<float>(renderer.width) / renderer.height, roll, std::exp2(zoom)));
+					if (ReadProjection(camera, projection)) {
+						projection = AdjustProjection(projection, static_cast<float>(renderer.width) / renderer.height,
+							roll, std::exp2(zoom));
+						WriteProjection(camera, projection);
+					}
 				}
 			}
 
