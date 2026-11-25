@@ -15,6 +15,9 @@ extern bool MvCenterCloseupsAnyCostume();
 extern void SetMvCenterCloseupsAnyCostume(bool enabled);
 extern void GetMvFocusFraming(float& roll, float& horizontal, float& vertical);
 extern void SetMvFocusFraming(float roll, float horizontal, float vertical);
+extern bool GetMvKeepFraming(bool fixed);
+extern void SetMvKeepFraming(bool fixed, bool keep);
+extern void ResetMvFraming(bool fixed);
 extern void GetMvFixedFraming(float& yaw, float& pitch, float& roll, float& horizontal, float& vertical, float& zoom);
 extern void SetMvFixedFraming(float yaw, float pitch, float roll, float horizontal, float vertical, float zoom);
 
@@ -673,17 +676,23 @@ namespace SCGUILoop {
 					ImGui::SameLine();
 					if (ImGui::Button("90 deg right")) { roll = 90.0f; changed = true; }
 					ImGui::SameLine();
-					if (ImGui::Button("Reset framing")) { yaw = pitch = zoom = roll = horizontal = vertical = 0; changed = true; }
-					if (!changed) return;
-					if (fixed) SetMvFixedFraming(yaw, pitch, roll, horizontal, vertical, zoom);
-					else SetMvFocusFraming(roll, horizontal, vertical);
+					if (ImGui::Button("Reset state")) ResetMvFraming(fixed);
+					else if (changed) {
+						if (fixed) SetMvFixedFraming(yaw, pitch, roll, horizontal, vertical, zoom);
+						else SetMvFocusFraming(roll, horizontal, vertical);
+					}
+					bool keep = GetMvKeepFraming(fixed);
+					if (ImGui::Checkbox("Keep state after leaving MV", &keep)) SetMvKeepFraming(fixed, keep);
 				};
 				if (ImGui::CollapsingHeader("Focus framing", ImGuiTreeNodeFlags_DefaultOpen)) {
+					ImGui::PushID("Focus framing");
+					HELP_TOOLTIP("Controls (?)", "I / K / J / L: move camera up / down / left / right");
 					framingControls(false);
+					ImGui::PopID();
 				}
 				if (ImGui::CollapsingHeader("Fixed framing")) {
 					ImGui::PushID("Fixed framing");
-					HELP_TOOLTIP("Controls (?)", "Right-drag / WASD: turn\nWheel / Z and X: zoom\nShift + right-drag / Shift + WASD: move\nQ and E: roll\nR: reset");
+					HELP_TOOLTIP("Controls (?)", "Right-drag / WASD: turn\nWheel / Z and X: zoom\nI / K / J / L: move camera up / down / left / right\nShift + right-drag / Shift + WASD: move\nQ and E: roll\nR: reset");
 					framingControls(true);
 					ImGui::PopID();
 				}

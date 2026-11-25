@@ -32,9 +32,14 @@ bool needPrintStack = false;
 
 namespace {
 	std::atomic_bool mvCenterCloseupsAnyCostume{false};
-	std::atomic<float> mvFocusRoll{0};
-	std::atomic<float> mvFocusHorizontal{0};
-	std::atomic<float> mvFocusVertical{0};
+	std::atomic_bool mvKeepFocusFraming{false};
+	std::atomic_bool mvKeepFixedFraming{false};
+	std::atomic<unsigned> mvFocusResetRevision{0};
+	struct FocusFramingState {
+		float roll, horizontal, vertical;
+	};
+	FocusFramingState mvFocusFraming{};
+	std::mutex mvFocusFramingMutex;
 	struct FixedFraming {
 		float yaw, pitch, roll, horizontal, vertical, zoom;
 	};
@@ -47,15 +52,29 @@ namespace {
 }
 
 void GetMvFocusFraming(float& roll, float& horizontal, float& vertical) {
-	roll = mvFocusRoll.load(std::memory_order_relaxed);
-	horizontal = mvFocusHorizontal.load(std::memory_order_relaxed);
-	vertical = mvFocusVertical.load(std::memory_order_relaxed);
+	std::lock_guard lock(mvFocusFramingMutex);
+	roll = mvFocusFraming.roll;
+	horizontal = mvFocusFraming.horizontal;
+	vertical = mvFocusFraming.vertical;
 }
 
 void SetMvFocusFraming(float roll, float horizontal, float vertical) {
-	mvFocusRoll.store(BoundFraming(roll, 180.0f), std::memory_order_relaxed);
-	mvFocusHorizontal.store(BoundFraming(horizontal, 3.0f), std::memory_order_relaxed);
-	mvFocusVertical.store(BoundFraming(vertical, 3.0f), std::memory_order_relaxed);
+	std::lock_guard lock(mvFocusFramingMutex);
+	mvFocusFraming = {BoundFraming(roll, 180.0f), BoundFraming(horizontal, 3.0f), BoundFraming(vertical, 3.0f)};
+}
+
+void NudgeMvFocusFraming(float horizontal, float vertical) {
+	std::lock_guard lock(mvFocusFramingMutex);
+	mvFocusFraming.horizontal = BoundFraming(mvFocusFraming.horizontal + horizontal, 3.0f);
+	mvFocusFraming.vertical = BoundFraming(mvFocusFraming.vertical + vertical, 3.0f);
+}
+
+bool GetMvKeepFraming(bool fixed) {
+	return (fixed ? mvKeepFixedFraming : mvKeepFocusFraming).load(std::memory_order_relaxed);
+}
+
+void SetMvKeepFraming(bool fixed, bool keep) {
+	(fixed ? mvKeepFixedFraming : mvKeepFocusFraming).store(keep, std::memory_order_relaxed);
 }
 
 void GetMvFixedFraming(float& yaw, float& pitch, float& roll, float& horizontal, float& vertical, float& zoom) {
@@ -82,6 +101,14 @@ void NudgeMvFixedFraming(float yaw, float pitch, float roll, float horizontal, f
 	mvFixedFraming.horizontal = BoundFraming(mvFixedFraming.horizontal + horizontal, 3.0f);
 	mvFixedFraming.vertical = BoundFraming(mvFixedFraming.vertical + vertical, 3.0f);
 	mvFixedFraming.zoom = BoundFraming(mvFixedFraming.zoom + zoom, 3.0f);
+}
+
+void ResetMvFraming(bool fixed) {
+	if (fixed) SetMvFixedFraming(0, 0, 0, 0, 0, 0);
+	else {
+		SetMvFocusFraming(0, 0, 0);
+		mvFocusResetRevision.fetch_add(1, std::memory_order_relaxed);
+	}
 }
 
 bool MvCenterCloseupsAnyCostume() {
@@ -8714,11 +8741,12 @@ namespace
 			enum class CameraPath { Legacy, Cinemachine };
 			enum class CameraMode { Normal = 0, Focus = 1, Fixed = 2 };
 
-			namespace FixedInput {
+			namespace FramingInput {
 				struct State {
 					int frame = -1;
 					void* camera = nullptr;
 					HWND window = nullptr;
+					CameraMode mode = CameraMode::Normal;
 					POINT cursor{};
 					bool dragging = false;
 					bool resetHeld = false;
@@ -8738,10 +8766,10 @@ namespace
 				}
 
 				void LogOnce(bool active, bool& logged, const char* action) {
-					if (active && !std::exchange(logged, true)) Log(std::format("[fixed-input] applied {}", action));
+					if (active && !std::exchange(logged, true)) Log(std::format("[mv-camera-input] applied {}", action));
 				}
 
-				void Poll(void* camera, CameraPath source) {
+				void Poll(void* camera, CameraPath source, CameraMode mode) {
 					if (g_enable_free_camera) return;
 					static const auto* getFrame = il2cpp_symbols_logged::get_method("UnityEngine.CoreModule.dll", "UnityEngine", "Time", "get_frameCount", 0);
 					static const auto* getTime = il2cpp_symbols_logged::get_method("UnityEngine.CoreModule.dll", "UnityEngine", "Time", "get_unscaledDeltaTime", 0);
@@ -8752,9 +8780,25 @@ namespace
 					State current{};
 					current.frame = frame;
 					current.camera = camera;
+					current.mode = mode;
 					current.window = ForegroundGame();
 					if (!current.window) {
 						previous = current;
+						return;
+					}
+
+					const float rawTime = reinterpret_cast<float(*)(const MethodInfo*)>(getTime->methodPointer)(getTime);
+					const float seconds = std::isfinite(rawTime) ? std::clamp(rawTime, 0.0f, 0.1f) : 0.0f;
+					const float moveX = static_cast<float>(Held('L')) - static_cast<float>(Held('J'));
+					const float moveY = static_cast<float>(Held('I')) - static_cast<float>(Held('K'));
+					const float moveStep = 1.5f * seconds / std::max(1.0f, std::hypot(moveX, moveY));
+					if (mode == CameraMode::Focus) {
+						previous = current;
+						if (moveStep && (moveX || moveY)) {
+							NudgeMvFocusFraming(moveX * moveStep, moveY * moveStep);
+							static bool logged = false;
+							LogOnce(true, logged, "focus IJKL pan");
+						}
 						return;
 					}
 
@@ -8769,16 +8813,15 @@ namespace
 					current.dragging = overGame && Held(VK_RBUTTON);
 					current.resetHeld = Held('R');
 					const State last = std::exchange(previous, current);
-					const bool continuous = last.camera == current.camera && last.window == current.window && frame - last.frame <= 3;
+					const bool continuous = last.camera == current.camera && last.window == current.window &&
+						last.mode == current.mode && frame - last.frame <= 3;
 					if (current.resetHeld && (!continuous || !last.resetHeld)) {
-						SetMvFixedFraming(0, 0, 0, 0, 0, 0);
+						ResetMvFraming(true);
 						static bool reported = false;
 						LogOnce(true, reported, "reset");
 						return;
 					}
 
-					const float rawTime = reinterpret_cast<float(*)(const MethodInfo*)>(getTime->methodPointer)(getTime);
-					const float seconds = std::isfinite(rawTime) ? std::clamp(rawTime, 0.0f, 0.1f) : 0.0f;
 					const float x = static_cast<float>(Held('D')) - static_cast<float>(Held('A'));
 					const float y = static_cast<float>(Held('W')) - static_cast<float>(Held('S'));
 					const float step = seconds / std::max(1.0f, std::hypot(x, y));
@@ -8802,14 +8845,14 @@ namespace
 					const bool shift = Held(VK_SHIFT);
 					const float yaw = shift ? 0 : 45 * x * step + dragX;
 					const float pitch = shift ? 0 : 45 * y * step + dragY;
-					const float panX = shift ? 1.5f * x * step + 0.03f * dragX : 0;
-					const float panY = shift ? 1.5f * y * step + 0.03f * dragY : 0;
+					const float panX = moveX * moveStep + (shift ? 1.5f * x * step + 0.03f * dragX : 0);
+					const float panY = moveY * moveStep + (shift ? 1.5f * y * step + 0.03f * dragY : 0);
 					const float zoom = keyboardZoom + wheelZoom;
 					if (yaw || pitch || roll || panX || panY || zoom) NudgeMvFixedFraming(yaw, pitch, roll, panX, panY, zoom);
 
 					static bool keyboardTurnLogged, keyboardPanLogged, keyboardZoomLogged, mouseTurnLogged, mousePanLogged, wheelLogged, rollLogged;
 					LogOnce(!shift && (x || y), keyboardTurnLogged, "keyboard turn");
-					LogOnce(shift && (x || y), keyboardPanLogged, "keyboard pan");
+					LogOnce(moveX || moveY || (shift && (x || y)), keyboardPanLogged, "fixed keyboard pan");
 					LogOnce(keyboardZoom != 0, keyboardZoomLogged, "keyboard zoom");
 					LogOnce(!shift && (dragX || dragY), mouseTurnLogged, "mouse turn");
 					LogOnce(shift && (dragX || dragY), mousePanLogged, "mouse pan");
@@ -8886,11 +8929,12 @@ namespace
 			};
 			PortraitMask portraitMask;
 			bool liveViewClosing = false;
+			unsigned liveViewRevision = 0;
 
-			void ResetFramingSettings() {
-				SetMvFocusFraming(0, 0, 0);
-				SetMvFixedFraming(0, 0, 0, 0, 0, 0);
-				FixedInput::previous = {};
+			void LeaveFramingView() {
+				if (!GetMvKeepFraming(false)) ResetMvFraming(false);
+				if (!GetMvKeepFraming(true)) ResetMvFraming(true);
+				FramingInput::previous = {};
 			}
 
 			HOOK_ORIG_TYPE SetupBoxes_orig;
@@ -8898,10 +8942,11 @@ namespace
 				portraitMask.Restore();
 				if (portraitMask.View() != self) {
 					if (portraitMask.viewHandle) {
-						ResetFramingSettings();
+						LeaveFramingView();
 						il2cpp_gchandle_free(portraitMask.viewHandle);
 					}
 					portraitMask.viewHandle = newWeakHandle(self, false);
+					++liveViewRevision;
 				}
 				HOOK_CAST_CALL(void, SetupBoxes)(self, portrait, method);
 				portraitMask.portrait = portrait;
@@ -8918,11 +8963,12 @@ namespace
 			void* TerminateLiveView_hook(void* result, void* self, const MethodInfo* method) {
 				if (portraitMask.View() == self) {
 					liveViewClosing = true;
-					ResetFramingSettings();
+					LeaveFramingView();
 					portraitMask.Restore();
 					portraitMask.portrait = false;
 					il2cpp_gchandle_free(std::exchange(portraitMask.viewHandle, nullptr));
-					Log("[mv-framing] reset on leaving live view");
+					Log(std::format("[mv-framing] left live view keep-focus={} keep-fixed={}",
+						GetMvKeepFraming(false), GetMvKeepFraming(true)));
 				}
 				return HOOK_CAST_CALL(void*, TerminateLiveView)(result, self, method);
 			}
@@ -9065,11 +9111,10 @@ namespace
 			void ApplyFraming(void* camera, CameraPath source, CameraMode mode) {
 				if (liveViewClosing) return;
 				float yaw = 0, pitch = 0, clockwise = 0, horizontal = 0, vertical = 0, zoom = 0;
+				if (ready && camera && (mode == CameraMode::Focus || mode == CameraMode::Fixed))
+					FramingInput::Poll(camera, source, mode);
 				if (mode == CameraMode::Focus) GetMvFocusFraming(clockwise, horizontal, vertical);
-				if (mode == CameraMode::Fixed) {
-					if (ready && camera) FixedInput::Poll(camera, source);
-					GetMvFixedFraming(yaw, pitch, clockwise, horizontal, vertical, zoom);
-				}
+				if (mode == CameraMode::Fixed) GetMvFixedFraming(yaw, pitch, clockwise, horizontal, vertical, zoom);
 				const bool quarterTurn = camera && std::abs(std::abs(clockwise) - 90.0f) < 0.01f;
 				if (!quarterTurn && portraitMask.applied && portraitMask.path == source) portraitMask.Restore();
 				const bool turn = yaw != 0 || pitch != 0;
@@ -9216,6 +9261,39 @@ namespace
 			std::unordered_map<void*, ZoomState> modernZoom;
 			std::unordered_map<void*, ZoomState> legacyZoom;
 
+			struct SavedFocusControls {
+				float horizontal = 0, vertical = 0, zoom = 0;
+				bool rotated = false, zoomed = false;
+			};
+			struct FocusControlState {
+				SavedFocusControls saved;
+				void* owner = nullptr;
+				unsigned viewRevision = 0;
+				unsigned resetRevision = 0;
+
+				bool StartFrame(void* self, bool& resetNative) {
+					if (FocusFraming::liveViewClosing || !FocusFraming::portraitMask.viewHandle) return false;
+					const auto nextReset = mvFocusResetRevision.load(std::memory_order_relaxed);
+					const auto nextView = FocusFraming::liveViewRevision;
+					const bool reset = resetRevision != nextReset;
+					const bool sameCamera = owner == self && viewRevision == nextView;
+					if (sameCamera && !reset) return false;
+					resetNative = sameCamera && reset;
+					if (reset) saved = {};
+					owner = self;
+					viewRevision = nextView;
+					resetRevision = nextReset;
+					return true;
+				}
+			};
+			FocusControlState modernControls, legacyControls;
+
+			void SetFocusZoom(std::unordered_map<void*, ZoomState>& states, void* self, float& rate, float raw) {
+				const ZoomState state{raw, NativeZoom(raw)};
+				rate = state.native;
+				states.insert_or_assign(self, state);
+			}
+
 			ZoomState UpdateZoom(std::unordered_map<void*, ZoomState>& states, void* camera, float native, float delta) {
 				const auto previous = states.find(camera);
 				const float raw = ExtendedZoom(previous != states.end() && previous->second.native == native
@@ -9268,15 +9346,33 @@ namespace
 					reinterpret_cast<float*>(fields + maximum->offset), reinterpret_cast<bool*>(fields + wrap->offset)};
 			}
 
+			template <typename Action>
+			void ForEachFocusPov(void* self, Action action) {
+				ForEachVirtualCamera(self, [&](void* camera) {
+					int aim = 1;
+					void* pov = OutfitCall(camera, "GetCinemachineComponent", {reinterpret_cast<Il2CppObject*>(&aim)});
+					if (pov) action(ResolveAxis(pov, "m_HorizontalAxis", 0xc0), ResolveAxis(pov, "m_VerticalAxis", 0x30));
+				});
+			}
+
+			void WrapAxis(const Axis& axis, float value) {
+				*axis.value = WrappedAngle(value);
+				*axis.minimum = -180;
+				*axis.maximum = 180;
+				*axis.wrap = true;
+			}
+
 			HOOK_ORIG_TYPE ModernRotate_orig;
 			void ModernRotate_hook(void* self, Vector2_t delta, const MethodInfo* method) {
 				if (!std::isfinite(delta.x) || !std::isfinite(delta.y)) return;
 				std::vector<Axis> axes;
-				ForEachVirtualCamera(self, [&](void* camera) {
-					int aim = 1;
-					void* pov = OutfitCall(camera, "GetCinemachineComponent", {reinterpret_cast<Il2CppObject*>(&aim)});
-					if (!pov) return;
-					for (const auto axis : {ResolveAxis(pov, "m_HorizontalAxis", 0xc0), ResolveAxis(pov, "m_VerticalAxis", 0x30)}) {
+				Axis firstHorizontal{}, firstVertical{};
+				ForEachFocusPov(self, [&](Axis horizontal, Axis vertical) {
+					if (!firstHorizontal.value && horizontal.value && vertical.value) {
+						firstHorizontal = horizontal;
+						firstVertical = vertical;
+					}
+					for (const auto axis : {horizontal, vertical}) {
 						if (axis.value) axes.push_back(axis);
 					}
 				});
@@ -9286,11 +9382,12 @@ namespace
 					*axis.maximum = 360;
 				}
 				HOOK_CAST_CALL(void, ModernRotate)(self, delta, method);
-				for (const auto& axis : axes) {
-					*axis.value = WrappedAngle(*axis.value);
-					*axis.minimum = -180;
-					*axis.maximum = 180;
-					*axis.wrap = true;
+				for (const auto& axis : axes) WrapAxis(axis, *axis.value);
+				if (firstHorizontal.value && (delta.x || delta.y) && !FocusFraming::liveViewClosing) {
+					auto& saved = modernControls.saved;
+					saved.horizontal = *firstHorizontal.value;
+					saved.vertical = *firstVertical.value;
+					saved.rotated = true;
 				}
 			}
 
@@ -9321,6 +9418,10 @@ namespace
 					return;
 				}
 				const auto state = UpdateZoom(modernZoom, self, *rate, delta);
+				if (!FocusFraming::liveViewClosing) {
+					modernControls.saved.zoom = state.raw;
+					modernControls.saved.zoomed = true;
+				}
 				const float nativeDelta = state.native - *rate;
 				if (std::abs(nativeDelta) >= 0.001f) {
 					HOOK_CAST_CALL(void, ModernZoom)(self, nativeDelta, method);
@@ -9339,9 +9440,38 @@ namespace
 			HOOK_ORIG_TYPE ModernDisable_orig;
 			void ModernDisable_hook(void* self, const MethodInfo* method) {
 				modernZoom.erase(self);
+				if (modernControls.owner == self) modernControls.owner = nullptr;
 				HOOK_CAST_CALL(void, ModernDisable)(self, method);
 			}
 
+			HOOK_ORIG_TYPE ModernConstraint_orig;
+			void ModernConstraint_hook(void* self, const MethodInfo* method) {
+				bool reset = false;
+				if (ModernReset_orig && ModernApplyZoom_orig && modernControls.StartFrame(self, reset)) {
+					const auto& saved = modernControls.saved;
+					if (reset) ModernReset_hook(self, nullptr);
+					if (saved.zoomed) {
+						if (auto* rate = FloatField(self, "zoomRate")) {
+							SetFocusZoom(modernZoom, self, *rate, saved.zoom);
+							ModernApplyZoom_hook(self, nullptr);
+						}
+					}
+					if (saved.rotated) {
+						ForEachFocusPov(self, [&](Axis horizontal, Axis vertical) {
+							if (horizontal.value) WrapAxis(horizontal, saved.horizontal);
+							if (vertical.value) WrapAxis(vertical, saved.vertical);
+						});
+					}
+				}
+				HOOK_CAST_CALL(void, ModernConstraint)(self, method);
+			}
+
+			HOOK_ORIG_TYPE ModernUserReset_orig;
+			int ModernUserReset_hook(void* self, const MethodInfo* method) {
+				const auto handled = HOOK_CAST_CALL(int, ModernUserReset)(self, method);
+				if (handled == 2) modernControls.saved = {};
+				return handled;
+			}
 			HOOK_ORIG_TYPE ModernSensorSize_orig;
 			void ModernSensorSize_hook(void* self, bool portrait, const MethodInfo* method) {
 				HOOK_CAST_CALL(void, ModernSensorSize)(self, portrait, method);
@@ -9368,6 +9498,12 @@ namespace
 				if (handled == kInputHandled && horizontal && vertical) {
 					*horizontal = WrappedAngle(previousHorizontal + delta.x);
 					*vertical = WrappedAngle(previousVertical - delta.y);
+					if ((delta.x || delta.y) && !FocusFraming::liveViewClosing) {
+						auto& saved = legacyControls.saved;
+						saved.horizontal = *horizontal;
+						saved.vertical = *vertical;
+						saved.rotated = true;
+					}
 				}
 				return handled;
 			}
@@ -9394,27 +9530,41 @@ namespace
 				float* rate = FloatField(self, "focusZoomRate");
 				const float native = rate ? *rate : 0;
 				const int handled = HOOK_CAST_CALL(int, LegacyZoom)(self, delta, method);
-				if (handled == kInputHandled && rate) *rate = UpdateZoom(legacyZoom, self, native, delta).native;
+				if (handled == kInputHandled && rate) {
+					const auto state = UpdateZoom(legacyZoom, self, native, delta);
+					*rate = state.native;
+					if (delta && !FocusFraming::liveViewClosing) {
+						legacyControls.saved.zoom = state.raw;
+						legacyControls.saved.zoomed = true;
+					}
+				}
 				return handled;
 			}
 
 			HOOK_ORIG_TYPE LegacyReset_orig;
 			int LegacyReset_hook(void* self, const MethodInfo* method) {
 				const int handled = HOOK_CAST_CALL(int, LegacyReset)(self, method);
-				if (handled == kInputHandled) legacyZoom.erase(self);
+				if (handled == kInputHandled) {
+					legacyZoom.erase(self);
+					legacyControls.saved = {};
+				}
 				return handled;
 			}
 
 			HOOK_ORIG_TYPE LegacyKeyboardReset_orig;
 			int LegacyKeyboardReset_hook(void* self, const MethodInfo* method) {
 				const int handled = HOOK_CAST_CALL(int, LegacyKeyboardReset)(self, method);
-				if (handled == kInputHandled) legacyZoom.erase(self);
+				if (handled == kInputHandled) {
+					legacyZoom.erase(self);
+					legacyControls.saved = {};
+				}
 				return handled;
 			}
 
 			HOOK_ORIG_TYPE LegacyDestroy_orig;
 			void LegacyDestroy_hook(void* self, const MethodInfo* method) {
 				legacyZoom.erase(self);
+				if (legacyControls.owner == self) legacyControls.owner = nullptr;
 				FocusFraming::RestoreLegacy(self);
 				HOOK_CAST_CALL(void, LegacyDestroy)(self, method);
 			}
@@ -9422,6 +9572,18 @@ namespace
 			HOOK_ORIG_TYPE LegacyApply_orig;
 			void LegacyApply_hook(void* self, float time, const MethodInfo* method) {
 				FocusFraming::RestoreLegacy(self);
+				bool reset = false;
+				if (RunwayDump::ReadInt(self, "Mode") == static_cast<int>(FocusFraming::CameraMode::Focus) &&
+					legacyControls.StartFrame(self, reset)) {
+					if (reset && LegacyReset_orig) LegacyReset_hook(self, nullptr);
+					const auto& saved = legacyControls.saved;
+					if (saved.rotated) {
+						if (auto* horizontal = FloatField(self, "focusRotateHorizontal")) *horizontal = saved.horizontal;
+						if (auto* vertical = FloatField(self, "focusRotateVertical")) *vertical = saved.vertical;
+					}
+					if (saved.zoomed)
+						if (auto* rate = FloatField(self, "focusZoomRate")) SetFocusZoom(legacyZoom, self, *rate, saved.zoom);
+				}
 				LegacyFrame frame;
 				struct RestoreFrame { LegacyFrame* previous; ~RestoreFrame() { legacyFrame = previous; } } restore{
 					std::exchange(legacyFrame, &frame)};
@@ -9464,6 +9626,8 @@ namespace
 				hook(modern, focus, "Zoom", 1, (void*)ModernZoom_hook, ModernZoom_orig);
 				hook(modern, focus, "Reset", 0, (void*)ModernReset_hook, ModernReset_orig);
 				hook(modern, focus, "OnDisable", 0, (void*)ModernDisable_hook, ModernDisable_orig);
+				hook(modern, focus, "_applyConstraint", 0, (void*)ModernConstraint_hook, ModernConstraint_orig);
+				hook(modern, "MvSceneCamerawork", "ResetZoomAndRotate", 0, (void*)ModernUserReset_hook, ModernUserReset_orig);
 				hook(modern, focus, "UpdateSensorSize", 1, (void*)ModernSensorSize_hook, ModernSensorSize_orig);
 				constexpr const char* legacy = "CameraworkManager";
 				hook("", legacy, "RotateCamera", 1, (void*)LegacyRotate_hook, LegacyRotate_orig);
