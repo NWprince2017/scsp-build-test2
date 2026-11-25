@@ -44,7 +44,17 @@ namespace {
 		float yaw, pitch, roll, horizontal, vertical, zoom;
 	};
 	FixedFraming mvFixedFraming{};
+	constexpr int mvSplitPanelCount = 5;
+	FixedFraming mvSplitFraming[mvSplitPanelCount]{};
+	int mvSplitActors[mvSplitPanelCount]{0, 1, 2, 3, 4};
 	std::mutex mvFixedFramingMutex;
+	std::atomic_bool mvSplitEnabled{false};
+	std::atomic<int> mvSplitPanel{0};
+	std::atomic<int> mvSplitActorCount{0};
+
+	FixedFraming& FixedFramingForPanel(int panel) {
+		return panel >= 0 && panel < mvSplitPanelCount ? mvSplitFraming[panel] : mvFixedFraming;
+	}
 
 	float BoundFraming(float value, float maximum) {
 		return std::isfinite(value) ? std::clamp(value, -maximum, maximum) : 0.0f;
@@ -77,30 +87,59 @@ void SetMvKeepFraming(bool fixed, bool keep) {
 	(fixed ? mvKeepFixedFraming : mvKeepFocusFraming).store(keep, std::memory_order_relaxed);
 }
 
-void GetMvFixedFraming(float& yaw, float& pitch, float& roll, float& horizontal, float& vertical, float& zoom) {
+bool GetMvSplitEnabled() { return mvSplitEnabled.load(std::memory_order_relaxed); }
+void SetMvSplitEnabled(bool enabled) { mvSplitEnabled.store(enabled, std::memory_order_relaxed); }
+int GetMvSplitPanel() { return mvSplitPanel.load(std::memory_order_relaxed); }
+void SetMvSplitPanel(int panel) { mvSplitPanel.store(std::clamp(panel, 0, mvSplitPanelCount - 1), std::memory_order_relaxed); }
+int GetMvSplitActorCount() { return mvSplitActorCount.load(std::memory_order_relaxed); }
+
+int GetMvSplitActor(int panel) {
+	if (panel < 0 || panel >= mvSplitPanelCount) return 0;
 	std::lock_guard lock(mvFixedFramingMutex);
-	yaw = mvFixedFraming.yaw;
-	pitch = mvFixedFraming.pitch;
-	roll = mvFixedFraming.roll;
-	horizontal = mvFixedFraming.horizontal;
-	vertical = mvFixedFraming.vertical;
-	zoom = mvFixedFraming.zoom;
+	return mvSplitActors[panel];
 }
 
-void SetMvFixedFraming(float yaw, float pitch, float roll, float horizontal, float vertical, float zoom) {
+void SetMvSplitActor(int panel, int actor) {
+	if (panel < 0 || panel >= mvSplitPanelCount || actor < 0 || actor >= GetMvSplitActorCount()) return;
 	std::lock_guard lock(mvFixedFramingMutex);
-	mvFixedFraming = {BoundFraming(yaw, 180.0f), BoundFraming(pitch, 90.0f), BoundFraming(roll, 180.0f),
+	mvSplitActors[panel] = actor;
+}
+
+void GetMvFixedFraming(float& yaw, float& pitch, float& roll, float& horizontal, float& vertical, float& zoom, int panel = -1) {
+	std::lock_guard lock(mvFixedFramingMutex);
+	const auto& framing = FixedFramingForPanel(panel);
+	yaw = framing.yaw;
+	pitch = framing.pitch;
+	roll = framing.roll;
+	horizontal = framing.horizontal;
+	vertical = framing.vertical;
+	zoom = framing.zoom;
+}
+
+void SetMvFixedFraming(float yaw, float pitch, float roll, float horizontal, float vertical, float zoom, int panel = -1) {
+	std::lock_guard lock(mvFixedFramingMutex);
+	FixedFramingForPanel(panel) = {BoundFraming(yaw, 180.0f), BoundFraming(pitch, 90.0f), BoundFraming(roll, 180.0f),
 		BoundFraming(horizontal, 3.0f), BoundFraming(vertical, 3.0f), BoundFraming(zoom, 3.0f)};
 }
 
-void NudgeMvFixedFraming(float yaw, float pitch, float roll, float horizontal, float vertical, float zoom) {
+void NudgeMvFixedFraming(float yaw, float pitch, float roll, float horizontal, float vertical, float zoom, int panel = -1) {
 	std::lock_guard lock(mvFixedFramingMutex);
-	mvFixedFraming.yaw = BoundFraming(std::remainder(mvFixedFraming.yaw + yaw, 360.0f), 180.0f);
-	mvFixedFraming.pitch = BoundFraming(mvFixedFraming.pitch + pitch, 90.0f);
-	mvFixedFraming.roll = BoundFraming(std::remainder(mvFixedFraming.roll + roll, 360.0f), 180.0f);
-	mvFixedFraming.horizontal = BoundFraming(mvFixedFraming.horizontal + horizontal, 3.0f);
-	mvFixedFraming.vertical = BoundFraming(mvFixedFraming.vertical + vertical, 3.0f);
-	mvFixedFraming.zoom = BoundFraming(mvFixedFraming.zoom + zoom, 3.0f);
+	auto& framing = FixedFramingForPanel(panel);
+	framing.yaw = BoundFraming(std::remainder(framing.yaw + yaw, 360.0f), 180.0f);
+	framing.pitch = BoundFraming(framing.pitch + pitch, 90.0f);
+	framing.roll = BoundFraming(std::remainder(framing.roll + roll, 360.0f), 180.0f);
+	framing.horizontal = BoundFraming(framing.horizontal + horizontal, 3.0f);
+	framing.vertical = BoundFraming(framing.vertical + vertical, 3.0f);
+	framing.zoom = BoundFraming(framing.zoom + zoom, 3.0f);
+}
+
+void ResetMvSplitFraming() {
+	std::lock_guard lock(mvFixedFramingMutex);
+	for (int i = 0; i < mvSplitPanelCount; ++i) {
+		mvSplitFraming[i] = {};
+		mvSplitActors[i] = i;
+	}
+	SetMvSplitPanel(0);
 }
 
 void ResetMvFraming(bool fixed) {
@@ -8741,12 +8780,19 @@ namespace
 			enum class CameraPath { Legacy, Cinemachine };
 			enum class CameraMode { Normal = 0, Focus = 1, Fixed = 2 };
 
+			namespace SplitScreen {
+				bool Update(void* camera, void* owner, CameraPath source, CameraMode mode);
+				void Stop();
+				void Install();
+			}
+
 			namespace FramingInput {
 				struct State {
 					int frame = -1;
 					void* camera = nullptr;
 					HWND window = nullptr;
 					CameraMode mode = CameraMode::Normal;
+					int panel = -1;
 					POINT cursor{};
 					bool dragging = false;
 					bool resetHeld = false;
@@ -8769,7 +8815,7 @@ namespace
 					if (active && !std::exchange(logged, true)) Log(std::format("[mv-camera-input] applied {}", action));
 				}
 
-				void Poll(void* camera, CameraPath source, CameraMode mode) {
+				void Poll(void* camera, CameraPath source, CameraMode mode, int panel = -1) {
 					if (g_enable_free_camera) return;
 					static const auto* getFrame = il2cpp_symbols_logged::get_method("UnityEngine.CoreModule.dll", "UnityEngine", "Time", "get_frameCount", 0);
 					static const auto* getTime = il2cpp_symbols_logged::get_method("UnityEngine.CoreModule.dll", "UnityEngine", "Time", "get_unscaledDeltaTime", 0);
@@ -8781,6 +8827,7 @@ namespace
 					current.frame = frame;
 					current.camera = camera;
 					current.mode = mode;
+					current.panel = panel;
 					current.window = ForegroundGame();
 					if (!current.window) {
 						previous = current;
@@ -8816,7 +8863,7 @@ namespace
 					const bool continuous = last.camera == current.camera && last.window == current.window &&
 						last.mode == current.mode && frame - last.frame <= 3;
 					if (current.resetHeld && (!continuous || !last.resetHeld)) {
-						ResetMvFraming(true);
+						SetMvFixedFraming(0, 0, 0, 0, 0, 0, panel);
 						static bool reported = false;
 						LogOnce(true, reported, "reset");
 						return;
@@ -8837,7 +8884,7 @@ namespace
 					}
 
 					float dragX = 0, dragY = 0;
-					if (current.dragging && continuous && last.dragging && client.bottom > 0) {
+					if (current.dragging && continuous && last.panel == panel && last.dragging && client.bottom > 0) {
 						const float scale = 50.0f / client.bottom;
 						dragX = (current.cursor.x - last.cursor.x) * scale;
 						dragY = (last.cursor.y - current.cursor.y) * scale;
@@ -8848,7 +8895,7 @@ namespace
 					const float panX = moveX * moveStep + (shift ? 1.5f * x * step + 0.03f * dragX : 0);
 					const float panY = moveY * moveStep + (shift ? 1.5f * y * step + 0.03f * dragY : 0);
 					const float zoom = keyboardZoom + wheelZoom;
-					if (yaw || pitch || roll || panX || panY || zoom) NudgeMvFixedFraming(yaw, pitch, roll, panX, panY, zoom);
+					if (yaw || pitch || roll || panX || panY || zoom) NudgeMvFixedFraming(yaw, pitch, roll, panX, panY, zoom, panel);
 
 					static bool keyboardTurnLogged, keyboardPanLogged, keyboardZoomLogged, mouseTurnLogged, mousePanLogged, wheelLogged, rollLogged;
 					LogOnce(!shift && (x || y), keyboardTurnLogged, "keyboard turn");
@@ -8933,7 +8980,11 @@ namespace
 
 			void LeaveFramingView() {
 				if (!GetMvKeepFraming(false)) ResetMvFraming(false);
-				if (!GetMvKeepFraming(true)) ResetMvFraming(true);
+				if (!GetMvKeepFraming(true)) {
+					ResetMvFraming(true);
+					ResetMvSplitFraming();
+				}
+				SplitScreen::Stop();
 				FramingInput::previous = {};
 			}
 
@@ -9108,8 +9159,9 @@ namespace
 				frame.moved = ReadValue(transform, "get_localPosition", frame.appliedPosition);
 			}
 
-			void ApplyFraming(void* camera, CameraPath source, CameraMode mode) {
+			void ApplyFraming(void* camera, void* owner, CameraPath source, CameraMode mode) {
 				if (liveViewClosing) return;
+				if (SplitScreen::Update(camera, owner, source, mode)) return;
 				float yaw = 0, pitch = 0, clockwise = 0, horizontal = 0, vertical = 0, zoom = 0;
 				if (ready && camera && (mode == CameraMode::Focus || mode == CameraMode::Fixed))
 					FramingInput::Poll(camera, source, mode);
@@ -9163,8 +9215,8 @@ namespace
 				if (renderFrame.camera) RestoreFraming(RunwayDump::ReadPtr(self, "cameraCache"));
 			}
 
-			void ApplyLegacy(void* camera, CameraMode mode) {
-				ApplyFraming(camera, CameraPath::Legacy, mode);
+			void ApplyLegacy(void* camera, void* owner, CameraMode mode) {
+				if (camera) ApplyFraming(camera, owner, CameraPath::Legacy, mode);
 			}
 
 			HOOK_ORIG_TYPE ModernSetup_orig;
@@ -9188,7 +9240,7 @@ namespace
 				HOOK_CAST_CALL(void, BrainPush)(self, state, method);
 				void* owner = modernOwner.Target();
 				if (camera && modernOwner.access.MainCamera(owner) == camera)
-					ApplyFraming(camera, CameraPath::Cinemachine, modernOwner.access.Mode(owner));
+					ApplyFraming(camera, owner, CameraPath::Cinemachine, modernOwner.access.Mode(owner));
 			}
 
 			void Install() {
@@ -9220,6 +9272,7 @@ namespace
 				Log(std::format("[focus-framing] portrait masks installed={}", boxes));
 				const bool exit = boxes && hook("PRISM", "LiveInGameView", "_terminateAsync", 0, (void*)TerminateLiveView_hook, TerminateLiveView_orig);
 				Log(std::format("[mv-framing] view exit reset installed={}", exit));
+				if (exit) SplitScreen::Install();
 				constexpr const char* mv = "PRISM.Interactions.MV";
 				modernType = ViewDiag::find_class_anywhere(mv, "MvSceneCamerawork");
 				const bool control = hook("PRISM.Interactions.Live", "LiveMVCameraControlView", "Update", 0, (void*)ControlUpdate_hook, ControlUpdate_orig);
@@ -9231,6 +9284,354 @@ namespace
 				if (!output) return;
 				const bool setup = hook(mv, "MvSceneCamerawork", "Setup", 1, (void*)ModernSetup_hook, ModernSetup_orig);
 				Log(std::format("[focus-framing] output camera hooks cinemachine={} setup={} controls={}", output, setup, control));
+			}
+		}
+
+		namespace FocusFraming::SplitScreen {
+			constexpr const char* core = "UnityEngine.CoreModule.dll";
+			constexpr int maxActors = 16;
+
+			struct EngineMethods {
+				Il2CppClass* gameObject = nullptr;
+				Il2CppClass* texture = nullptr;
+				Il2CppReflectionType* cameraType = nullptr;
+				Il2CppReflectionType* rawImageType = nullptr;
+				Il2CppReflectionType* rectType = nullptr;
+				const MethodInfo* newGameObject = nullptr;
+				const MethodInfo* newTexture = nullptr;
+				const MethodInfo* destroy = nullptr;
+				const MethodInfo* lookRotation = nullptr;
+				const MethodInfo* width = nullptr;
+				const MethodInfo* height = nullptr;
+				const MethodInfo* frameCount = nullptr;
+
+				bool Resolve() {
+					gameObject = (Il2CppClass*)il2cpp_symbols_logged::get_class(core, "UnityEngine", "GameObject");
+					texture = (Il2CppClass*)il2cpp_symbols_logged::get_class(core, "UnityEngine", "RenderTexture");
+					if (!gameObject || !texture) return false;
+					cameraType = reflection::typeof(core, "UnityEngine", "Camera");
+					rawImageType = reflection::typeof("UnityEngine.UI.dll", "UnityEngine.UI", "RawImage");
+					rectType = reflection::typeof(core, "UnityEngine", "RectTransform");
+					newGameObject = il2cpp_class_get_method_from_name(gameObject, ".ctor", 2);
+					newTexture = il2cpp_class_get_method_from_name(texture, ".ctor", 3);
+					destroy = il2cpp_symbols_logged::get_method(core, "UnityEngine", "Object", "Destroy", 1);
+					lookRotation = il2cpp_symbols_logged::get_method(core, "UnityEngine", "Quaternion", "LookRotation", 2);
+					width = il2cpp_symbols_logged::get_method(core, "UnityEngine", "Screen", "get_width", 0);
+					height = il2cpp_symbols_logged::get_method(core, "UnityEngine", "Screen", "get_height", 0);
+					frameCount = il2cpp_symbols_logged::get_method(core, "UnityEngine", "Time", "get_frameCount", 0);
+					const MethodInfo* methods[]{newGameObject, newTexture, destroy, lookRotation, width, height, frameCount};
+					return cameraType && rawImageType && rectType && std::all_of(std::begin(methods), std::end(methods),
+						[](const MethodInfo* method) { return method && method->methodPointer; });
+				}
+			};
+			EngineMethods engine;
+			bool installed = false;
+
+			bool Alive(void* object) {
+				return object && reflection::UnityObject_op_Implicit(static_cast<Il2CppObject*>(object));
+			}
+
+			struct OwnedObject {
+				void* handle = nullptr;
+
+				Il2CppObject* Get() const { return handle ? static_cast<Il2CppObject*>(il2cpp_gchandle_get_target(handle)) : nullptr; }
+
+				void Destroy() {
+					if (auto* object = Get(); Alive(object)) engine.destroy->InvokeAsVoid(nullptr, {object});
+					if (handle) il2cpp_gchandle_free(std::exchange(handle, nullptr));
+				}
+			};
+
+			Il2CppObject* NewObject(OwnedObject& owner, const char* name, const std::vector<const Il2CppReflectionType*>& components) {
+				auto* object = (Il2CppObject*)il2cpp_object_new(engine.gameObject);
+				if (!object) return nullptr;
+				owner.handle = il2cpp_gchandle_new(object, false);
+				auto* types = reflection::CreateManagedTypeArray(components);
+				engine.newGameObject->InvokeAsVoid(object, {reinterpret_cast<Il2CppObject*>(il2cpp_string_new(name)),
+					reinterpret_cast<Il2CppObject*>(types)});
+				if (!Alive(object)) return nullptr;
+				WriteValue(object, "SetActive", false);
+				return object;
+			}
+
+			struct Panel {
+				OwnedObject cameraObject, imageObject, texture;
+				Il2CppObject* Camera() const { return OutfitCall(cameraObject.Get(), "GetComponent", {reinterpret_cast<Il2CppObject*>(engine.cameraType)}); }
+
+				bool Create(void* source, Il2CppObject* parent, int index, int w, int h) {
+					auto* cameraRoot = NewObject(cameraObject, "MV split camera", {engine.cameraType});
+					auto* imageRoot = NewObject(imageObject, "MV split panel", {engine.rectType, engine.rawImageType});
+					if (!cameraRoot || !imageRoot) return false;
+					auto* camera = Camera();
+					auto* image = OutfitCall(imageRoot, "GetComponent", {reinterpret_cast<Il2CppObject*>(engine.rawImageType)});
+					auto* rect = OutfitCall(image, "get_rectTransform");
+					if (!Alive(camera) || !Alive(image) || !Alive(rect)) return false;
+
+					auto* rt = (Il2CppObject*)il2cpp_object_new(engine.texture);
+					if (!rt) return false;
+					texture.handle = il2cpp_gchandle_new(rt, false);
+					int depth = 24;
+					engine.newTexture->InvokeAsVoid(rt, {reinterpret_cast<Il2CppObject*>(&w),
+						reinterpret_cast<Il2CppObject*>(&h), reinterpret_cast<Il2CppObject*>(&depth)});
+					auto* created = OutfitCall(rt, "Create");
+					if (!created || !created->unbox_value<bool>()) return false;
+
+					OutfitCall(camera, "CopyFrom", {static_cast<Il2CppObject*>(source)});
+					OutfitCall(camera, "set_targetTexture", {rt});
+					WriteValue(camera, "set_rect", Rect_t{0, 0, 1, 1});
+					WriteValue(camera, "set_aspect", static_cast<float>(w) / h);
+					WriteValue(camera, "set_orthographic", false);
+					WriteValue(camera, "set_fieldOfView", 37.0f);
+					WriteValue(camera, "set_allowMSAA", false);
+					float sourceDepth = 0;
+					ReadValue(source, "get_depth", sourceDepth);
+					WriteValue(camera, "set_depth", sourceDepth - 1.0f);
+					// The new render target needs an initialized color even when the source shares its color buffer.
+					if (OutfitNumber(camera, "get_clearFlags") > 2) WriteValue(camera, "set_clearFlags", 2);
+					OutfitCall(camera, "ResetWorldToCameraMatrix");
+
+					bool keepWorldPosition = false;
+					OutfitCall(rect, "SetParent", {parent, reinterpret_cast<Il2CppObject*>(&keepWorldPosition)});
+					OutfitCall(rect, "SetAsFirstSibling");
+					WriteValue(rect, "set_localRotation", Quaternion_t{0, 0, 0, 1});
+					WriteValue(rect, "set_localScale", Vector3_t{1, 1, 1});
+					BarLayout{{static_cast<float>(index) / mvSplitPanelCount, 0},
+						{static_cast<float>(index + 1) / mvSplitPanelCount, 1}, {}, {}}.Write(rect);
+					OutfitCall(image, "set_texture", {rt});
+					WriteValue(image, "set_raycastTarget", false);
+					return true;
+				}
+
+				void Enable() {
+					WriteValue(Camera(), "set_enabled", true);
+					WriteValue(cameraObject.Get(), "SetActive", true);
+					WriteValue(imageObject.Get(), "SetActive", true);
+				}
+
+				void Release() {
+					if (auto* camera = Camera(); Alive(camera)) {
+						WriteValue(camera, "set_enabled", false);
+						OutfitCall(camera, "set_targetTexture", {nullptr});
+					}
+					if (auto* image = imageObject.Get(); Alive(image)) WriteValue(image, "SetActive", false);
+					if (auto* rt = texture.Get(); Alive(rt)) OutfitCall(rt, "Release");
+					imageObject.Destroy();
+					cameraObject.Destroy();
+					texture.Destroy();
+				}
+			};
+
+			struct HiddenMask {
+				void* handle = nullptr;
+				bool wasActive = false;
+
+				void Hide(Il2CppObject* object) {
+					if (!object || !ReadValue(object, "get_activeSelf", wasActive)) return;
+					handle = newWeakHandle(object, false);
+					WriteValue(object, "SetActive", false);
+				}
+
+				void Restore() {
+					if (!handle) return;
+					auto* object = il2cpp_gchandle_get_target(handle);
+					if (Alive(object)) WriteValue(object, "SetActive", wasActive);
+					il2cpp_gchandle_free(std::exchange(handle, nullptr));
+				}
+			};
+
+			struct Renderer {
+				Panel panels[mvSplitPanelCount]{};
+				HiddenMask masks[2]{};
+				void* source = nullptr;
+				void* owner = nullptr;
+				int width = 0, height = 0;
+				float heading = 0;
+
+				bool Create(void* camera, int w, int h) {
+					auto* view = portraitMask.View();
+					void* left = RunwayDump::ReadPtr(view, "leftBox");
+					void* right = RunwayDump::ReadPtr(view, "rightBox");
+					auto* parent = OutfitCall(left, "get_parent");
+					if (!Alive(left) || !Alive(right) || !Alive(parent) || OutfitCall(right, "get_parent") != parent) return false;
+					Vector3_t forward{};
+					if (ReadValue(OutfitCall(camera, "get_transform"), "get_forward", forward) &&
+						std::hypot(forward.x, forward.z) > 0.01f)
+						heading = std::atan2(forward.x, forward.z);
+
+					for (int i = 0; i < mvSplitPanelCount; ++i)
+						if (!panels[i].Create(camera, parent, i, w, h)) return false;
+					portraitMask.Restore();
+					masks[0].Hide(OutfitCall(left, "get_gameObject"));
+					masks[1].Hide(OutfitCall(right, "get_gameObject"));
+					for (auto& panel : panels) panel.Enable();
+					source = camera;
+					width = w;
+					height = h;
+					return true;
+				}
+
+				void Release() {
+					for (auto& panel : panels) panel.Release();
+					for (auto& mask : masks) mask.Restore();
+					source = nullptr;
+					owner = nullptr;
+					heading = 0;
+				}
+			};
+			Renderer renderer;
+			void* failedSource = nullptr;
+			int lastFrame = -1;
+
+			int ReadStaticInt(const MethodInfo* method) {
+				return reinterpret_cast<int(*)(const MethodInfo*)>(method->methodPointer)(method);
+			}
+
+			OutfitArray Actors(void* owner, CameraPath path) {
+				if (path == CameraPath::Legacy) return OutfitList(OutfitCall(
+					OutfitCall(owner, "get_LiveCharacterController"), "GetCharacters"));
+				void* scene = OutfitCall(owner, "get_MvScene");
+				return OutfitList(OutfitCall(scene, "get_Characters"));
+			}
+
+			bool ActorCenter(void* actor, Vector3_t& center) {
+				if (!actor) return false;
+				const char* type = RunwayDump::ClassNameOf(actor);
+				if (type && std::string_view(type) == "TimelineSceneCharacter") {
+					void* playing = OutfitCall(actor, "get_PlayingCharacter");
+					actor = playing ? playing : OutfitCall(actor, "get_Character");
+				}
+				if (!Alive(actor)) return false;
+				Vector3_t root{};
+				if (!ReadValue(OutfitCall(actor, "get_transform"), "get_position", root)) return false;
+				if (!ReadValue(actor, "GetCharacterBoundCenter", center) ||
+					std::hypot(center.x - root.x, center.z - root.z) > 1.25f ||
+					center.y < root.y || center.y > root.y + 2.3f)
+					center = {root.x, root.y + 0.9f, root.z};
+				return std::isfinite(center.x) && std::isfinite(center.y) && std::isfinite(center.z);
+			}
+
+			void FramePanel(int index, const Vector3_t& target) {
+				auto* camera = renderer.panels[index].Camera();
+				void* transform = OutfitCall(camera, "get_transform");
+				if (!transform) return;
+				const float heading = renderer.heading + (index - 2) * 10.0f * radiansPerDegree;
+				const Vector3_t direction{std::sin(heading), -0.07f, std::cos(heading)};
+				Vector3_t look = direction, up{0, 1, 0};
+				auto* rotation = engine.lookRotation->Invoke<Il2CppObject*>(nullptr,
+					{reinterpret_cast<Il2CppObject*>(&look), reinterpret_cast<Il2CppObject*>(&up)});
+				if (!rotation) return;
+				constexpr float distance = 3.5f;
+				WriteValue(transform, "set_position", Vector3_t{target.x - distance * direction.x,
+					target.y - distance * direction.y, target.z - distance * direction.z});
+				WriteValue(transform, "set_rotation", rotation->unbox_value<Quaternion_t>());
+
+				float yaw, pitch, roll, horizontal, vertical, zoom;
+				GetMvFixedFraming(yaw, pitch, roll, horizontal, vertical, zoom, index);
+				RenderFrame offsets{};
+				offsets.transform = transform;
+				if (yaw || pitch) Turn(offsets, yaw, pitch);
+				if (horizontal || vertical) Translate(offsets, roll, horizontal, vertical);
+				resetProjection->InvokeAsVoid(camera, {});
+				if (roll || zoom) {
+					Matrix projection{};
+					if (ReadProjection(camera, projection)) WriteProjection(camera,
+						AdjustProjection(projection, static_cast<float>(renderer.width) / renderer.height, roll, std::exp2(zoom)));
+				}
+			}
+
+			void Stop() {
+				if (renderer.source) {
+					renderer.Release();
+					Log("[mv-split] restored single camera");
+				}
+				mvSplitActorCount.store(0, std::memory_order_relaxed);
+				failedSource = nullptr;
+				lastFrame = -1;
+			}
+
+			bool Update(void* camera, void* owner, CameraPath source, CameraMode mode) {
+				if (!installed || !GetMvSplitEnabled() || mode != CameraMode::Fixed || !camera || !owner ||
+					!portraitMask.viewHandle || g_enable_free_camera) {
+					if (renderer.source || failedSource) Stop();
+					return false;
+				}
+				if (failedSource == camera) return false;
+				const int frame = ReadStaticInt(engine.frameCount);
+				if (lastFrame == frame && renderer.source == camera) return true;
+				lastFrame = frame;
+				const auto actors = Actors(owner, source);
+				const int count = std::clamp(actors.count, 0, maxActors);
+				Vector3_t centers[maxActors]{};
+				bool found[maxActors]{};
+				int first = -1;
+				for (int i = 0; i < count; ++i) {
+					found[i] = ActorCenter(il2cpp_symbols::array_get_value(actors.data, i), centers[i]);
+					if (found[i] && first < 0) first = i;
+				}
+				if (first < 0) {
+					if (renderer.source) Stop();
+					return false;
+				}
+				const int screenWidth = ReadStaticInt(engine.width), screenHeight = ReadStaticInt(engine.height);
+				if (screenWidth < mvSplitPanelCount || screenHeight < 1) return false;
+				const int h = std::min(screenHeight, 900);
+				const int w = std::max(1, static_cast<int>(static_cast<double>(screenWidth) / screenHeight * h / mvSplitPanelCount));
+				if (renderer.source != camera || renderer.width != w || renderer.height != h) {
+					if (renderer.source) renderer.Release();
+					if (!renderer.Create(camera, w, h)) {
+						renderer.Release();
+						failedSource = camera;
+						mvSplitActorCount.store(0, std::memory_order_relaxed);
+						Log("[mv-split] could not create cameras or stage overlay");
+						return false;
+					}
+					Log(std::format("[mv-split] active cameras={} actors={} panel={}x{} path={}",
+						mvSplitPanelCount, count, w, h, source == CameraPath::Legacy ? "legacy" : "cinemachine"));
+				}
+				renderer.owner = owner;
+				mvSplitActorCount.store(count, std::memory_order_relaxed);
+				FramingInput::Poll(camera, source, mode, GetMvSplitPanel());
+				for (int i = 0; i < mvSplitPanelCount; ++i) {
+					const int actor = GetMvSplitActor(i);
+					FramePanel(i, centers[actor < count && found[actor] ? actor : first]);
+				}
+				return true;
+			}
+
+			void ApplyNativeSelection(void* owner, int actor, CameraPath source) {
+				if (!installed || renderer.owner != owner || !GetMvSplitEnabled() ||
+					actor < 0 || actor >= GetMvSplitActorCount()) return;
+				const int mode = source == CameraPath::Legacy ?
+					RunwayDump::ReadInt(owner, "Mode") : OutfitNumber(owner, "get_Mode");
+				if (mode != static_cast<int>(CameraMode::Fixed)) return;
+				const int panel = GetMvSplitPanel();
+				SetMvSplitActor(panel, actor);
+				Log(std::format("[mv-split] fixed button selected actor={} for panel={}", actor + 1, panel + 1));
+			}
+
+			HOOK_ORIG_TYPE LegacyIndex_orig;
+			int LegacyIndex_hook(void* self, int index, const MethodInfo* method) {
+				ApplyNativeSelection(self, index, CameraPath::Legacy);
+				return HOOK_CAST_CALL(int, LegacyIndex)(self, index, method);
+			}
+
+			HOOK_ORIG_TYPE ModernIndex_orig;
+			int ModernIndex_hook(void* self, int index, const MethodInfo* method) {
+				ApplyNativeSelection(self, index, CameraPath::Cinemachine);
+				return HOOK_CAST_CALL(int, ModernIndex)(self, index, method);
+			}
+
+			void Install() {
+				installed = engine.Resolve();
+				if (!installed) { Log("[mv-split] render methods unavailable"); return; }
+				const auto bind = [](const char* ns, const char* type, void* hook, HOOK_ORIG_TYPE& orig) {
+					const auto name = std::format("{}.ChangePatternIndex", type);
+					void* target = ViewDiag::find_method_anywhere(ns, type, "ChangePatternIndex", 1);
+					return target && HookAt(name.c_str(), target, hook, orig);
+				};
+				const bool legacy = bind("", "CameraworkManager", (void*)LegacyIndex_hook, LegacyIndex_orig);
+				const bool modern = bind("PRISM.Interactions.MV", "MvSceneCamerawork", (void*)ModernIndex_hook, ModernIndex_orig);
+				Log(std::format("[mv-split] renderer ready native-selector legacy={} cinemachine={}", legacy, modern));
 			}
 		}
 
@@ -9593,7 +9994,7 @@ namespace
 					if (rate && *rate == found->second.native) frame.extraZoom = found->second.raw - found->second.native;
 				}
 				HOOK_CAST_CALL(void, LegacyApply)(self, time, method);
-				FocusFraming::ApplyLegacy(frame.outputCamera, frame.mode);
+				FocusFraming::ApplyLegacy(frame.outputCamera, self, frame.mode);
 			}
 
 			HOOK_ORIG_TYPE LegacyApplyPattern_orig;

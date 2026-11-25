@@ -18,8 +18,15 @@ extern void SetMvFocusFraming(float roll, float horizontal, float vertical);
 extern bool GetMvKeepFraming(bool fixed);
 extern void SetMvKeepFraming(bool fixed, bool keep);
 extern void ResetMvFraming(bool fixed);
-extern void GetMvFixedFraming(float& yaw, float& pitch, float& roll, float& horizontal, float& vertical, float& zoom);
-extern void SetMvFixedFraming(float yaw, float pitch, float roll, float horizontal, float vertical, float zoom);
+extern void GetMvFixedFraming(float& yaw, float& pitch, float& roll, float& horizontal, float& vertical, float& zoom, int panel = -1);
+extern void SetMvFixedFraming(float yaw, float pitch, float roll, float horizontal, float vertical, float zoom, int panel = -1);
+extern bool GetMvSplitEnabled();
+extern void SetMvSplitEnabled(bool enabled);
+extern int GetMvSplitPanel();
+extern void SetMvSplitPanel(int panel);
+extern int GetMvSplitActorCount();
+extern int GetMvSplitActor(int panel);
+extern void SetMvSplitActor(int panel, int actor);
 
 
 #define INPUT_AND_SLIDER_FLOAT(label, data, min, max) \
@@ -657,12 +664,12 @@ namespace SCGUILoop {
 				ImGui::InputFloat3("Game Camera LookAt (x, y, z)", &SCGUIData::sysCamLookAt.x);
 				ImGui::InputFloat4("Game Camera Rotation (w, x, y, z)", &SCGUIData::sysCamRot.w);
 
-				const auto framingControls = [](bool fixed) {
+				const auto framingControls = [](bool fixed, int panel = -1) {
 					float yaw = 0, pitch = 0, zoom = 0;
 					float roll, horizontal, vertical;
 					bool changed = false;
 					if (fixed) {
-						GetMvFixedFraming(yaw, pitch, roll, horizontal, vertical, zoom);
+						GetMvFixedFraming(yaw, pitch, roll, horizontal, vertical, zoom, panel);
 						changed |= ImGui::SliderFloat("Zoom", &zoom, -3.0f, 3.0f, "%+.2f stops");
 						changed |= ImGui::SliderFloat("Turn left / right", &yaw, -180.0f, 180.0f, "%.0f deg");
 						changed |= ImGui::SliderFloat("Look down / up", &pitch, -90.0f, 90.0f, "%.0f deg");
@@ -676,9 +683,12 @@ namespace SCGUILoop {
 					ImGui::SameLine();
 					if (ImGui::Button("90 deg right")) { roll = 90.0f; changed = true; }
 					ImGui::SameLine();
-					if (ImGui::Button("Reset state")) ResetMvFraming(fixed);
+					if (ImGui::Button("Reset state")) {
+						if (panel >= 0) SetMvFixedFraming(0, 0, 0, 0, 0, 0, panel);
+						else ResetMvFraming(fixed);
+					}
 					else if (changed) {
-						if (fixed) SetMvFixedFraming(yaw, pitch, roll, horizontal, vertical, zoom);
+						if (fixed) SetMvFixedFraming(yaw, pitch, roll, horizontal, vertical, zoom, panel);
 						else SetMvFocusFraming(roll, horizontal, vertical);
 					}
 					bool keep = GetMvKeepFraming(fixed);
@@ -693,7 +703,29 @@ namespace SCGUILoop {
 				if (ImGui::CollapsingHeader("Fixed framing")) {
 					ImGui::PushID("Fixed framing");
 					HELP_TOOLTIP("Controls (?)", "Right-drag / WASD: turn\nWheel / Z and X: zoom\nI / K / J / L: move camera up / down / left / right\nShift + right-drag / Shift + WASD: move\nQ and E: roll\nR: reset");
-					framingControls(true);
+					bool split = GetMvSplitEnabled();
+					if (ImGui::Checkbox("Five-way split screen", &split)) SetMvSplitEnabled(split);
+					int panel = -1;
+					if (split) {
+						panel = GetMvSplitPanel();
+						ImGui::TextUnformatted("Edit panel");
+						for (int i = 0; i < 5; ++i) {
+							ImGui::SameLine();
+							const char label[]{static_cast<char>('1' + i), '\0'};
+							if (ImGui::RadioButton(label, panel == i)) {
+								SetMvSplitPanel(i);
+								panel = i;
+							}
+						}
+						const int actorCount = GetMvSplitActorCount();
+						if (actorCount > 0) {
+							int actor = GetMvSplitActor(panel) + 1;
+							if (actor > actorCount) actor = 1;
+							if (ImGui::SliderInt("Actor slot", &actor, 1, actorCount)) SetMvSplitActor(panel, actor - 1);
+						}
+						HELP_TOOLTIP("Follow actor (?)", "Use the game's numbered fixed-camera buttons to choose the actor for the selected panel.");
+					}
+					framingControls(true, panel);
 					ImGui::PopID();
 				}
 
