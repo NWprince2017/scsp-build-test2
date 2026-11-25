@@ -9293,12 +9293,15 @@ namespace
 
 			struct EngineMethods {
 				Il2CppClass* gameObject = nullptr;
-				Il2CppClass* texture = nullptr;
 				Il2CppReflectionType* cameraType = nullptr;
 				Il2CppReflectionType* rawImageType = nullptr;
 				Il2CppReflectionType* rectType = nullptr;
+				Il2CppReflectionType* canvasType = nullptr;
 				const MethodInfo* newGameObject = nullptr;
-				const MethodInfo* newTexture = nullptr;
+				const MethodInfo* newUiObject = nullptr;
+				const MethodInfo* addComponent = nullptr;
+				const MethodInfo* getTemporary = nullptr;
+				const MethodInfo* releaseTemporary = nullptr;
 				const MethodInfo* destroy = nullptr;
 				const MethodInfo* lookRotation = nullptr;
 				const MethodInfo* width = nullptr;
@@ -9307,20 +9310,24 @@ namespace
 
 				bool Resolve() {
 					gameObject = (Il2CppClass*)il2cpp_symbols_logged::get_class(core, "UnityEngine", "GameObject");
-					texture = (Il2CppClass*)il2cpp_symbols_logged::get_class(core, "UnityEngine", "RenderTexture");
-					if (!gameObject || !texture) return false;
+					if (!gameObject) return false;
 					cameraType = reflection::typeof(core, "UnityEngine", "Camera");
 					rawImageType = reflection::typeof("UnityEngine.UI.dll", "UnityEngine.UI", "RawImage");
 					rectType = reflection::typeof(core, "UnityEngine", "RectTransform");
-					newGameObject = il2cpp_class_get_method_from_name(gameObject, ".ctor", 2);
-					newTexture = il2cpp_class_get_method_from_name(texture, ".ctor", 3);
+					canvasType = reflection::typeof("UnityEngine.UIModule.dll", "UnityEngine", "Canvas");
+					newGameObject = il2cpp_class_get_method_from_name(gameObject, ".ctor", 1);
+					newUiObject = il2cpp_class_get_method_from_name(gameObject, ".ctor", 2);
+					addComponent = il2cpp_class_get_method_from_name(gameObject, "AddComponent", 1);
+					getTemporary = il2cpp_symbols_logged::get_method(core, "UnityEngine", "RenderTexture", "GetTemporary", 5);
+					releaseTemporary = il2cpp_symbols_logged::get_method(core, "UnityEngine", "RenderTexture", "ReleaseTemporary", 1);
 					destroy = il2cpp_symbols_logged::get_method(core, "UnityEngine", "Object", "Destroy", 1);
 					lookRotation = il2cpp_symbols_logged::get_method(core, "UnityEngine", "Quaternion", "LookRotation", 2);
 					width = il2cpp_symbols_logged::get_method(core, "UnityEngine", "Screen", "get_width", 0);
 					height = il2cpp_symbols_logged::get_method(core, "UnityEngine", "Screen", "get_height", 0);
 					frameCount = il2cpp_symbols_logged::get_method(core, "UnityEngine", "Time", "get_frameCount", 0);
-					const MethodInfo* methods[]{newGameObject, newTexture, destroy, lookRotation, width, height, frameCount};
-					return cameraType && rawImageType && rectType && std::all_of(std::begin(methods), std::end(methods),
+					const MethodInfo* methods[]{newGameObject, newUiObject, addComponent, getTemporary, releaseTemporary,
+						destroy, lookRotation, width, height, frameCount};
+					return cameraType && rawImageType && rectType && canvasType && std::all_of(std::begin(methods), std::end(methods),
 						[](const MethodInfo* method) { return method && method->methodPointer; });
 				}
 			};
@@ -9329,6 +9336,16 @@ namespace
 
 			bool Alive(void* object) {
 				return object && reflection::UnityObject_op_Implicit(static_cast<Il2CppObject*>(object));
+			}
+
+			Il2CppObject* InvokeCreation(const MethodInfo* method, Il2CppObject* instance,
+				std::initializer_list<Il2CppObject*> parameters) {
+				Il2CppObject* exception = nullptr;
+				auto* result = reflection::InvokeInTry(method, instance,
+					const_cast<Il2CppObject**>(parameters.begin()), &exception, "MV split setup");
+				if (exception) Log(std::format("[mv-split] {}: {}", method->GetFullName(),
+					Il2CppStrOf(reflection::Exception_getMessage(exception))));
+				return exception ? nullptr : result;
 			}
 
 			struct OwnedObject {
@@ -9342,16 +9359,38 @@ namespace
 				}
 			};
 
-			Il2CppObject* NewObject(OwnedObject& owner, const char* name, const std::vector<const Il2CppReflectionType*>& components) {
+			Il2CppObject* NewObject(OwnedObject& owner, const char* name, bool ui = false) {
 				auto* object = (Il2CppObject*)il2cpp_object_new(engine.gameObject);
 				if (!object) return nullptr;
 				owner.handle = il2cpp_gchandle_new(object, false);
-				auto* types = reflection::CreateManagedTypeArray(components);
-				engine.newGameObject->InvokeAsVoid(object, {reinterpret_cast<Il2CppObject*>(il2cpp_string_new(name)),
-					reinterpret_cast<Il2CppObject*>(types)});
+				auto* label = reinterpret_cast<Il2CppObject*>(il2cpp_string_new(name));
+				if (ui) {
+					auto* types = reflection::CreateManagedTypeArray({engine.rectType});
+					if (!types) return nullptr;
+					InvokeCreation(engine.newUiObject, object, {label, reinterpret_cast<Il2CppObject*>(types)});
+				} else {
+					InvokeCreation(engine.newGameObject, object, {label});
+				}
 				if (!Alive(object)) return nullptr;
 				WriteValue(object, "SetActive", false);
 				return object;
+			}
+
+			Il2CppObject* AddComponent(Il2CppObject* object, Il2CppReflectionType* type) {
+				return object ? InvokeCreation(engine.addComponent, object, {reinterpret_cast<Il2CppObject*>(type)}) : nullptr;
+			}
+
+			Il2CppObject* NewTargetTexture(int w, int h) {
+				int depth = 24, format = 7, readWrite = 0; // RenderTextureFormat.Default, RenderTextureReadWrite.Default
+				auto make = [&]() {
+					return InvokeCreation(engine.getTemporary, nullptr, {reinterpret_cast<Il2CppObject*>(&w),
+						reinterpret_cast<Il2CppObject*>(&h), reinterpret_cast<Il2CppObject*>(&depth),
+						reinterpret_cast<Il2CppObject*>(&format), reinterpret_cast<Il2CppObject*>(&readWrite)});
+				};
+				if (auto* target = make(); Alive(target)) return target;
+				depth = 16;
+				format = 0; // RenderTextureFormat.ARGB32
+				return make();
 			}
 
 			struct Panel {
@@ -9359,22 +9398,27 @@ namespace
 				Il2CppObject* Camera() const { return OutfitCall(cameraObject.Get(), "GetComponent", {reinterpret_cast<Il2CppObject*>(engine.cameraType)}); }
 
 				bool Create(void* source, Il2CppObject* parent, int index, int w, int h) {
-					auto* cameraRoot = NewObject(cameraObject, "MV split camera", {engine.cameraType});
-					auto* imageRoot = NewObject(imageObject, "MV split panel", {engine.rectType, engine.rawImageType});
-					if (!cameraRoot || !imageRoot) return false;
-					auto* camera = Camera();
-					auto* image = OutfitCall(imageRoot, "GetComponent", {reinterpret_cast<Il2CppObject*>(engine.rawImageType)});
+					auto* cameraRoot = NewObject(cameraObject, "MV split camera");
+					auto* camera = AddComponent(cameraRoot, engine.cameraType);
+					if (!Alive(camera)) {
+						Log(std::format("[mv-split] panel {} camera creation failed (root={})", index + 1, cameraRoot != nullptr));
+						return false;
+					}
+					auto* imageRoot = NewObject(imageObject, "MV split panel", true);
+					auto* image = AddComponent(imageRoot, engine.rawImageType);
 					auto* rect = OutfitCall(image, "get_rectTransform");
-					if (!Alive(camera) || !Alive(image) || !Alive(rect)) return false;
+					if (!Alive(image) || !Alive(rect)) {
+						Log(std::format("[mv-split] panel {} image creation failed (root={}, image={})",
+							index + 1, imageRoot != nullptr, image != nullptr));
+						return false;
+					}
 
-					auto* rt = (Il2CppObject*)il2cpp_object_new(engine.texture);
-					if (!rt) return false;
+					auto* rt = NewTargetTexture(w, h);
+					if (!Alive(rt)) {
+						Log(std::format("[mv-split] panel {} texture allocation failed at {}x{}", index + 1, w, h));
+						return false;
+					}
 					texture.handle = il2cpp_gchandle_new(rt, false);
-					int depth = 24;
-					engine.newTexture->InvokeAsVoid(rt, {reinterpret_cast<Il2CppObject*>(&w),
-						reinterpret_cast<Il2CppObject*>(&h), reinterpret_cast<Il2CppObject*>(&depth)});
-					auto* created = OutfitCall(rt, "Create");
-					if (!created || !created->unbox_value<bool>()) return false;
 
 					OutfitCall(camera, "CopyFrom", {static_cast<Il2CppObject*>(source)});
 					OutfitCall(camera, "set_targetTexture", {rt});
@@ -9392,6 +9436,10 @@ namespace
 
 					bool keepWorldPosition = false;
 					OutfitCall(rect, "SetParent", {parent, reinterpret_cast<Il2CppObject*>(&keepWorldPosition)});
+					if (!Alive(OutfitCall(rect, "get_parent"))) {
+						Log(std::format("[mv-split] panel {} could not attach to the canvas", index + 1));
+						return false;
+					}
 					OutfitCall(rect, "SetAsFirstSibling");
 					WriteValue(rect, "set_localRotation", Quaternion_t{0, 0, 0, 1});
 					WriteValue(rect, "set_localScale", Vector3_t{1, 1, 1});
@@ -9414,10 +9462,10 @@ namespace
 						OutfitCall(camera, "set_targetTexture", {nullptr});
 					}
 					if (auto* image = imageObject.Get(); Alive(image)) WriteValue(image, "SetActive", false);
-					if (auto* rt = texture.Get(); Alive(rt)) OutfitCall(rt, "Release");
+					if (auto* rt = texture.Get(); Alive(rt)) engine.releaseTemporary->InvokeAsVoid(nullptr, {rt});
+					if (texture.handle) il2cpp_gchandle_free(std::exchange(texture.handle, nullptr));
 					imageObject.Destroy();
 					cameraObject.Destroy();
-					texture.Destroy();
 				}
 			};
 
@@ -9442,17 +9490,39 @@ namespace
 			struct Renderer {
 				Panel panels[mvSplitPanelCount]{};
 				HiddenMask masks[2]{};
+				OwnedObject fallbackCanvas;
 				void* source = nullptr;
 				void* owner = nullptr;
 				int width = 0, height = 0;
 				float heading = 0;
 
+				Il2CppObject* CanvasParent(void* view, void* left, void* right) {
+					bool includeInactive = false;
+					for (void* object : {left, right, view}) {
+						if (!Alive(object)) continue;
+						auto* canvas = OutfitCall(object, "GetComponentInParent",
+							{reinterpret_cast<Il2CppObject*>(engine.canvasType), reinterpret_cast<Il2CppObject*>(&includeInactive)});
+						auto* root = OutfitCall(canvas, "get_rootCanvas");
+						auto* parent = OutfitCall(root, "get_transform");
+						if (Alive(parent)) return parent;
+					}
+					auto* canvasObject = NewObject(fallbackCanvas, "MV split canvas", true);
+					auto* canvas = AddComponent(canvasObject, engine.canvasType);
+					if (!Alive(canvas)) return nullptr;
+					WriteValue(canvas, "set_renderMode", 0); // ScreenSpaceOverlay
+					WriteValue(canvas, "set_sortingOrder", -32768);
+					return OutfitCall(canvas, "get_transform");
+				}
+
 				bool Create(void* camera, int w, int h) {
 					auto* view = portraitMask.View();
 					void* left = RunwayDump::ReadPtr(view, "leftBox");
 					void* right = RunwayDump::ReadPtr(view, "rightBox");
-					auto* parent = OutfitCall(left, "get_parent");
-					if (!Alive(left) || !Alive(right) || !Alive(parent) || OutfitCall(right, "get_parent") != parent) return false;
+					auto* parent = CanvasParent(view, left, right);
+					if (!Alive(parent)) {
+						Log(std::format("[mv-split] canvas unavailable (left={}, right={})", Alive(left), Alive(right)));
+						return false;
+					}
 					Vector3_t forward{};
 					if (ReadValue(OutfitCall(camera, "get_transform"), "get_forward", forward) &&
 						std::hypot(forward.x, forward.z) > 0.01f)
@@ -9461,8 +9531,9 @@ namespace
 					for (int i = 0; i < mvSplitPanelCount; ++i)
 						if (!panels[i].Create(camera, parent, i, w, h)) return false;
 					portraitMask.Restore();
-					masks[0].Hide(OutfitCall(left, "get_gameObject"));
-					masks[1].Hide(OutfitCall(right, "get_gameObject"));
+					masks[0].Hide(Alive(left) ? OutfitCall(left, "get_gameObject") : nullptr);
+					masks[1].Hide(Alive(right) ? OutfitCall(right, "get_gameObject") : nullptr);
+					if (auto* canvas = fallbackCanvas.Get(); Alive(canvas)) WriteValue(canvas, "SetActive", true);
 					for (auto& panel : panels) panel.Enable();
 					source = camera;
 					width = w;
@@ -9473,6 +9544,7 @@ namespace
 				void Release() {
 					for (auto& panel : panels) panel.Release();
 					for (auto& mask : masks) mask.Restore();
+					fallbackCanvas.Destroy();
 					source = nullptr;
 					owner = nullptr;
 					heading = 0;
@@ -9588,8 +9660,9 @@ namespace
 						Log("[mv-split] could not create cameras or stage overlay");
 						return false;
 					}
-					Log(std::format("[mv-split] active cameras={} actors={} panel={}x{} path={}",
-						mvSplitPanelCount, count, w, h, source == CameraPath::Legacy ? "legacy" : "cinemachine"));
+					Log(std::format("[mv-split] active cameras={} actors={} panel={}x{} path={} canvas={}",
+						mvSplitPanelCount, count, w, h, source == CameraPath::Legacy ? "legacy" : "cinemachine",
+						renderer.fallbackCanvas.Get() ? "fallback" : "live"));
 				}
 				renderer.owner = owner;
 				mvSplitActorCount.store(count, std::memory_order_relaxed);
