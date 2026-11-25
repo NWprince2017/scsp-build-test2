@@ -3,6 +3,7 @@
 #include <ranges>
 #include <set>
 #include <mutex>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstring>
@@ -45,15 +46,19 @@ namespace {
 	};
 	FixedFraming mvFixedFraming{};
 	constexpr int mvSplitPanelCount = 5;
+	// ILiveUnitExtensions.LeftToRight for the first five formation slots.
+	constexpr std::array<int, mvSplitPanelCount> mvSplitDefaultActors{4, 2, 0, 1, 3};
 	FixedFraming mvSplitFraming[mvSplitPanelCount]{};
-	int mvSplitActors[mvSplitPanelCount]{0, 1, 2, 3, 4};
+	auto mvSplitActors = mvSplitDefaultActors;
 	std::mutex mvFixedFramingMutex;
 	std::atomic_bool mvSplitEnabled{false};
-	std::atomic<int> mvSplitPanel{0};
+	std::atomic<int> mvSplitPanel{mvSplitPanelCount / 2};
 	std::atomic<int> mvSplitActorCount{0};
 
+	bool IsMvSplitPanel(int panel) { return panel >= 0 && panel < mvSplitPanelCount; }
+
 	FixedFraming& FixedFramingForPanel(int panel) {
-		return panel >= 0 && panel < mvSplitPanelCount ? mvSplitFraming[panel] : mvFixedFraming;
+		return IsMvSplitPanel(panel) ? mvSplitFraming[panel] : mvFixedFraming;
 	}
 
 	float BoundFraming(float value, float maximum) {
@@ -92,6 +97,7 @@ void SetMvSplitEnabled(bool enabled) { mvSplitEnabled.store(enabled, std::memory
 int GetMvSplitPanel() { return mvSplitPanel.load(std::memory_order_relaxed); }
 void SetMvSplitPanel(int panel) { mvSplitPanel.store(std::clamp(panel, 0, mvSplitPanelCount - 1), std::memory_order_relaxed); }
 int GetMvSplitActorCount() { return mvSplitActorCount.load(std::memory_order_relaxed); }
+int GetMvSplitPanelNumber(int panel) { return IsMvSplitPanel(panel) ? mvSplitDefaultActors[panel] + 1 : 0; }
 
 int GetMvSplitActor(int panel) {
 	if (panel < 0 || panel >= mvSplitPanelCount) return 0;
@@ -118,7 +124,8 @@ void GetMvFixedFraming(float& yaw, float& pitch, float& roll, float& horizontal,
 
 void SetMvFixedFraming(float yaw, float pitch, float roll, float horizontal, float vertical, float zoom, int panel = -1) {
 	std::lock_guard lock(mvFixedFramingMutex);
-	FixedFramingForPanel(panel) = {BoundFraming(yaw, 180.0f), BoundFraming(pitch, 90.0f), BoundFraming(roll, 180.0f),
+	FixedFramingForPanel(panel) = {BoundFraming(yaw, 180.0f), BoundFraming(pitch, IsMvSplitPanel(panel) ? 180.0f : 90.0f),
+		BoundFraming(roll, 180.0f),
 		BoundFraming(horizontal, 3.0f), BoundFraming(vertical, 3.0f), BoundFraming(zoom, 3.0f)};
 }
 
@@ -126,7 +133,8 @@ void NudgeMvFixedFraming(float yaw, float pitch, float roll, float horizontal, f
 	std::lock_guard lock(mvFixedFramingMutex);
 	auto& framing = FixedFramingForPanel(panel);
 	framing.yaw = BoundFraming(std::remainder(framing.yaw + yaw, 360.0f), 180.0f);
-	framing.pitch = BoundFraming(framing.pitch + pitch, 90.0f);
+	framing.pitch = IsMvSplitPanel(panel) ? BoundFraming(std::remainder(framing.pitch + pitch, 360.0f), 180.0f) :
+		BoundFraming(framing.pitch + pitch, 90.0f);
 	framing.roll = BoundFraming(std::remainder(framing.roll + roll, 360.0f), 180.0f);
 	framing.horizontal = BoundFraming(framing.horizontal + horizontal, 3.0f);
 	framing.vertical = BoundFraming(framing.vertical + vertical, 3.0f);
@@ -135,11 +143,9 @@ void NudgeMvFixedFraming(float yaw, float pitch, float roll, float horizontal, f
 
 void ResetMvSplitFraming() {
 	std::lock_guard lock(mvFixedFramingMutex);
-	for (int i = 0; i < mvSplitPanelCount; ++i) {
-		mvSplitFraming[i] = {};
-		mvSplitActors[i] = i;
-	}
-	SetMvSplitPanel(0);
+	for (auto& framing : mvSplitFraming) framing = {};
+	mvSplitActors = mvSplitDefaultActors;
+	SetMvSplitPanel(mvSplitPanelCount / 2);
 }
 
 void ResetMvFraming(bool fixed) {
@@ -8784,6 +8790,7 @@ namespace
 				bool Update(void* camera, void* owner, CameraPath source, CameraMode mode);
 				void Stop();
 				void Install();
+				void SyncControlButtons(void* view, void* owner);
 			}
 
 			namespace FramingInput {
@@ -9230,6 +9237,7 @@ namespace
 				HOOK_CAST_CALL(void, ControlUpdate)(self, method);
 				void* owner = RunwayDump::ReadPtr(self, "camerawork");
 				if (owner && KlassOf(owner) == modernType) modernOwner.Register(owner);
+				SplitScreen::SyncControlButtons(self, owner);
 			}
 
 			HOOK_ORIG_TYPE BrainPush_orig;
@@ -9586,29 +9594,33 @@ namespace
 				auto* camera = renderer.panels[index].Camera();
 				void* transform = OutfitCall(camera, "get_transform");
 				if (!transform) return;
-				const float heading = renderer.heading + (index - 2) * 10.0f * radiansPerDegree;
-				const Vector3_t direction{std::sin(heading), -0.07f, std::cos(heading)};
-				Vector3_t look = direction, up{0, 1, 0};
-				auto* rotation = engine.lookRotation->Invoke<Il2CppObject*>(nullptr,
-					{reinterpret_cast<Il2CppObject*>(&look), reinterpret_cast<Il2CppObject*>(&up)});
-				if (!rotation) return;
-				constexpr float distance = 3.5f;
-				WriteValue(transform, "set_position", Vector3_t{target.x - distance * direction.x,
-					target.y - distance * direction.y, target.z - distance * direction.z});
-				WriteValue(transform, "set_rotation", rotation->unbox_value<Quaternion_t>());
 
 				float yaw, pitch, roll, horizontal, vertical, zoom;
 				GetMvFixedFraming(yaw, pitch, roll, horizontal, vertical, zoom, index);
+				const float heading = renderer.heading + ((index - 2) * 10.0f + yaw) * radiansPerDegree;
+				const float elevation = (4.0f + pitch) * radiansPerDegree;
+				const float sinHeading = std::sin(heading), cosHeading = std::cos(heading);
+				const float sinElevation = std::sin(elevation), cosElevation = std::cos(elevation);
+				Vector3_t look{sinHeading * cosElevation, -sinElevation, cosHeading * cosElevation};
+				// Rotate the up vector with the orbit so the camera stays stable above and below the actor.
+				Vector3_t up{sinHeading * sinElevation, cosElevation, cosHeading * sinElevation};
+				auto* rotation = engine.lookRotation->Invoke<Il2CppObject*>(nullptr,
+					{reinterpret_cast<Il2CppObject*>(&look), reinterpret_cast<Il2CppObject*>(&up)});
+				if (!rotation) return;
+				const float distance = std::max(0.45f, 3.5f * std::exp2(-zoom));
+				WriteValue(transform, "set_position", Vector3_t{target.x - distance * look.x,
+					target.y - distance * look.y, target.z - distance * look.z});
+				WriteValue(transform, "set_rotation", rotation->unbox_value<Quaternion_t>());
+
 				RenderFrame offsets{};
 				offsets.transform = transform;
-				if (yaw || pitch) Turn(offsets, yaw, pitch);
 				if (horizontal || vertical) Translate(offsets, roll, horizontal, vertical);
 				resetProjection->InvokeAsVoid(camera, {});
-				if (roll || zoom) {
+				if (roll) {
 					Matrix projection{};
 					if (ReadProjection(camera, projection)) {
 						projection = AdjustProjection(projection, static_cast<float>(renderer.width) / renderer.height,
-							roll, std::exp2(zoom));
+							roll, 1.0f);
 						WriteProjection(camera, projection);
 					}
 				}
@@ -9674,26 +9686,70 @@ namespace
 				return true;
 			}
 
-			void ApplyNativeSelection(void* owner, int actor, CameraPath source) {
-				if (!installed || renderer.owner != owner || !GetMvSplitEnabled() ||
-					actor < 0 || actor >= GetMvSplitActorCount()) return;
-				const int mode = source == CameraPath::Legacy ?
-					RunwayDump::ReadInt(owner, "Mode") : OutfitNumber(owner, "get_Mode");
-				if (mode != static_cast<int>(CameraMode::Fixed)) return;
+			void* controlsView = nullptr;
+			bool showingSplitSelection = false;
+			constexpr int noNativeOperation = 0;
+
+			bool SplitSelectionActive() {
+				return renderer.source && GetMvSplitEnabled() && !liveViewClosing;
+			}
+
+			void ChooseActor(int actor) {
+				if (actor < 0 || actor >= GetMvSplitActorCount()) return;
 				const int panel = GetMvSplitPanel();
 				SetMvSplitActor(panel, actor);
-				Log(std::format("[mv-split] fixed button selected actor={} for panel={}", actor + 1, panel + 1));
+				Log(std::format("[mv-split] fixed button selected actor={} for position={} column={}",
+					actor + 1, GetMvSplitPanelNumber(panel), panel + 1));
+			}
+
+			void SyncControlButtons(void* view, void* owner) {
+				if (!installed || !owner) return;
+				if (controlsView != view) {
+					controlsView = view;
+					showingSplitSelection = false;
+				}
+				const bool split = SplitSelectionActive();
+				if (!split && !showingSplitSelection) return;
+				auto* index = RunwayDump::ReadPtr(view, "cameraIndex");
+				if (!index) return;
+				int desired = OutfitNumber(owner, "get_PatternIndex");
+				if (split) {
+					desired = GetMvSplitActor(GetMvSplitPanel());
+					if (desired >= GetMvSplitActorCount()) desired = 0;
+				}
+				showingSplitSelection = split;
+				if (OutfitNumber(index, "get_Value") != desired) WriteValue(index, "set_Value", desired);
+			}
+
+			HOOK_ORIG_TYPE PatternButton_orig;
+			void PatternButton_hook(void* self, uint8_t unit, const MethodInfo* method) {
+				if (SplitSelectionActive()) {
+					void* closure = RunwayDump::ReadPtr(self, "CS$<>8__locals1");
+					void* view = RunwayDump::ReadPtr(closure, "<>4__this");
+					void* owner = RunwayDump::ReadPtr(closure, "camerawork");
+					if ((view && view == controlsView) || (owner && owner == renderer.owner)) {
+						ChooseActor(RunwayDump::ReadInt(self, "index"));
+						return;
+					}
+				}
+				HOOK_CAST_CALL(void, PatternButton)(self, unit, method);
 			}
 
 			HOOK_ORIG_TYPE LegacyIndex_orig;
 			int LegacyIndex_hook(void* self, int index, const MethodInfo* method) {
-				ApplyNativeSelection(self, index, CameraPath::Legacy);
+				if (SplitSelectionActive() && self == renderer.owner) {
+					ChooseActor(index);
+					return noNativeOperation;
+				}
 				return HOOK_CAST_CALL(int, LegacyIndex)(self, index, method);
 			}
 
 			HOOK_ORIG_TYPE ModernIndex_orig;
 			int ModernIndex_hook(void* self, int index, const MethodInfo* method) {
-				ApplyNativeSelection(self, index, CameraPath::Cinemachine);
+				if (SplitSelectionActive() && self == renderer.owner) {
+					ChooseActor(index);
+					return noNativeOperation;
+				}
 				return HOOK_CAST_CALL(int, ModernIndex)(self, index, method);
 			}
 
@@ -9707,7 +9763,12 @@ namespace
 				};
 				const bool legacy = bind("", "CameraworkManager", (void*)LegacyIndex_hook, LegacyIndex_orig);
 				const bool modern = bind("PRISM.Interactions.MV", "MvSceneCamerawork", (void*)ModernIndex_hook, ModernIndex_orig);
-				Log(std::format("[mv-split] renderer ready native-selector legacy={} cinemachine={}", legacy, modern));
+				auto* outer = (Il2CppClass*)ViewDiag::find_class_anywhere("PRISM.Interactions.Live", "LiveMVCameraControlView");
+				auto* nested = outer ? il2cpp_symbols::get_nested_class(outer, "<>c__DisplayClass18_1") : nullptr;
+				const auto* click = nested ? il2cpp_class_get_method_from_name(nested, "<InitializeAsync>b__10", 1) : nullptr;
+				const bool buttons = click && click->methodPointer && HookAt("LiveMVCameraControlView.PatternButton",
+					(void*)click->methodPointer, (void*)PatternButton_hook, PatternButton_orig);
+				Log(std::format("[mv-split] renderer ready native-selector legacy={} cinemachine={} buttons={}", legacy, modern, buttons));
 			}
 		}
 

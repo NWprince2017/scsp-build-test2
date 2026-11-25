@@ -24,6 +24,7 @@ extern bool GetMvSplitEnabled();
 extern void SetMvSplitEnabled(bool enabled);
 extern int GetMvSplitPanel();
 extern void SetMvSplitPanel(int panel);
+extern int GetMvSplitPanelNumber(int panel);
 extern int GetMvSplitActorCount();
 extern int GetMvSplitActor(int panel);
 extern void SetMvSplitActor(int panel, int actor);
@@ -670,9 +671,14 @@ namespace SCGUILoop {
 					bool changed = false;
 					if (fixed) {
 						GetMvFixedFraming(yaw, pitch, roll, horizontal, vertical, zoom, panel);
-						changed |= ImGui::SliderFloat("Zoom", &zoom, -3.0f, 3.0f, "%+.2f stops");
-						changed |= ImGui::SliderFloat("Turn left / right", &yaw, -180.0f, 180.0f, "%.0f deg");
-						changed |= ImGui::SliderFloat("Look down / up", &pitch, -90.0f, 90.0f, "%.0f deg");
+						const bool orbit = panel >= 0;
+						const float maxPitch = orbit ? 180.0f : 90.0f;
+						changed |= ImGui::SliderFloat(orbit ? "Zoom toward actor" : "Zoom", &zoom,
+							-3.0f, 3.0f, "%+.2f stops");
+						changed |= ImGui::SliderFloat(orbit ? "Orbit left / right" : "Turn left / right", &yaw,
+							-180.0f, 180.0f, "%.0f deg");
+						changed |= ImGui::SliderFloat(orbit ? "Orbit below / above" : "Look down / up", &pitch,
+							-maxPitch, maxPitch, "%.0f deg");
 					} else {
 						GetMvFocusFraming(roll, horizontal, vertical);
 					}
@@ -711,7 +717,7 @@ namespace SCGUILoop {
 						ImGui::TextUnformatted("Edit panel");
 						for (int i = 0; i < 5; ++i) {
 							ImGui::SameLine();
-							const char label[]{static_cast<char>('1' + i), '\0'};
+							const char label[]{static_cast<char>('0' + GetMvSplitPanelNumber(i)), '\0'};
 							if (ImGui::RadioButton(label, panel == i)) {
 								SetMvSplitPanel(i);
 								panel = i;
@@ -724,6 +730,7 @@ namespace SCGUILoop {
 							if (ImGui::SliderInt("Actor slot", &actor, 1, actorCount)) SetMvSplitActor(panel, actor - 1);
 						}
 						HELP_TOOLTIP("Follow actor (?)", "Use the game's numbered fixed-camera buttons to choose the actor for the selected panel.");
+						HELP_TOOLTIP("Orbit controls (?)", "Right-drag / WASD: orbit around the actor\nWheel / Z and X: move closer or farther\nI / K / J / L: move the camera up / down / left / right");
 					}
 					framingControls(true, panel);
 					ImGui::PopID();
