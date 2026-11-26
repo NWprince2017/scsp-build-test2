@@ -22,12 +22,20 @@ extern void GetMvFixedFraming(float& yaw, float& pitch, float& roll, float& hori
 extern void SetMvFixedFraming(float yaw, float pitch, float roll, float horizontal, float vertical, float zoom, int panel = -1);
 extern bool GetMvSplitEnabled();
 extern void SetMvSplitEnabled(bool enabled);
+extern int GetMvSplitLayout();
+extern void SetMvSplitLayout(int layout);
+extern int GetMvSplitLayoutChoiceCount();
+extern const char* GetMvSplitLayoutName(int layout);
+extern int GetMvSplitVisibleCount();
+extern bool IsMvSplitMixedLayout();
 extern int GetMvSplitPanel();
 extern void SetMvSplitPanel(int panel);
 extern int GetMvSplitPanelNumber(int panel);
 extern int GetMvSplitActorCount();
 extern int GetMvSplitActor(int panel);
 extern void SetMvSplitActor(int panel, int actor);
+extern int GetMvSplitPreviewPane(int preview);
+extern void SetMvSplitPreviewPane(int preview, int pane);
 
 
 #define INPUT_AND_SLIDER_FLOAT(label, data, min, max) \
@@ -710,12 +718,20 @@ namespace SCGUILoop {
 					ImGui::PushID("Fixed framing");
 					HELP_TOOLTIP("Controls (?)", "Right-drag / WASD: turn\nWheel / Z and X: zoom\nI / K / J / L: move camera up / down / left / right\nShift + right-drag / Shift + WASD: move\nQ and E: roll\nR: reset");
 					bool split = GetMvSplitEnabled();
-					if (ImGui::Checkbox("Five-way split screen", &split)) SetMvSplitEnabled(split);
+					if (ImGui::Checkbox("Multi-camera split screen", &split)) SetMvSplitEnabled(split);
 					int panel = -1;
 					if (split) {
+						const int layout = GetMvSplitLayout();
+						if (ImGui::BeginCombo("Layout", GetMvSplitLayoutName(layout))) {
+							for (int i = 0; i < GetMvSplitLayoutChoiceCount(); ++i) {
+								if (ImGui::Selectable(GetMvSplitLayoutName(i), i == layout)) SetMvSplitLayout(i);
+							}
+							ImGui::EndCombo();
+						}
+						const int panes = GetMvSplitVisibleCount();
 						panel = GetMvSplitPanel();
 						ImGui::TextUnformatted("Edit panel");
-						for (int i = 0; i < 5; ++i) {
+						for (int i = 0; i < panes; ++i) {
 							ImGui::SameLine();
 							const char label[]{static_cast<char>('0' + GetMvSplitPanelNumber(i)), '\0'};
 							if (ImGui::RadioButton(label, panel == i)) {
@@ -728,6 +744,19 @@ namespace SCGUILoop {
 							int actor = GetMvSplitActor(panel) + 1;
 							if (actor > actorCount) actor = 1;
 							if (ImGui::SliderInt("Actor slot", &actor, 1, actorCount)) SetMvSplitActor(panel, actor - 1);
+							if (IsMvSplitMixedLayout() && ImGui::Button("Follow this actor in every pane"))
+								for (int i = 0; i < panes; ++i) SetMvSplitActor(i, actor - 1);
+							for (int i = 0; i < 2; ++i) {
+								const int output = std::min(GetMvSplitPreviewPane(i), panes - 1);
+								const auto label = output < 0 ? std::string("Off") : "Panel " + std::to_string(GetMvSplitPanelNumber(output));
+								if (!ImGui::BeginCombo(i == 0 ? "Detached preview A" : "Detached preview B", label.c_str())) continue;
+								if (ImGui::Selectable("Off", output < 0)) SetMvSplitPreviewPane(i, -1);
+								for (int j = 0; j < panes; ++j) {
+									const auto name = "Panel " + std::to_string(GetMvSplitPanelNumber(j));
+									if (ImGui::Selectable(name.c_str(), output == j)) SetMvSplitPreviewPane(i, j);
+								}
+								ImGui::EndCombo();
+							}
 						}
 						HELP_TOOLTIP("Follow actor (?)", "Use the game's numbered fixed-camera buttons to choose the actor for the selected panel.");
 						HELP_TOOLTIP("Orbit controls (?)", "Right-drag / WASD: orbit around the actor\nWheel / Z and X: move closer or farther\nI / K / J / L: move the camera up / down / left / right");

@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#pragma comment(lib, "gdi32.lib")
 #include <cstdint>
 #include <cstdlib>
 #include <cstdio>
@@ -46,19 +47,57 @@ namespace {
 	};
 	FixedFraming mvFixedFraming{};
 	constexpr int mvSplitPanelCount = 5;
-	// ILiveUnitExtensions.LeftToRight for the first five formation slots.
-	constexpr std::array<int, mvSplitPanelCount> mvSplitDefaultActors{4, 2, 0, 1, 3};
-	FixedFraming mvSplitFraming[mvSplitPanelCount]{};
-	auto mvSplitActors = mvSplitDefaultActors;
+	enum MvSplitLayout { SplitAuto, SplitTwo, SplitThree, SplitFour, SplitFive,
+		SplitRightStack, SplitBottomPair, SplitPictureInPicture, SplitLayoutCount };
+	struct SplitLayoutInfo {
+		const char* name;
+		int count;
+		std::array<int, mvSplitPanelCount> actors;
+		int selected;
+	};
+	// Equal layouts follow ILiveUnitExtensions.LeftToRight.
+	constexpr SplitLayoutInfo splitLayouts[]{
+		{"Match formation", 0, {}, 0},
+		{"2 vertical panes", 2, {0, 1}, 0},
+		{"3 vertical panes", 3, {2, 0, 1}, 1},
+		{"4 vertical panes", 4, {2, 0, 1, 3}, 1},
+		{"5 vertical panes", 5, {4, 2, 0, 1, 3}, 2},
+		{"Large left + stacked right", 3, {}, 0},
+		{"Large top + two below", 3, {}, 0},
+		{"Main view + two corner insets", 3, {}, 0}
+	};
+	static_assert(std::size(splitLayouts) == SplitLayoutCount);
+	struct SplitLayoutState {
+		FixedFraming framing[mvSplitPanelCount]{};
+		std::array<int, mvSplitPanelCount> actors{};
+		int selected = 0;
+	};
+	auto mvSplitStates = [] {
+		std::array<SplitLayoutState, SplitLayoutCount> states{};
+		for (int i = 0; i < SplitLayoutCount; ++i) {
+			states[i].actors = splitLayouts[i].actors;
+			states[i].selected = splitLayouts[i].selected;
+		}
+		return states;
+	}();
 	std::mutex mvFixedFramingMutex;
 	std::atomic_bool mvSplitEnabled{false};
-	std::atomic<int> mvSplitPanel{mvSplitPanelCount / 2};
+	std::atomic<int> mvSplitLayout{SplitAuto};
 	std::atomic<int> mvSplitActorCount{0};
+	std::atomic<int> mvPreviewPanes[2]{-1, -1};
+
+	int ResolveSplitLayout() {
+		const int layout = mvSplitLayout.load(std::memory_order_relaxed);
+		const int actors = mvSplitActorCount.load(std::memory_order_relaxed);
+		if (layout != SplitAuto) return layout;
+		if (actors == 1) return SplitRightStack;
+		return actors >= 2 && actors <= 4 ? SplitTwo + actors - 2 : SplitFive;
+	}
 
 	bool IsMvSplitPanel(int panel) { return panel >= 0 && panel < mvSplitPanelCount; }
 
-	FixedFraming& FixedFramingForPanel(int panel) {
-		return IsMvSplitPanel(panel) ? mvSplitFraming[panel] : mvFixedFraming;
+	FixedFraming& FixedFramingForPanel(int panel, int layout) {
+		return IsMvSplitPanel(panel) ? mvSplitStates[layout].framing[panel] : mvFixedFraming;
 	}
 
 	float BoundFraming(float value, float maximum) {
@@ -94,26 +133,48 @@ void SetMvKeepFraming(bool fixed, bool keep) {
 
 bool GetMvSplitEnabled() { return mvSplitEnabled.load(std::memory_order_relaxed); }
 void SetMvSplitEnabled(bool enabled) { mvSplitEnabled.store(enabled, std::memory_order_relaxed); }
-int GetMvSplitPanel() { return mvSplitPanel.load(std::memory_order_relaxed); }
-void SetMvSplitPanel(int panel) { mvSplitPanel.store(std::clamp(panel, 0, mvSplitPanelCount - 1), std::memory_order_relaxed); }
+int GetMvSplitLayout() { return mvSplitLayout.load(std::memory_order_relaxed); }
+void SetMvSplitLayout(int layout) { mvSplitLayout.store(std::clamp(layout, 0, int(SplitLayoutCount) - 1), std::memory_order_relaxed); }
+int GetMvSplitLayoutChoiceCount() { return SplitLayoutCount; }
+const char* GetMvSplitLayoutName(int layout) { return splitLayouts[layout].name; }
+int GetMvSplitVisibleCount() { return splitLayouts[ResolveSplitLayout()].count; }
+bool IsMvSplitMixedLayout() { return ResolveSplitLayout() >= SplitRightStack; }
+int GetMvSplitPanelForLayout(int layout) {
+	std::lock_guard lock(mvFixedFramingMutex);
+	return mvSplitStates[layout].selected;
+}
+int GetMvSplitPanel() { return GetMvSplitPanelForLayout(ResolveSplitLayout()); }
+void SetMvSplitPanel(int panel) {
+	const int layout = ResolveSplitLayout();
+	std::lock_guard lock(mvFixedFramingMutex);
+	mvSplitStates[layout].selected = std::clamp(panel, 0, splitLayouts[layout].count - 1);
+}
 int GetMvSplitActorCount() { return mvSplitActorCount.load(std::memory_order_relaxed); }
-int GetMvSplitPanelNumber(int panel) { return IsMvSplitPanel(panel) ? mvSplitDefaultActors[panel] + 1 : 0; }
-
-int GetMvSplitActor(int panel) {
-	if (panel < 0 || panel >= mvSplitPanelCount) return 0;
-	std::lock_guard lock(mvFixedFramingMutex);
-	return mvSplitActors[panel];
+int GetMvSplitPanelNumberForLayout(int panel, int layout) {
+	return layout <= SplitFive ? splitLayouts[layout].actors[panel] + 1 : panel + 1;
 }
+int GetMvSplitPanelNumber(int panel) { return GetMvSplitPanelNumberForLayout(panel, ResolveSplitLayout()); }
 
-void SetMvSplitActor(int panel, int actor) {
-	if (panel < 0 || panel >= mvSplitPanelCount || actor < 0 || actor >= GetMvSplitActorCount()) return;
+int GetMvSplitActorForLayout(int panel, int layout) {
+	if (!IsMvSplitPanel(panel)) return 0;
 	std::lock_guard lock(mvFixedFramingMutex);
-	mvSplitActors[panel] = actor;
+	return mvSplitStates[layout].actors[panel];
 }
+int GetMvSplitActor(int panel) { return GetMvSplitActorForLayout(panel, ResolveSplitLayout()); }
 
-void GetMvFixedFraming(float& yaw, float& pitch, float& roll, float& horizontal, float& vertical, float& zoom, int panel = -1) {
+void SetMvSplitActorForLayout(int panel, int actor, int layout) {
+	if (!IsMvSplitPanel(panel) || actor < 0 || actor >= GetMvSplitActorCount()) return;
 	std::lock_guard lock(mvFixedFramingMutex);
-	const auto& framing = FixedFramingForPanel(panel);
+	mvSplitStates[layout].actors[panel] = actor;
+}
+void SetMvSplitActor(int panel, int actor) { SetMvSplitActorForLayout(panel, actor, ResolveSplitLayout()); }
+
+int GetMvSplitPreviewPane(int preview) { return mvPreviewPanes[preview].load(std::memory_order_relaxed); }
+void SetMvSplitPreviewPane(int preview, int pane) { mvPreviewPanes[preview].store(pane, std::memory_order_relaxed); }
+
+void GetMvFixedFramingForLayout(float& yaw, float& pitch, float& roll, float& horizontal, float& vertical, float& zoom, int panel, int layout) {
+	std::lock_guard lock(mvFixedFramingMutex);
+	const auto& framing = FixedFramingForPanel(panel, layout);
 	yaw = framing.yaw;
 	pitch = framing.pitch;
 	roll = framing.roll;
@@ -121,17 +182,20 @@ void GetMvFixedFraming(float& yaw, float& pitch, float& roll, float& horizontal,
 	vertical = framing.vertical;
 	zoom = framing.zoom;
 }
+void GetMvFixedFraming(float& yaw, float& pitch, float& roll, float& horizontal, float& vertical, float& zoom, int panel = -1) {
+	GetMvFixedFramingForLayout(yaw, pitch, roll, horizontal, vertical, zoom, panel, ResolveSplitLayout());
+}
 
 void SetMvFixedFraming(float yaw, float pitch, float roll, float horizontal, float vertical, float zoom, int panel = -1) {
 	std::lock_guard lock(mvFixedFramingMutex);
-	FixedFramingForPanel(panel) = {BoundFraming(yaw, 180.0f), BoundFraming(pitch, IsMvSplitPanel(panel) ? 180.0f : 90.0f),
+	FixedFramingForPanel(panel, ResolveSplitLayout()) = {BoundFraming(yaw, 180.0f), BoundFraming(pitch, IsMvSplitPanel(panel) ? 180.0f : 90.0f),
 		BoundFraming(roll, 180.0f),
 		BoundFraming(horizontal, 3.0f), BoundFraming(vertical, 3.0f), BoundFraming(zoom, 3.0f)};
 }
 
 void NudgeMvFixedFraming(float yaw, float pitch, float roll, float horizontal, float vertical, float zoom, int panel = -1) {
 	std::lock_guard lock(mvFixedFramingMutex);
-	auto& framing = FixedFramingForPanel(panel);
+	auto& framing = FixedFramingForPanel(panel, ResolveSplitLayout());
 	framing.yaw = BoundFraming(std::remainder(framing.yaw + yaw, 360.0f), 180.0f);
 	framing.pitch = IsMvSplitPanel(panel) ? BoundFraming(std::remainder(framing.pitch + pitch, 360.0f), 180.0f) :
 		BoundFraming(framing.pitch + pitch, 90.0f);
@@ -143,9 +207,11 @@ void NudgeMvFixedFraming(float yaw, float pitch, float roll, float horizontal, f
 
 void ResetMvSplitFraming() {
 	std::lock_guard lock(mvFixedFramingMutex);
-	for (auto& framing : mvSplitFraming) framing = {};
-	mvSplitActors = mvSplitDefaultActors;
-	SetMvSplitPanel(mvSplitPanelCount / 2);
+	for (int i = 0; i < SplitLayoutCount; ++i) {
+		mvSplitStates[i] = {};
+		mvSplitStates[i].actors = splitLayouts[i].actors;
+		mvSplitStates[i].selected = splitLayouts[i].selected;
+	}
 }
 
 void ResetMvFraming(bool fixed) {
@@ -9403,9 +9469,10 @@ namespace
 
 			struct Panel {
 				OwnedObject cameraObject, imageObject, texture;
+				int width = 0, height = 0;
 				Il2CppObject* Camera() const { return OutfitCall(cameraObject.Get(), "GetComponent", {reinterpret_cast<Il2CppObject*>(engine.cameraType)}); }
 
-				bool Create(void* source, Il2CppObject* parent, int index, int w, int h) {
+				bool Create(void* source, Il2CppObject* parent, int index, const BarLayout& layout, int w, int h) {
 					auto* cameraRoot = NewObject(cameraObject, "MV split camera");
 					auto* camera = AddComponent(cameraRoot, engine.cameraType);
 					if (!Alive(camera)) {
@@ -9451,10 +9518,11 @@ namespace
 					OutfitCall(rect, "SetAsFirstSibling");
 					WriteValue(rect, "set_localRotation", Quaternion_t{0, 0, 0, 1});
 					WriteValue(rect, "set_localScale", Vector3_t{1, 1, 1});
-					BarLayout{{static_cast<float>(index) / mvSplitPanelCount, 0},
-						{static_cast<float>(index + 1) / mvSplitPanelCount, 1}, {}, {}}.Write(rect);
+					layout.Write(rect);
 					OutfitCall(image, "set_texture", {rt});
 					WriteValue(image, "set_raycastTarget", false);
+					width = w;
+					height = h;
 					return true;
 				}
 
@@ -9476,6 +9544,243 @@ namespace
 					cameraObject.Destroy();
 				}
 			};
+
+			struct PreviewCapture {
+				OwnedObject readable, target;
+				Il2CppClass* textureClass = nullptr;
+				const MethodInfo *construct = nullptr, *blit = nullptr, *getActive = nullptr,
+					*setActive = nullptr, *readPixels = nullptr, *rawBytes = nullptr;
+				int width = 0, height = 0;
+
+				bool Resolve() {
+					textureClass = (Il2CppClass*)il2cpp_symbols_logged::get_class(core, "UnityEngine", "Texture2D");
+					if (!textureClass) return false;
+					construct = il2cpp_class_get_method_from_name(textureClass, ".ctor", 4);
+					readPixels = il2cpp_class_get_method_from_name(textureClass, "ReadPixels", 3);
+					blit = il2cpp_symbols_logged::get_method(core, "UnityEngine", "Graphics", "Blit", 2);
+					getActive = il2cpp_symbols_logged::get_method(core, "UnityEngine", "RenderTexture", "get_active", 0);
+					setActive = il2cpp_symbols_logged::get_method(core, "UnityEngine", "RenderTexture", "set_active", 1);
+					void* iter = nullptr;
+					while (const auto* method = il2cpp_class_get_methods(textureClass, &iter)) {
+						if (!method->is_generic && method->parameters_count == 0 && std::string_view(method->name) == "GetRawTextureData") {
+							rawBytes = method;
+							break;
+						}
+					}
+					const MethodInfo* methods[]{construct, blit, getActive, setActive, readPixels, rawBytes};
+					return std::all_of(std::begin(methods), std::end(methods),
+						[](const MethodInfo* method) { return method && method->methodPointer; });
+				}
+
+				void Release() {
+					readable.Destroy();
+					if (auto* rt = target.Get(); Alive(rt)) engine.releaseTemporary->InvokeAsVoid(nullptr, {rt});
+					if (target.handle) il2cpp_gchandle_free(std::exchange(target.handle, nullptr));
+					width = height = 0;
+				}
+
+				bool Capture(const Panel& panel, std::vector<uint32_t>& pixels, int& outWidth, int& outHeight) {
+					auto* source = panel.texture.Get();
+					if (!source || panel.width < 1 || panel.height < 1) return false;
+					const float scale = std::min(1.0f, 360.0f / std::max(panel.width, panel.height));
+					int w = std::max(1, static_cast<int>(std::lround(panel.width * scale)));
+					int h = std::max(1, static_cast<int>(std::lround(panel.height * scale)));
+					if (width != w || height != h) {
+						Release();
+						auto* canvas = NewTargetTexture(w, h);
+						if (!Alive(canvas)) return false;
+						target.handle = il2cpp_gchandle_new(canvas, false);
+						auto* cpuTexture = (Il2CppObject*)il2cpp_object_new(textureClass);
+						if (!cpuTexture) { Release(); return false; }
+						readable.handle = il2cpp_gchandle_new(cpuTexture, false);
+						int rgba32 = 4;
+						bool mipmaps = false;
+						InvokeCreation(construct, cpuTexture, {reinterpret_cast<Il2CppObject*>(&w),
+							reinterpret_cast<Il2CppObject*>(&h), reinterpret_cast<Il2CppObject*>(&rgba32),
+							reinterpret_cast<Il2CppObject*>(&mipmaps)});
+						if (!Alive(cpuTexture)) { Release(); return false; }
+						width = w;
+						height = h;
+					}
+
+					auto* previous = getActive->Invoke<Il2CppObject*>(nullptr, {});
+					auto* rt = target.Get();
+					blit->InvokeAsVoid(nullptr, {source, rt});
+					setActive->InvokeAsVoid(nullptr, {rt});
+					Rect_t area{0, 0, static_cast<float>(w), static_cast<float>(h)};
+					int zero = 0;
+					readPixels->InvokeAsVoid(readable.Get(), {reinterpret_cast<Il2CppObject*>(&area),
+						reinterpret_cast<Il2CppObject*>(&zero), reinterpret_cast<Il2CppObject*>(&zero)});
+					setActive->InvokeAsVoid(nullptr, {previous});
+					auto* bytes = rawBytes->Invoke<Il2CppObject*>(readable.Get(), {});
+					const auto count = static_cast<size_t>(w) * h;
+					if (!bytes || il2cpp_array_length(bytes) != count * 4) return false;
+					const auto* rgba = reinterpret_cast<const uint8_t*>(il2cpp_array_addr_with_size(bytes, 1, 0));
+					pixels.resize(count);
+					for (size_t i = 0; i < count; ++i)
+						pixels[i] = (uint32_t(rgba[i * 4]) << 16) | (uint32_t(rgba[i * 4 + 1]) << 8) | rgba[i * 4 + 2];
+					outWidth = w;
+					outHeight = h;
+					return true;
+				}
+			};
+
+			struct SplitPreview {
+				HWND window = nullptr;
+				std::vector<uint32_t> pixels;
+				PreviewCapture capture;
+				int id = 0, width = 0, height = 0;
+
+				static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+					if (message == WM_NCCREATE) {
+						auto* params = reinterpret_cast<CREATESTRUCTW*>(lParam);
+						SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(params->lpCreateParams));
+					}
+					auto* self = reinterpret_cast<SplitPreview*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+					if (message == WM_MOUSEACTIVATE) return MA_NOACTIVATE;
+					if (message == WM_CLOSE && self) {
+						SetMvSplitPreviewPane(self->id, -1);
+						DestroyWindow(hwnd);
+						return 0;
+					}
+					if (message == WM_NCDESTROY && self) self->window = nullptr;
+					if (message == WM_ERASEBKGND) return 1;
+					if (message == WM_PAINT && self) {
+						PAINTSTRUCT paint{};
+						auto dc = BeginPaint(hwnd, &paint);
+						RECT area{};
+						GetClientRect(hwnd, &area);
+						FillRect(dc, &area, reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+						if (!self->pixels.empty() && area.right > 0 && area.bottom > 0) {
+							const double scale = std::min(double(area.right) / self->width, double(area.bottom) / self->height);
+							const int w = static_cast<int>(self->width * scale), h = static_cast<int>(self->height * scale);
+							BITMAPINFO info{};
+							info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+							info.bmiHeader.biWidth = self->width;
+							info.bmiHeader.biHeight = self->height;
+							info.bmiHeader.biPlanes = 1;
+							info.bmiHeader.biBitCount = 32;
+							StretchDIBits(dc, (area.right - w) / 2, (area.bottom - h) / 2, w, h, 0, 0,
+								self->width, self->height, self->pixels.data(), &info, DIB_RGB_COLORS, SRCCOPY);
+						}
+						EndPaint(hwnd, &paint);
+						return 0;
+					}
+					return DefWindowProcW(hwnd, message, wParam, lParam);
+				}
+
+				bool Open(int preview) {
+					id = preview;
+					constexpr auto className = L"ScspMvSplitPreviewWindow";
+					HINSTANCE instance = GetModuleHandleW(nullptr);
+					WNDCLASSW wc{};
+					wc.lpfnWndProc = WindowProc;
+					wc.hInstance = instance;
+					wc.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
+					wc.lpszClassName = className;
+					if (!RegisterClassW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return false;
+					const auto title = preview ? L"MV camera preview B" : L"MV camera preview A";
+					window = CreateWindowExW(WS_EX_APPWINDOW | WS_EX_NOACTIVATE, className, title, WS_OVERLAPPEDWINDOW,
+						CW_USEDEFAULT, CW_USEDEFAULT, 420, 520, nullptr, nullptr, instance, this);
+					if (window) ShowWindow(window, SW_SHOWNOACTIVATE);
+					return window != nullptr;
+				}
+
+				void Close() {
+					if (window) DestroyWindow(window);
+					capture.Release();
+					pixels.clear();
+					width = height = 0;
+				}
+
+				void Pump() const {
+					if (!window) return;
+					MSG message{};
+					while (window && PeekMessageW(&message, window, 0, 0, PM_NOREMOVE) && message.message != WM_QUIT) {
+						if (!PeekMessageW(&message, window, 0, 0, PM_REMOVE)) break;
+						TranslateMessage(&message);
+						DispatchMessageW(&message);
+					}
+				}
+			};
+			SplitPreview splitPreviews[2];
+
+			void CloseSplitPreviews() {
+				for (int i = 0; i < 2; ++i) {
+					splitPreviews[i].Close();
+					SetMvSplitPreviewPane(i, -1);
+				}
+			}
+
+			void UpdateSplitPreviews(const Panel* panels, int count) {
+				int panes[2]{};
+				for (int i = 0; i < 2; ++i) {
+					auto& preview = splitPreviews[i];
+					preview.Pump();
+					panes[i] = GetMvSplitPreviewPane(i);
+					if (panes[i] < 0) {
+						if (preview.window || preview.capture.target.handle) preview.Close();
+						continue;
+					}
+					if (!preview.window) {
+						if (preview.capture.Resolve() && preview.Open(i)) {
+							Log(std::format("[mv-split] opened preview {}", i + 1));
+						} else {
+							Log(std::format("[mv-split] preview {} unavailable", i + 1));
+							SetMvSplitPreviewPane(i, -1);
+							preview.Close();
+							panes[i] = -1;
+						}
+					}
+				}
+
+				// Alternate readbacks, at most one GPU-to-CPU copy per 42 ms.
+				static ULONGLONG nextUpdate = 0;
+				static int next = 0;
+				const auto now = GetTickCount64();
+				if (now < nextUpdate) return;
+				for (int offset = 0; offset < 2; ++offset) {
+					const int i = (next + offset) % 2;
+					auto& preview = splitPreviews[i];
+					if (panes[i] < 0 || !preview.window || IsIconic(preview.window)) continue;
+					if (!preview.capture.Capture(panels[std::min(panes[i], count - 1)], preview.pixels, preview.width, preview.height)) {
+						Log(std::format("[mv-split] preview {} readback failed", i + 1));
+						SetMvSplitPreviewPane(i, -1);
+						preview.Close();
+					} else {
+						InvalidateRect(preview.window, nullptr, FALSE);
+					}
+					next = 1 - i;
+					nextUpdate = now + 42;
+					break;
+				}
+			}
+
+			std::array<BarLayout, mvSplitPanelCount> PanelLayouts(int layout, float aspect) {
+				std::array<BarLayout, mvSplitPanelCount> panes{};
+				const int count = splitLayouts[layout].count;
+				if (layout == SplitRightStack) {
+					const float side = std::min(0.46f / aspect, 0.38f);
+					const float split = 1.0f - side;
+					const float lower = side * aspect;
+					panes[0] = {{0, 0}, {split, 1}, {}, {}};
+					panes[1] = {{split, lower}, {1, 1}, {}, {}};
+					panes[2] = {{split, 0}, {1, lower}, {}, {}};
+				} else if (layout == SplitBottomPair) {
+					panes[0] = {{0, 0.36f}, {1, 1}, {}, {}};
+					panes[1] = {{0, 0}, {0.5f, 0.36f}, {}, {}};
+					panes[2] = {{0.5f, 0}, {1, 0.36f}, {}, {}};
+				} else if (layout == SplitPictureInPicture) {
+					const float inset = std::min(0.24f / aspect, 0.26f);
+					panes[0] = {{0, 0}, {1, 1}, {}, {}};
+					panes[1] = {{0.035f, 0.57f}, {0.035f + inset, 0.94f}, {}, {}};
+					panes[2] = {{0.965f - inset, 0.10f}, {0.965f, 0.47f}, {}, {}};
+				} else {
+					for (int i = 0; i < count; ++i)
+						panes[i] = {{static_cast<float>(i) / count, 0}, {static_cast<float>(i + 1) / count, 1}, {}, {}};
+				}
+				return panes;
+			}
 
 			struct HiddenMask {
 				void* handle = nullptr;
@@ -9501,7 +9806,7 @@ namespace
 				OwnedObject fallbackCanvas;
 				void* source = nullptr;
 				void* owner = nullptr;
-				int width = 0, height = 0;
+				int width = 0, height = 0, layout = SplitFive;
 				float heading = 0;
 
 				Il2CppObject* CanvasParent(void* view, void* left, void* right) {
@@ -9522,7 +9827,7 @@ namespace
 					return OutfitCall(canvas, "get_transform");
 				}
 
-				bool Create(void* camera, int w, int h) {
+				bool Create(void* camera, int w, int h, int selectedLayout) {
 					auto* view = portraitMask.View();
 					void* left = RunwayDump::ReadPtr(view, "leftBox");
 					void* right = RunwayDump::ReadPtr(view, "rightBox");
@@ -9536,16 +9841,24 @@ namespace
 						std::hypot(forward.x, forward.z) > 0.01f)
 						heading = std::atan2(forward.x, forward.z);
 
-					for (int i = 0; i < mvSplitPanelCount; ++i)
-						if (!panels[i].Create(camera, parent, i, w, h)) return false;
+					const auto panes = PanelLayouts(selectedLayout, static_cast<float>(w) / h);
+					const float scale = std::min(1.0f, 900.0f / h);
+					const int count = splitLayouts[selectedLayout].count;
+					for (int i = count - 1; i >= 0; --i) {
+						const auto& pane = panes[i];
+						const int paneWidth = std::max(1, static_cast<int>(std::lround(w * scale * (pane.maxAnchor.x - pane.minAnchor.x))));
+						const int paneHeight = std::max(1, static_cast<int>(std::lround(h * scale * (pane.maxAnchor.y - pane.minAnchor.y))));
+						if (!panels[i].Create(camera, parent, i, pane, paneWidth, paneHeight)) return false;
+					}
 					portraitMask.Restore();
 					masks[0].Hide(Alive(left) ? OutfitCall(left, "get_gameObject") : nullptr);
 					masks[1].Hide(Alive(right) ? OutfitCall(right, "get_gameObject") : nullptr);
 					if (auto* canvas = fallbackCanvas.Get(); Alive(canvas)) WriteValue(canvas, "SetActive", true);
-					for (auto& panel : panels) panel.Enable();
+					for (int i = 0; i < count; ++i) panels[i].Enable();
 					source = camera;
 					width = w;
 					height = h;
+					layout = selectedLayout;
 					return true;
 				}
 
@@ -9560,6 +9873,7 @@ namespace
 			};
 			Renderer renderer;
 			void* failedSource = nullptr;
+			int failedLayout = SplitAuto;
 			int lastFrame = -1;
 
 			int ReadStaticInt(const MethodInfo* method) {
@@ -9591,13 +9905,17 @@ namespace
 			}
 
 			void FramePanel(int index, const Vector3_t& target) {
-				auto* camera = renderer.panels[index].Camera();
+				const auto& panel = renderer.panels[index];
+				auto* camera = panel.Camera();
 				void* transform = OutfitCall(camera, "get_transform");
 				if (!transform) return;
 
 				float yaw, pitch, roll, horizontal, vertical, zoom;
-				GetMvFixedFraming(yaw, pitch, roll, horizontal, vertical, zoom, index);
-				const float heading = renderer.heading + ((index - 2) * 10.0f + yaw) * radiansPerDegree;
+				GetMvFixedFramingForLayout(yaw, pitch, roll, horizontal, vertical, zoom, index, renderer.layout);
+				constexpr float detailAngles[]{0, -35, 35};
+				const float angle = renderer.layout >= SplitRightStack ? detailAngles[index] :
+					(index - (splitLayouts[renderer.layout].count - 1) * 0.5f) * 10.0f;
+				const float heading = renderer.heading + (angle + yaw) * radiansPerDegree;
 				const float elevation = (4.0f + pitch) * radiansPerDegree;
 				const float sinHeading = std::sin(heading), cosHeading = std::cos(heading);
 				const float sinElevation = std::sin(elevation), cosElevation = std::cos(elevation);
@@ -9619,7 +9937,7 @@ namespace
 				if (roll) {
 					Matrix projection{};
 					if (ReadProjection(camera, projection)) {
-						projection = AdjustProjection(projection, static_cast<float>(renderer.width) / renderer.height,
+						projection = AdjustProjection(projection, static_cast<float>(panel.width) / panel.height,
 							roll, 1.0f);
 						WriteProjection(camera, projection);
 					}
@@ -9627,12 +9945,14 @@ namespace
 			}
 
 			void Stop() {
+				CloseSplitPreviews();
 				if (renderer.source) {
 					renderer.Release();
 					Log("[mv-split] restored single camera");
 				}
 				mvSplitActorCount.store(0, std::memory_order_relaxed);
 				failedSource = nullptr;
+				failedLayout = SplitAuto;
 				lastFrame = -1;
 			}
 
@@ -9642,7 +9962,6 @@ namespace
 					if (renderer.source || failedSource) Stop();
 					return false;
 				}
-				if (failedSource == camera) return false;
 				const int frame = ReadStaticInt(engine.frameCount);
 				if (lastFrame == frame && renderer.source == camera) return true;
 				lastFrame = frame;
@@ -9659,30 +9978,34 @@ namespace
 					if (renderer.source) Stop();
 					return false;
 				}
-				const int screenWidth = ReadStaticInt(engine.width), screenHeight = ReadStaticInt(engine.height);
-				if (screenWidth < mvSplitPanelCount || screenHeight < 1) return false;
-				const int h = std::min(screenHeight, 900);
-				const int w = std::max(1, static_cast<int>(static_cast<double>(screenWidth) / screenHeight * h / mvSplitPanelCount));
-				if (renderer.source != camera || renderer.width != w || renderer.height != h) {
+				mvSplitActorCount.store(count, std::memory_order_relaxed);
+				const int layout = ResolveSplitLayout(), paneCount = splitLayouts[layout].count;
+				if (failedSource == camera && failedLayout == layout) return false;
+				const int w = ReadStaticInt(engine.width), h = ReadStaticInt(engine.height);
+				if (w < paneCount || h < 1) return false;
+				if (renderer.source != camera || renderer.width != w || renderer.height != h || renderer.layout != layout) {
 					if (renderer.source) renderer.Release();
-					if (!renderer.Create(camera, w, h)) {
+					FramingInput::previous = {};
+					if (!renderer.Create(camera, w, h, layout)) {
 						renderer.Release();
+						CloseSplitPreviews();
 						failedSource = camera;
-						mvSplitActorCount.store(0, std::memory_order_relaxed);
+						failedLayout = layout;
 						Log("[mv-split] could not create cameras or stage overlay");
 						return false;
 					}
-					Log(std::format("[mv-split] active cameras={} actors={} panel={}x{} path={} canvas={}",
-						mvSplitPanelCount, count, w, h, source == CameraPath::Legacy ? "legacy" : "cinemachine",
+					failedSource = nullptr;
+					Log(std::format("[mv-split] active cameras={} actors={} layout={} path={} canvas={}",
+						paneCount, count, splitLayouts[layout].name, source == CameraPath::Legacy ? "legacy" : "cinemachine",
 						renderer.fallbackCanvas.Get() ? "fallback" : "live"));
 				}
 				renderer.owner = owner;
-				mvSplitActorCount.store(count, std::memory_order_relaxed);
-				FramingInput::Poll(camera, source, mode, GetMvSplitPanel());
-				for (int i = 0; i < mvSplitPanelCount; ++i) {
-					const int actor = GetMvSplitActor(i);
+				FramingInput::Poll(camera, source, mode, GetMvSplitPanelForLayout(layout));
+				for (int i = 0; i < paneCount; ++i) {
+					const int actor = GetMvSplitActorForLayout(i, layout);
 					FramePanel(i, centers[actor < count && found[actor] ? actor : first]);
 				}
+				UpdateSplitPreviews(renderer.panels, paneCount);
 				return true;
 			}
 
@@ -9696,10 +10019,10 @@ namespace
 
 			void ChooseActor(int actor) {
 				if (actor < 0 || actor >= GetMvSplitActorCount()) return;
-				const int panel = GetMvSplitPanel();
-				SetMvSplitActor(panel, actor);
+				const int panel = GetMvSplitPanelForLayout(renderer.layout);
+				SetMvSplitActorForLayout(panel, actor, renderer.layout);
 				Log(std::format("[mv-split] fixed button selected actor={} for position={} column={}",
-					actor + 1, GetMvSplitPanelNumber(panel), panel + 1));
+					actor + 1, GetMvSplitPanelNumberForLayout(panel, renderer.layout), panel + 1));
 			}
 
 			void SyncControlButtons(void* view, void* owner) {
@@ -9714,7 +10037,7 @@ namespace
 				if (!index) return;
 				int desired = OutfitNumber(owner, "get_PatternIndex");
 				if (split) {
-					desired = GetMvSplitActor(GetMvSplitPanel());
+					desired = GetMvSplitActorForLayout(GetMvSplitPanelForLayout(renderer.layout), renderer.layout);
 					if (desired >= GetMvSplitActorCount()) desired = 0;
 				}
 				showingSplitSelection = split;
