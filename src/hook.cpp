@@ -6853,6 +6853,54 @@ namespace
 			}
 		}
 
+		struct DiyLipFallback {
+			std::string bundle, asset;
+			int frames = 0, rate = 0, offset = 0;
+		};
+
+		bool BindDiySoloLips(void* character, int song) {
+			static const auto catalog = [] {
+				std::unordered_map<int, DiyLipFallback> entries;
+				std::ifstream stream("diy-solo-lips/tables.tsv");
+				DiyLipFallback entry;
+				int id = 0;
+				while (stream >> id >> entry.bundle >> entry.asset >> entry.frames >> entry.rate >> entry.offset) {
+					if (id == 5 || id == 41 || id == 118 || id == 146 || id == 148 || id == 167 ||
+						entry.bundle != std::format("lip-diy-{}.bundle", id) || entry.asset.find_first_of("/\\:") != std::string::npos ||
+						entry.frames < 120 || entry.rate <= 0) continue;
+					entries.emplace(id, entry);
+				}
+				return entries;
+			}();
+			const auto selected = catalog.find(song);
+			if (!character || selected == catalog.end()) return false;
+			const auto* klass = (Il2CppClass*)ViewDiag::find_class_anywhere("PRISM", "LipSyncTable");
+			auto* klassOfCharacter = KlassOf(character);
+			const auto* setup = static_cast<const MethodInfo*>(nullptr);
+			void* iterator = nullptr;
+			while (const auto* method = il2cpp_class_get_methods(klassOfCharacter, &iterator)) {
+				if (strcmp(method->name, "SetupLip") != 0 || method->parameters_count != 3) continue;
+				const char* type = il2cpp_symbols::il2cpp_method_get_param_type_name(method, 0);
+				if (type && (strcmp(type, "PRISM.LipSyncTable") == 0 || strcmp(type, "LipSyncTable") == 0)) {
+					setup = method;
+					break;
+				}
+			}
+			if (!klass || !setup || !setup->methodPointer) return false;
+			const auto& entry = selected->second;
+			auto* tableType = il2cpp_type_get_object(il2cpp_class_get_type(const_cast<Il2CppClass*>(klass)));
+			auto* table = LoadExternAsset("diy-solo-lips/" + entry.bundle + "::" + entry.asset, tableType);
+			if (!table || LipTableFrameCount(table) != entry.frames ||
+				RunwayDump::ReadInt(table, "frameRate") != entry.rate ||
+				RunwayDump::ReadInt(table, "offsetFrame") != entry.offset) return false;
+			float offset = 0.0f, extra = 0.0f;
+			setup->InvokeAsVoid((Il2CppObject*)character, {(Il2CppObject*)table,
+				reinterpret_cast<Il2CppObject*>(&offset), reinterpret_cast<Il2CppObject*>(&extra)});
+			const bool bound = LipTableOf(LipControllerOf(character)) == table;
+			Log(std::format("[diy-solo-lips] song={} frames={} table={} bound={}", song, entry.frames, entry.asset, bound));
+			return bound;
+		}
+
 		void LipSoloDrive(float time) {
 			if (g_lipMode != "on" || !g_setupLipStringMi || !g_lipUpdateMethod) return;
 			if (g_lastSoloVocalMode != 2) return;    // only solo mode lacks lips
@@ -6949,15 +6997,19 @@ namespace
 					const std::string name = LipMvTableNameFor(cid);
 					Log(std::format("[v87] soloist index={} chara={} ctrl={} lost={} -> inject \"{}\"",
 						i, cid, ps(ctrl), lost ? 1 : 0, name));
-					if (name.empty()) continue;
 					auto* smi = (MethodInfo*)g_setupLipStringMi;
-					if (smi && smi->methodPointer) {
+					if (!name.empty() && smi && smi->methodPointer) {
 						auto fn = (void(*)(void*, void*, float, float, void*))smi->methodPointer;
 						fn(ch, il2cpp_string_new(name.c_str()), 0.0f, 0.0f, g_setupLipStringMi);
 					}
 					ctrl = LipControllerOf(ch);
 					table = ctrl ? LipTableOf(ctrl) : nullptr;
 					usable = LipTableRich(table);
+					if (!usable && !inCs && BindDiySoloLips(ch, g_lastMvSongId)) {
+						ctrl = LipControllerOf(ch);
+						table = ctrl ? LipTableOf(ctrl) : nullptr;
+						usable = LipTableRich(table);
+					}
 					Log(std::format("[v100] injected \"{}\" -> frames={} rich={}", name, LipTableFrameCount(table), usable ? 1 : 0));
 					// [v100] merge once per loaded table (not once per process):
 					// the cut scene swaps in a new table and the merged data has
@@ -8571,6 +8623,10 @@ namespace
 			HOOK_ORIG_TYPE loadAndGetOriginal;
 			HOOK_ORIG_TYPE candidateOriginal;
 			HOOK_ORIG_TYPE eligibleOriginal;
+			HOOK_ORIG_TYPE candidateAllOriginal;
+			HOOK_ORIG_TYPE validCueOriginal;
+			HOOK_ORIG_TYPE partsIdsOriginal;
+			HOOK_ORIG_TYPE acbOriginal;
 			unsigned loadResultSize = 0;
 			unsigned loadResultOffset = 0;
 			std::unordered_set<int> installedRoles;
@@ -8595,8 +8651,8 @@ namespace
 				return strcmp(name, type) == 0 || (shortName && strcmp(name, shortName + 1) == 0);
 			}
 
-			Il2CppObject* EnsureCueSheet(Il2CppString* label) {
-				if (!addCueSheet || !getCueSheet || !label) return nullptr;
+			int CustomCueActor(Il2CppString* label) {
+				if (!label || installedRoles.empty()) return 0;
 				std::string name = label->ToUtf8String();
 				const auto slash = name.find_last_of("/\\");
 				if (slash != std::string::npos) name.erase(0, slash + 1);
@@ -8604,10 +8660,17 @@ namespace
 				const auto found = std::find_if(std::begin(roles), std::end(roles), [&](const auto& role) {
 					return installedRoles.contains(role.first) && _stricmp(CueName(role.first, role.second).c_str(), name.c_str()) == 0;
 				});
-				if (found == std::end(roles)) return nullptr;
+				return found == std::end(roles) ? 0 : found->first;
+			}
+
+			Il2CppObject* EnsureCueSheet(Il2CppString* label) {
+				const int actor = CustomCueActor(label);
+				if (!actor || !addCueSheet || !getCueSheet) return nullptr;
 				auto* alias = reinterpret_cast<Il2CppObject*>(label);
 				if (auto* sheet = getCueSheet->Invoke<Il2CppObject*>(nullptr, {alias})) return sheet;
-				const auto path = CuePath(CueName(found->first, found->second));
+				const auto found = std::find_if(std::begin(roles), std::end(roles),
+					[actor](const auto& role) { return actor == role.first; });
+				const auto path = CuePath(CueName(actor, found->second));
 				if (!std::filesystem::is_regular_file(path)) return nullptr;
 				auto* file = reinterpret_cast<Il2CppObject*>(il2cpp_symbols::NewWStr(path.wstring()));
 				auto* empty = reinterpret_cast<Il2CppObject*>(il2cpp_string_new(""));
@@ -8615,7 +8678,7 @@ namespace
 				Il2CppObject* args[]{alias, file, empty, nullptr};
 				auto* sheet = reflection::InvokeInTry(addCueSheet, nullptr, args, &error, "Extra Spread vocals");
 				if (error || !sheet || !RunwayDump::ReadPtr(sheet, "acb")) return nullptr;
-				Log(std::format("[extra-mv-vocals] loaded {} actor={}", name, found->first));
+				Log(std::format("[extra-mv-vocals] loaded {} actor={}", label->ToUtf8String(), actor));
 				return sheet;
 			}
 
@@ -8653,23 +8716,81 @@ namespace
 					reinterpret_cast<bool(*)(void*, int, const MethodInfo*)>(eligibleOriginal)(self, actor, method);
 			}
 
-			void AddPartsCharacters(void* master) {
-				if (!master || installedRoles.empty()) return;
-				const auto rows = OutfitList(CenterCutSceneTableRows(master, "SongPartsCharacters"));
-				for (int i = 0; i < rows.count; ++i) {
-					auto* row = il2cpp_symbols::array_get_value(rows.data, i);
-					if (OutfitNumber(row, "get_MstSongId") != songId) continue;
-					auto* ids = OutfitCall(row, "get_MstCharacterIdList");
-					int added = 0;
+			bool CandidateAll(void* self, int actor, const MethodInfo* method) {
+				return VoiceAvailable(self, actor) ||
+					reinterpret_cast<bool(*)(void*, int, const MethodInfo*)>(candidateAllOriginal)(self, actor, method);
+			}
+
+			void* GetAcb(void* self, Il2CppString* label, const MethodInfo* method) {
+				if (auto* sheet = EnsureCueSheet(label))
+					if (auto* acb = RunwayDump::ReadPtr(sheet, "acb")) return acb;
+				return reinterpret_cast<void*(*)(void*, Il2CppString*, const MethodInfo*)>(acbOriginal)(self, label, method);
+			}
+
+			bool ValidCue(void* self, Il2CppString* label, const MethodInfo* method) {
+				return CustomCueActor(label) != 0 ||
+					reinterpret_cast<bool(*)(void*, Il2CppString*, const MethodInfo*)>(validCueOriginal)(self, label, method);
+			}
+
+			void* PartsIds(void* self, const MethodInfo* method) {
+				if (OutfitNumber(OutfitCall(self, "get_Master"), "get_Id") == songId) {
+					auto* ids = RunwayDump::ReadPtr(self, "limitedVocalSeparatedCharacterIds");
 					for (const auto& [actor, name] : roles) {
-						if (!installedRoles.contains(actor) || OutfitIntListContains(ids, actor)) continue;
+						if (!installedRoles.contains(actor)) continue;
 						int id = actor;
 						OutfitCall(ids, "Add", {reinterpret_cast<Il2CppObject*>(&id)});
-						if (OutfitIntListContains(ids, actor)) ++added;
 					}
-					Log(std::format("[extra-mv-vocals] song={} voices added={}", songId, added));
-					break;
 				}
+				return reinterpret_cast<void*(*)(void*, const MethodInfo*)>(partsIdsOriginal)(self, method);
+			}
+
+			void AddPartsCharacters(void* master) {
+				if (!master || installedRoles.empty()) return;
+				auto* table = RunwayDump::ReadPtr(master, "SongPartsCharacters");
+				const auto rows = OutfitList(CenterCutSceneTableRows(master, "SongPartsCharacters"));
+				if (!rows.count) return;
+				void* row = nullptr;
+				int insertAt = rows.count;
+				for (int i = 0; i < rows.count; ++i) {
+					auto* entry = il2cpp_symbols::array_get_value(rows.data, i);
+					const int id = OutfitNumber(entry, "get_MstSongId");
+					if (id == songId) { row = entry; break; }
+					if (id > songId) { insertAt = i; break; }
+				}
+				const bool isNew = row == nullptr;
+				void* ids = row ? OutfitCall(row, "get_MstCharacterIdList") : nullptr;
+				if (isNew) {
+					auto* sample = il2cpp_symbols::array_get_value(rows.data, 0);
+					auto* sampleIds = OutfitCall(sample, "get_MstCharacterIdList");
+					if (!sampleIds) return;
+					row = il2cpp_object_new(KlassOf(sample));
+					ids = il2cpp_object_new(KlassOf(sampleIds));
+					if (!row || !ids) return;
+					OutfitCall(row, ".ctor");
+					OutfitCall(ids, ".ctor");
+					int id = songId;
+					OutfitCall(row, "set_MstSongId", {reinterpret_cast<Il2CppObject*>(&id)});
+					OutfitCall(row, "set_MstCharacterIdList", {(Il2CppObject*)ids});
+					for (int actor = 1; actor <= 28; ++actor)
+						OutfitCall(ids, "Add", {reinterpret_cast<Il2CppObject*>(&actor)});
+				}
+				int added = 0;
+				for (const auto& [actor, name] : roles) {
+					if (!installedRoles.contains(actor) || OutfitIntListContains(ids, actor)) continue;
+					int id = actor;
+					OutfitCall(ids, "Add", {reinterpret_cast<Il2CppObject*>(&id)});
+					if (OutfitIntListContains(ids, actor)) ++added;
+				}
+				if (isNew && added) {
+					auto* field = FieldOf(KlassOf(table), "data");
+					auto* array = field ? il2cpp_array_new(KlassOf(row), rows.count + 1) : nullptr;
+					if (!array) return;
+					for (int i = 0; i < rows.count + 1; ++i)
+						il2cpp_symbols::array_set_value(array,
+							i == insertAt ? row : il2cpp_symbols::array_get_value(rows.data, i - (i > insertAt)), i);
+					il2cpp_field_set_value_object(table, field, array);
+				}
+				Log(std::format("[extra-mv-vocals] song={} voices added={}, new row={}", songId, added, isNew));
 			}
 
 			void Install() {
@@ -8689,8 +8810,16 @@ namespace
 				const auto* load = Method("PRISM", "SoundManager", "LoadCueSheetAsync", 2);
 				const auto* loadGet = Method("PRISM", "SoundManager", "LoadAndGetCueSheetAsync", 2);
 				bool loading = false, getting = false;
+				unsigned alignment = 0;
+				for (const auto* probe : {load, loadGet}) {
+					if (!probe) continue;
+					Log(std::format("[extra-mv-vocals] {}({},{}) returns {}", probe->name,
+						il2cpp_symbols::il2cpp_method_get_param_type_name(probe, 0),
+						il2cpp_symbols::il2cpp_method_get_param_type_name(probe, 1),
+						il2cpp_type_get_name(probe->return_type)));
+				}
 				if (auto* t = load && load->return_type ? il2cpp_type_get_class_or_element_class(load->return_type) : nullptr;
-					valueSize && t && valueSize(t, nullptr) == 16 && ParamIs(load, 0, "System.String") &&
+					valueSize && t && valueSize(t, &alignment) == 16 && ParamIs(load, 0, "System.String") &&
 					ParamIs(load, 1, "System.Threading.CancellationToken") &&
 					strcmp(il2cpp_class_get_name(t), "UniTask") == 0) {
 					loading = HookAt("SoundManager.LoadCueSheetAsync extra vocals", (void*)load->methodPointer,
@@ -8701,7 +8830,7 @@ namespace
 					ParamIs(loadGet, 1, "System.Threading.CancellationToken")) {
 					const char* type = il2cpp_type_get_name(loadGet->return_type);
 					const auto* field = FieldOf(t, "result");
-					const int size = valueSize(t, nullptr);
+					const int size = valueSize(t, &alignment);
 					if (type && strstr(type, "UniTask") && strstr(type, "CriAtomCueSheet") &&
 						field && field->offset >= 16 && size >= 16 && size <= 40 &&
 						field->offset - 16 + sizeof(void*) <= static_cast<unsigned>(size)) {
@@ -8724,6 +8853,28 @@ namespace
 					if (ParamIs(eligible, 0, "System.Int32"))
 						HookAt("MusicData.IsVocalSeparatedCharacter extra vocals",
 							(void*)eligible->methodPointer, (void*)Eligible, eligibleOriginal);
+					const auto* all = Method("PRISM.Live", "MusicData", "IsCandidateAllCharacterVocalSeparated", 1);
+					if (ParamIs(all, 0, "System.Int32"))
+						HookAt("MusicData.IsCandidateAllCharacterVocalSeparated extra vocals",
+							(void*)all->methodPointer, (void*)CandidateAll, candidateAllOriginal);
+					const auto* ids = Method("PRISM.Live", "MusicData", "GetLimitedVocalSeparatedCharacterIds", 0);
+					if (ids && ids->methodPointer)
+						HookAt("MusicData.GetLimitedVocalSeparatedCharacterIds extra vocals",
+							(void*)ids->methodPointer, (void*)PartsIds, partsIdsOriginal);
+					const auto* acb = Method("PRISM", "SoundManager", "GetUnsafeAcbHandle", 1);
+					if (ParamIs(acb, 0, "System.String"))
+						HookAt("SoundManager.GetUnsafeAcbHandle extra vocals",
+							(void*)acb->methodPointer, (void*)GetAcb, acbOriginal);
+					auto* sound = (Il2CppClass*)ViewDiag::find_class_anywhere("PRISM", "SoundManager");
+					void* iter = nullptr;
+					while (sound) {
+						const auto* valid = il2cpp_class_get_methods(sound, &iter);
+						if (!valid) break;
+						if (strcmp(valid->name, "IsValidCueSheet") == 0 && valid->parameters_count == 1 &&
+							ParamIs(valid, 0, "System.String"))
+							HookAt("SoundManager.IsValidCueSheet extra vocals",
+								(void*)valid->methodPointer, (void*)ValidCue, validCueOriginal);
+					}
 				}
 				Log(std::format("[extra-mv-vocals] available={} load={} get={}", installedRoles.size(), loading, getting));
 			}
