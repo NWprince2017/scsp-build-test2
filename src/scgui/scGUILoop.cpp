@@ -44,6 +44,9 @@ extern int GetMvSplitActor(int panel);
 extern void SetMvSplitActor(int panel, int actor);
 extern int GetMvSplitPreviewPane(int preview);
 extern void SetMvSplitPreviewPane(int preview, int pane);
+extern void RequestMvFormationTool(int action);
+extern void RequestRandomMv(std::string songs, std::string actors, int mode, int parts, int count, int interval);
+extern std::string GetMvFormationToolStatus();
 
 
 #define INPUT_AND_SLIDER_FLOAT(label, data, min, max) \
@@ -771,6 +774,34 @@ namespace SCGUILoop {
 					}
 					framingControls(true, panel);
 					ImGui::PopID();
+				}
+
+				if (ImGui::CollapsingHeader("MV formation tools")) {
+					static int outfitSource = 0;
+					static int outfitStyle = 0;
+					static int hairStyle = 0;
+					ImGui::Combo("Outfit source", &outfitSource, "MV center\0Saved wardrobe preview\0");
+					if (ImGui::Button("Read wardrobe preview")) RequestMvFormationTool(1);
+					ImGui::Combo("Costume", &outfitStyle, "Own same-name outfit first\0Borrow the source outfit when allowed\0");
+					ImGui::Combo("Hair and accessories", &hairStyle, "Matching set when available\0Idol's default\0");
+					if (ImGui::Button("Apply outfit to all MV slots"))
+						RequestMvFormationTool(16 + outfitSource + (outfitStyle ? 2 : 0) + (hairStyle ? 0 : 4));
+
+					ImGui::Separator();
+					static char songs[128]{}, actors[128]{};
+					static int vocals = 0, parts = 0, count = 3, interval = 5;
+					ImGui::InputTextWithHint("Song IDs", "All, or 5,41,146-148", songs, sizeof(songs));
+					ImGui::InputTextWithHint("Idol IDs", "All, or 1,15,78-89", actors, sizeof(actors));
+					ImGui::Combo("Playback", &vocals, "Automatic\0Full chorus\0Solo\0");
+					ImGui::Combo("Vocal parts", &parts, "Any\0Require an available part\0Without available parts\0");
+					ImGui::InputInt("Number of distinct songs", &count);
+					ImGui::InputInt("Seconds between songs", &interval);
+					if (ImGui::Button("Start random MV playlist"))
+						RequestRandomMv(songs, actors, vocals, parts, count, interval);
+					ImGui::SameLine();
+					if (ImGui::Button("Stop playlist")) RequestMvFormationTool(3);
+					const auto status = GetMvFormationToolStatus();
+					if (!status.empty()) ImGui::TextWrapped("%s", status.c_str());
 				}
 
 				if (ImGui::CollapsingHeader("Free Camera", ImGuiTreeNodeFlags_DefaultOpen)) {
