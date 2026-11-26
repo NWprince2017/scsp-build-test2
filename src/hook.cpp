@@ -9478,6 +9478,7 @@ namespace
 				int width = 0, height = 0;
 				int baseWidth = 0, baseHeight = 0, firstPreviewFrame = 0;
 				bool previewResolution = false;
+				bool cameraActive = false, imageVisible = false;
 				Il2CppObject* Camera() const { return OutfitCall(cameraObject.Get(), "GetComponent", {reinterpret_cast<Il2CppObject*>(engine.cameraType)}); }
 
 				bool Create(void* source, Il2CppObject* parent, int index, const BarLayout& layout, int w, int h) {
@@ -9557,10 +9558,16 @@ namespace
 					height = h;
 				}
 
-				void Enable() {
-					WriteValue(Camera(), "set_enabled", true);
-					WriteValue(cameraObject.Get(), "SetActive", true);
-					WriteValue(imageObject.Get(), "SetActive", true);
+				void SetOutput(bool render, bool show) {
+					if (render != cameraActive) {
+						WriteValue(Camera(), "set_enabled", render);
+						WriteValue(cameraObject.Get(), "SetActive", render);
+						cameraActive = render;
+					}
+					if (show != imageVisible) {
+						WriteValue(imageObject.Get(), "SetActive", show);
+						imageVisible = show;
+					}
 				}
 
 				void Release() {
@@ -9573,6 +9580,7 @@ namespace
 					imageObject.Destroy();
 					cameraObject.Destroy();
 					previewResolution = false;
+					cameraActive = imageVisible = false;
 				}
 			};
 
@@ -9782,7 +9790,7 @@ namespace
 				return true;
 			}
 
-			void UpdateSplitPreviews(Panel* panels, int count, int frame) {
+			unsigned UpdateSplitPreviews(Panel* panels, int count, int frame) {
 				int panes[2]{-1, -1};
 				unsigned largePanels = 0;
 				for (int i = 0; i < 2; ++i) {
@@ -9802,9 +9810,13 @@ namespace
 				}
 				for (int i = 0; i < count; ++i)
 					panels[i].SetPreviewResolution((largePanels & (1u << i)) != 0, frame);
+				unsigned detachedPanels = 0;
 				for (int i = 0; i < 2; ++i) {
 					std::string error;
-					if (!UpdatePreviewFeed(i, panes[i] < 0 ? nullptr : &panels[panes[i]], frame, error)) {
+					const int pane = panes[i];
+					if (UpdatePreviewFeed(i, pane < 0 ? nullptr : &panels[pane], frame, error)) {
+						if (pane >= 0) detachedPanels |= 1u << pane;
+					} else {
 						Log(std::format("[mv-split] direct camera preview {} stopped: {}", i + 1, error));
 						ResetMvCameraWindow(i);
 						splitPreviews[i].Close();
@@ -9812,7 +9824,8 @@ namespace
 					}
 				}
 				CollectRetiredTargets();
-				if (!largePanels) StopMvCameraWindows();
+				if (!detachedPanels) StopMvCameraWindows();
+				return detachedPanels;
 			}
 
 			std::array<BarLayout, mvSplitPanelCount> PanelLayouts(int layout, float aspect) {
@@ -9868,6 +9881,21 @@ namespace
 				void* owner = nullptr;
 				int width = 0, height = 0, layout = SplitFive;
 				float heading = 0;
+				bool overlayVisible = false;
+
+				void SetOverlayVisible(bool show) {
+					if (show == overlayVisible) return;
+					overlayVisible = show;
+					if (show) {
+						auto* view = portraitMask.View();
+						void* left = RunwayDump::ReadPtr(view, "leftBox");
+						void* right = RunwayDump::ReadPtr(view, "rightBox");
+						masks[0].Hide(Alive(left) ? OutfitCall(left, "get_gameObject") : nullptr);
+						masks[1].Hide(Alive(right) ? OutfitCall(right, "get_gameObject") : nullptr);
+					} else {
+						for (auto& mask : masks) mask.Restore();
+					}
+				}
 
 				Il2CppObject* CanvasParent(void* view, void* left, void* right) {
 					bool includeInactive = false;
@@ -9911,10 +9939,9 @@ namespace
 						if (!panels[i].Create(camera, parent, i, pane, paneWidth, paneHeight)) return false;
 					}
 					portraitMask.Restore();
-					masks[0].Hide(Alive(left) ? OutfitCall(left, "get_gameObject") : nullptr);
-					masks[1].Hide(Alive(right) ? OutfitCall(right, "get_gameObject") : nullptr);
+					SetOverlayVisible(true);
 					if (auto* canvas = fallbackCanvas.Get(); Alive(canvas)) WriteValue(canvas, "SetActive", true);
-					for (int i = 0; i < count; ++i) panels[i].Enable();
+					for (int i = 0; i < count; ++i) panels[i].SetOutput(true, true);
 					source = camera;
 					width = w;
 					height = h;
@@ -9924,7 +9951,7 @@ namespace
 
 				void Release() {
 					for (auto& panel : panels) panel.Release();
-					for (auto& mask : masks) mask.Restore();
+					SetOverlayVisible(false);
 					fallbackCanvas.Destroy();
 					source = nullptr;
 					owner = nullptr;
@@ -10061,11 +10088,19 @@ namespace
 				}
 				renderer.owner = owner;
 				FramingInput::Poll(camera, source, mode, GetMvSplitPanelForLayout(layout));
+				const unsigned detachedPanels = UpdateSplitPreviews(renderer.panels, paneCount, frame);
+				const bool showOverlay = detachedPanels == 0;
+				if (showOverlay != renderer.overlayVisible) {
+					renderer.SetOverlayVisible(showOverlay);
+					Log(showOverlay ? "[mv-split] restored the in-game split overlay" : "[mv-split] detached output uses the native main window camera");
+				}
 				for (int i = 0; i < paneCount; ++i) {
+					const bool render = showOverlay || (detachedPanels & (1u << i)) != 0;
+					renderer.panels[i].SetOutput(render, showOverlay);
+					if (!render) continue;
 					const int actor = GetMvSplitActorForLayout(i, layout);
 					FramePanel(i, centers[actor < count && found[actor] ? actor : first]);
 				}
-				UpdateSplitPreviews(renderer.panels, paneCount, frame);
 				return true;
 			}
 

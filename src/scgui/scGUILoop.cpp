@@ -1332,7 +1332,8 @@ struct DetachedCameraWindows {
 				float2 uv = float2((id << 1) & 2, id & 2);
 				Varying result;
 				result.position = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1);
-				result.uv = uv;
+				// Unity's render texture readback stores the bottom row first.
+				result.uv = float2(uv.x, 1.0 - uv.y);
 				return result;
 			}
 			float4 ps(Varying input) : SV_TARGET { return float4(frameTexture.Sample(frameSampler, input.uv).rgb, 1); }
