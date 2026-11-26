@@ -8,19 +8,11 @@
 #include <cmath>
 #include <d3d11.h>
 #include <d3dcompiler.h>
-#include <dwmapi.h>
 #include <dxgi1_2.h>
-#include <roapi.h>
-#include <windows.graphics.capture.interop.h>
-#include <windows.graphics.directx.direct3d11.interop.h>
-#include <winrt/Windows.Foundation.h>
-#include <winrt/Windows.Graphics.Capture.h>
-#include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
+#include <winrt/base.h>
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "d3dcompiler.lib")
-#pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "runtimeobject.lib")
-#pragma comment(lib, "windowsapp.lib")
 
 extern HOOK_ORIG_TYPE SetResolution_orig;
 // extern std::vector<std::pair<std::pair<int, int>, int>> replaceDressResIds;
@@ -1260,16 +1252,14 @@ namespace SCGUILoop {
 }
 
 namespace {
-namespace Wgc = winrt::Windows::Graphics::Capture;
-namespace Wgd = winrt::Windows::Graphics::DirectX;
-using PreviewDevice = Wgd::Direct3D11::IDirect3DDevice;
-using PreviewSize = winrt::Windows::Graphics::SizeInt32;
-
 struct PreviewSwapChain {
 	HWND window = nullptr;
 	UINT width = 0, height = 0;
 	winrt::com_ptr<IDXGISwapChain1> swap;
 	winrt::com_ptr<ID3D11RenderTargetView> view;
+	winrt::com_ptr<ID3D11Texture2D> texture;
+	winrt::com_ptr<ID3D11ShaderResourceView> image;
+	UINT textureWidth = 0, textureHeight = 0;
 
 	bool Ensure(HWND hwnd, ID3D11Device* device, IDXGIFactory2* factory) {
 		RECT rect{};
@@ -1302,31 +1292,39 @@ struct PreviewSwapChain {
 		height = h;
 		return true;
 	}
+	void Upload(ID3D11Device* device, ID3D11DeviceContext* context, const void* data, UINT pitch, UINT w, UINT h) {
+		if (!texture || textureWidth != w || textureHeight != h) {
+			image = nullptr;
+			texture = nullptr;
+			D3D11_TEXTURE2D_DESC desc{};
+			desc.Width = w;
+			desc.Height = h;
+			desc.MipLevels = desc.ArraySize = 1;
+			desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+			desc.SampleDesc.Count = 1;
+			desc.Usage = D3D11_USAGE_DEFAULT;
+			desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+			winrt::check_hresult(device->CreateTexture2D(&desc, nullptr, texture.put()));
+			winrt::check_hresult(device->CreateShaderResourceView(texture.get(), nullptr, image.put()));
+			textureWidth = w;
+			textureHeight = h;
+		}
+		context->UpdateSubresource(texture.get(), 0, nullptr, data, pitch, 0);
+	}
 };
 
-struct SplitWindowCapture {
-	HWND source = nullptr;
-	bool ownsApartment = false;
-	Wgc::Direct3D11CaptureFramePool frames{nullptr};
-	Wgc::GraphicsCaptureSession session{nullptr};
-	PreviewDevice captureDevice{nullptr};
-	PreviewSize size{};
+struct DetachedCameraWindows {
 	winrt::com_ptr<ID3D11Device> device;
 	winrt::com_ptr<ID3D11DeviceContext> context;
 	winrt::com_ptr<IDXGIFactory2> factory;
 	winrt::com_ptr<ID3D11VertexShader> vertex;
 	winrt::com_ptr<ID3D11PixelShader> pixel;
-	winrt::com_ptr<ID3D11Buffer> region;
 	winrt::com_ptr<ID3D11SamplerState> sampler;
 	winrt::com_ptr<ID3D11RasterizerState> rasterizer;
-	winrt::com_ptr<ID3D11Texture2D> sampledFrame;
-	winrt::com_ptr<ID3D11ShaderResourceView> frameView;
 	PreviewSwapChain outputs[2]{};
-	int width = 0, height = 0;
 
 	void CreateDrawResources() {
 		constexpr char shader[] = R"(
-			cbuffer Region : register(b0) { float4 sourceRect; }
 			Texture2D frameTexture : register(t0);
 			SamplerState frameSampler : register(s0);
 			struct Varying { float4 position : SV_POSITION; float2 uv : TEXCOORD; };
@@ -1334,7 +1332,7 @@ struct SplitWindowCapture {
 				float2 uv = float2((id << 1) & 2, id & 2);
 				Varying result;
 				result.position = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1);
-				result.uv = sourceRect.xy + uv * sourceRect.zw;
+				result.uv = uv;
 				return result;
 			}
 			float4 ps(Varying input) : SV_TARGET { return float4(frameTexture.Sample(frameSampler, input.uv).rgb, 1); }
@@ -1346,10 +1344,6 @@ struct SplitWindowCapture {
 			"ps", "ps_4_0", 0, 0, ps.put(), nullptr));
 		winrt::check_hresult(device->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, vertex.put()));
 		winrt::check_hresult(device->CreatePixelShader(ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, pixel.put()));
-		D3D11_BUFFER_DESC buffer{};
-		buffer.ByteWidth = 16;
-		buffer.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-		winrt::check_hresult(device->CreateBuffer(&buffer, nullptr, region.put()));
 		D3D11_SAMPLER_DESC desc{};
 		desc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
 		desc.AddressU = desc.AddressV = desc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
@@ -1365,15 +1359,6 @@ struct SplitWindowCapture {
 	}
 
 	void Start() {
-		source = FindWindowW(L"UnityWndClass", L"imasscprism");
-		DWORD pid = 0;
-		if (!source || !GetWindowThreadProcessId(source, &pid) || pid != GetCurrentProcessId())
-			winrt::throw_hresult(E_HANDLE);
-		const HRESULT apartment = RoInitialize(RO_INIT_MULTITHREADED);
-		ownsApartment = SUCCEEDED(apartment);
-		if (!ownsApartment && apartment != RPC_E_CHANGED_MODE) winrt::check_hresult(apartment);
-		if (!Wgc::GraphicsCaptureSession::IsSupported()) winrt::throw_hresult(E_NOTIMPL);
-
 		winrt::check_hresult(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
 			D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION,
 			device.put(), nullptr, context.put()));
@@ -1382,114 +1367,19 @@ struct SplitWindowCapture {
 		winrt::check_hresult(dxgi->GetAdapter(adapter.put()));
 		winrt::check_hresult(adapter->GetParent(__uuidof(IDXGIFactory2), factory.put_void()));
 		CreateDrawResources();
-		winrt::com_ptr<::IInspectable> wrapped;
-		winrt::check_hresult(CreateDirect3D11DeviceFromDXGIDevice(dxgi.get(), wrapped.put()));
-		captureDevice = wrapped.as<PreviewDevice>();
-		auto interop = winrt::get_activation_factory<Wgc::GraphicsCaptureItem, IGraphicsCaptureItemInterop>();
-		Wgc::GraphicsCaptureItem item{nullptr};
-		winrt::check_hresult(interop->CreateForWindow(source, winrt::guid_of<Wgc::IGraphicsCaptureItem>(),
-			winrt::put_abi(item)));
-		size = item.Size();
-		frames = Wgc::Direct3D11CaptureFramePool::CreateFreeThreaded(captureDevice,
-			Wgd::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size);
-		session = frames.CreateCaptureSession(item);
-		session.StartCapture();
 	}
 
-	void Stop() {
-		try { if (session) session.Close(); } catch (const winrt::hresult_error&) {}
-		try { if (frames) frames.Close(); } catch (const winrt::hresult_error&) {}
-		session = nullptr;
-		frames = nullptr;
-		captureDevice = nullptr;
-		if (context) context->ClearState();
-		for (auto& output : outputs) output = {};
-		frameView = nullptr;
-		sampledFrame = nullptr;
-		vertex = nullptr;
-		pixel = nullptr;
-		region = nullptr;
-		sampler = nullptr;
-		rasterizer = nullptr;
-		factory = nullptr;
-		context = nullptr;
-		device = nullptr;
-		width = height = 0;
-		source = nullptr;
-		if (std::exchange(ownsApartment, false)) RoUninitialize();
-	}
-
-	bool CopyFrame() {
-		auto frame = frames.TryGetNextFrame();
-		if (!frame) return false;
-		const auto content = frame.ContentSize();
-		if (content.Width <= 0 || content.Height <= 0) return false;
-		if (size.Width != content.Width || size.Height != content.Height) {
-			frame.Close();
-			size = content;
-			frames.Recreate(captureDevice, Wgd::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size);
-			frameView = nullptr;
-			sampledFrame = nullptr;
-			return false;
-		}
-		auto surface = frame.Surface().as<::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>();
-		winrt::com_ptr<ID3D11Texture2D> texture;
-		winrt::check_hresult(surface->GetInterface(__uuidof(ID3D11Texture2D), texture.put_void()));
-		D3D11_TEXTURE2D_DESC desc{};
-		texture->GetDesc(&desc);
-		width = std::min(content.Width, static_cast<int>(desc.Width));
-		height = std::min(content.Height, static_cast<int>(desc.Height));
-		if (!sampledFrame) {
-			desc.Usage = D3D11_USAGE_DEFAULT;
-			desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-			desc.MiscFlags = 0;
-			desc.CPUAccessFlags = 0;
-			winrt::check_hresult(device->CreateTexture2D(&desc, nullptr, sampledFrame.put()));
-			winrt::check_hresult(device->CreateShaderResourceView(sampledFrame.get(), nullptr, frameView.put()));
-		}
-		context->CopyResource(sampledFrame.get(), texture.get());
-		return true;
-	}
-
-	RECT ClientArea() const {
-		RECT bounds{}, client{};
-		POINT a{}, b{};
-		const RECT full{0, 0, width, height};
-		if (FAILED(DwmGetWindowAttribute(source, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds))) &&
-			!GetWindowRect(source, &bounds)) return full;
-		if (!GetClientRect(source, &client) || bounds.right <= bounds.left || bounds.bottom <= bounds.top) return full;
-		if (client.right == width && client.bottom == height) return full;
-		b = {client.right, client.bottom};
-		if (!ClientToScreen(source, &a) || !ClientToScreen(source, &b)) return full;
-		const auto x = [&](LONG value) { return std::clamp(std::lround(
-			(value - bounds.left) * double(width) / (bounds.right - bounds.left)), 0l, static_cast<long>(width)); };
-		const auto y = [&](LONG value) { return std::clamp(std::lround(
-			(value - bounds.top) * double(height) / (bounds.bottom - bounds.top)), 0l, static_cast<long>(height)); };
-		return {x(a.x), y(a.y), x(b.x), y(b.y)};
-	}
-
-	bool Draw(int index, HWND window, const float* anchors, const RECT& area) {
+	bool Draw(int index, HWND window, const void* data, unsigned pitch, float w, float h) {
 		auto& output = outputs[index];
 		if (!output.Ensure(window, device.get(), factory.get())) return false;
-		const auto horizontal = [&](float x) { return area.left + (area.right - area.left) * x; };
-		const auto vertical = [&](float y) { return area.top + (area.bottom - area.top) * (1.0f - y); };
-		const float x = horizontal(anchors[0]), y = vertical(anchors[3]);
-		const float w = horizontal(anchors[2]) - x, h = vertical(anchors[1]) - y;
-		if (w < 1 || h < 1) return false;
-		D3D11_TEXTURE2D_DESC desc{};
-		sampledFrame->GetDesc(&desc);
-		const float uv[]{(x + 0.5f) / desc.Width, (y + 0.5f) / desc.Height,
-			(w - 1.0f) / desc.Width, (h - 1.0f) / desc.Height};
-		context->UpdateSubresource(region.get(), 0, nullptr, uv, 0, 0);
-
+		output.Upload(device.get(), context.get(), data, pitch, static_cast<UINT>(w), static_cast<UINT>(h));
 		const float scale = std::min(output.width / w, output.height / h);
 		const float drawnW = w * scale, drawnH = h * scale;
 		const D3D11_VIEWPORT viewport{(output.width - drawnW) * 0.5f,
 			(output.height - drawnH) * 0.5f, drawnW, drawnH, 0, 1};
 		constexpr float black[]{0, 0, 0, 1};
 		auto* view = output.view.get();
-		auto* constants = region.get();
-		auto* image = frameView.get();
+		auto* image = output.image.get();
 		auto* filter = sampler.get();
 		context->ClearRenderTargetView(view, black);
 		context->OMSetRenderTargets(1, &view, nullptr);
@@ -1497,7 +1387,6 @@ struct SplitWindowCapture {
 		context->RSSetViewports(1, &viewport);
 		context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 		context->VSSetShader(vertex.get(), nullptr, 0);
-		context->VSSetConstantBuffers(0, 1, &constants);
 		context->PSSetShader(pixel.get(), nullptr, 0);
 		context->PSSetShaderResources(0, 1, &image);
 		context->PSSetSamplers(0, 1, &filter);
@@ -1511,26 +1400,28 @@ struct SplitWindowCapture {
 		return true;
 	}
 };
-SplitWindowCapture splitCapture;
+DetachedCameraWindows cameraWindows;
 }
 
-void StopMvWindowCapture() {
-	if (splitCapture.source) splitCapture.Stop();
+void ResetMvCameraWindow(int index) {
+	cameraWindows.outputs[index] = {};
 }
 
-bool DrawMvWindowCapture(const HWND* windows, const float (*bounds)[4], unsigned& displayed, std::string& error) {
+void StopMvCameraWindows() {
+	if (!cameraWindows.device) return;
+	if (cameraWindows.context) cameraWindows.context->ClearState();
+	cameraWindows = {};
+}
+
+bool DrawMvCameraFrame(int index, HWND window, const void* data, unsigned pitch,
+	int width, int height, bool& displayed, std::string& error) {
 	try {
-		auto& capture = splitCapture;
-		if (!capture.session) capture.Start();
-		for (int i = 0; i < 2; ++i)
-			if (!windows[i]) capture.outputs[i] = {};
-		if (!capture.CopyFrame()) return true;
-		const RECT area = capture.ClientArea();
-		for (int i = 0; i < 2; ++i)
-			if (windows[i] && capture.Draw(i, windows[i], bounds[i], area)) displayed |= 1u << i;
+		if (!cameraWindows.device) cameraWindows.Start();
+		displayed = cameraWindows.Draw(index, window, data, pitch, static_cast<float>(width), static_cast<float>(height));
 		return true;
 	} catch (const winrt::hresult_error& e) {
 		error = winrt::to_string(e.message());
+		StopMvCameraWindows();
 		return false;
 	}
 }

@@ -31,8 +31,10 @@ std::function<void()> g_on_close;
 std::function<void()> on_hotKey_0;
 bool needPrintStack = false;
 
-extern bool DrawMvWindowCapture(const HWND* windows, const float (*bounds)[4], unsigned& displayed, std::string& error);
-extern void StopMvWindowCapture();
+extern bool DrawMvCameraFrame(int index, HWND window, const void* data, unsigned pitch,
+	int width, int height, bool& displayed, std::string& error);
+extern void ResetMvCameraWindow(int index);
+extern void StopMvCameraWindows();
 
 namespace {
 	std::atomic_bool mvCenterCloseupsAnyCostume{false};
@@ -9469,9 +9471,13 @@ namespace
 				return make();
 			}
 
+			void ReleasePanelTexture(OwnedObject& texture);
+
 			struct Panel {
 				OwnedObject cameraObject, imageObject, texture;
 				int width = 0, height = 0;
+				int baseWidth = 0, baseHeight = 0, firstPreviewFrame = 0;
+				bool previewResolution = false;
 				Il2CppObject* Camera() const { return OutfitCall(cameraObject.Get(), "GetComponent", {reinterpret_cast<Il2CppObject*>(engine.cameraType)}); }
 
 				bool Create(void* source, Il2CppObject* parent, int index, const BarLayout& layout, int w, int h) {
@@ -9523,9 +9529,32 @@ namespace
 					layout.Write(rect);
 					OutfitCall(image, "set_texture", {rt});
 					WriteValue(image, "set_raycastTarget", false);
+					width = baseWidth = w;
+					height = baseHeight = h;
+					return true;
+				}
+
+				void SetPreviewResolution(bool enabled, int frame) {
+					if (enabled == previewResolution) return;
+					previewResolution = enabled;
+					firstPreviewFrame = frame + 1;
+					const float scale = enabled ? std::max(1.0f, std::min(1080.0f / baseHeight, 1920.0f / baseWidth)) : 1.0f;
+					const int w = static_cast<int>(std::lround(baseWidth * scale));
+					const int h = static_cast<int>(std::lround(baseHeight * scale));
+					if (w == width && h == height) return;
+					auto* camera = Camera();
+					auto* image = OutfitCall(imageObject.Get(), "GetComponent", {reinterpret_cast<Il2CppObject*>(engine.rawImageType)});
+					if (!Alive(camera) || !Alive(image)) return;
+					auto* rt = NewTargetTexture(w, h);
+					if (!Alive(rt)) return;
+					const auto handle = il2cpp_gchandle_new(rt, false);
+					OutfitCall(camera, "set_targetTexture", {rt});
+					WriteValue(camera, "set_aspect", static_cast<float>(baseWidth) / baseHeight);
+					OutfitCall(image, "set_texture", {rt});
+					ReleasePanelTexture(texture);
+					texture.handle = handle;
 					width = w;
 					height = h;
-					return true;
 				}
 
 				void Enable() {
@@ -9540,16 +9569,18 @@ namespace
 						OutfitCall(camera, "set_targetTexture", {nullptr});
 					}
 					if (auto* image = imageObject.Get(); Alive(image)) WriteValue(image, "SetActive", false);
-					if (auto* rt = texture.Get(); Alive(rt)) engine.releaseTemporary->InvokeAsVoid(nullptr, {rt});
-					if (texture.handle) il2cpp_gchandle_free(std::exchange(texture.handle, nullptr));
+					ReleasePanelTexture(texture);
 					imageObject.Destroy();
 					cameraObject.Destroy();
+					previewResolution = false;
 				}
 			};
 
 			struct SplitPreview {
 				HWND window = nullptr;
 				bool displayed = false;
+				bool useLinearReadback = false;
+				int lastFrame = -1, errors = 0;
 				int id = 0;
 
 				static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -9577,6 +9608,9 @@ namespace
 
 				bool Open(int preview) {
 					id = preview;
+					lastFrame = -1;
+					errors = 0;
+					useLinearReadback = false;
 					constexpr auto className = L"ScspMvSplitPreviewWindow";
 					HINSTANCE instance = GetModuleHandleW(nullptr);
 					WNDCLASSW wc{};
@@ -9609,58 +9643,176 @@ namespace
 			};
 			SplitPreview splitPreviews[2];
 
+			struct AsyncTextureRequest {
+				void* ptr = nullptr;
+				int version = 0;
+			};
+			static_assert(sizeof(AsyncTextureRequest) == 16);
+
+			struct AsyncTextureReadback {
+				using Submit = void(*)(void*, int, int, void*, AsyncTextureRequest*);
+				using Status = bool(*)(AsyncTextureRequest*);
+				using LayerSize = int(*)(AsyncTextureRequest*);
+				using LayerData = const void*(*)(AsyncTextureRequest*, int);
+				const FieldInfo* cachedPtr = nullptr;
+				Submit submit = nullptr;
+				Status done = nullptr;
+				Status failed = nullptr;
+				LayerSize size = nullptr;
+				LayerData data = nullptr;
+
+				bool Available() {
+					static const bool resolved = [this] {
+						cachedPtr = il2cpp_symbols::get_field(core, "UnityEngine", "Object", "m_CachedPtr");
+						submit = reinterpret_cast<Submit>(il2cpp_resolve_icall(
+							"UnityEngine.Rendering.AsyncGPUReadback::Request_Internal_Texture_2_Injected"));
+						done = reinterpret_cast<Status>(il2cpp_resolve_icall("UnityEngine.Rendering.AsyncGPUReadbackRequest::IsDone"));
+						failed = reinterpret_cast<Status>(il2cpp_resolve_icall("UnityEngine.Rendering.AsyncGPUReadbackRequest::HasError"));
+						size = reinterpret_cast<LayerSize>(il2cpp_resolve_icall("UnityEngine.Rendering.AsyncGPUReadbackRequest::GetLayerDataSize"));
+						data = reinterpret_cast<LayerData>(il2cpp_resolve_icall("UnityEngine.Rendering.AsyncGPUReadbackRequest::GetDataRaw"));
+						return cachedPtr && submit && done && failed && size && data;
+					}();
+					return resolved;
+				}
+			};
+			AsyncTextureReadback textureReadback;
+
+			struct CameraReadback {
+				AsyncTextureRequest request;
+				void* target = nullptr;
+				int frame = -1;
+			};
+			// Keep two frames in flight per window so a readback need not stall the next frame.
+			CameraReadback previewRequests[2][2]{};
+			std::vector<OwnedObject> retiredTargets;
+
+			void ReturnPanelTexture(OwnedObject& texture) {
+				if (auto* rt = texture.Get(); Alive(rt)) engine.releaseTemporary->InvokeAsVoid(nullptr, {rt});
+				il2cpp_gchandle_free(std::exchange(texture.handle, nullptr));
+			}
+
+			bool HasPendingReadback(void* target) {
+				for (const auto& requests : previewRequests)
+					for (const auto& frame : requests)
+						if (frame.target == target) return true;
+				return false;
+			}
+
+			void ReleasePanelTexture(OwnedObject& texture) {
+				if (!texture.handle) return;
+				// A temporary RenderTexture must stay rented until Unity has finished reading it.
+				if (HasPendingReadback(texture.handle))
+					retiredTargets.push_back({std::exchange(texture.handle, nullptr)});
+				else
+					ReturnPanelTexture(texture);
+			}
+
+			void CollectRetiredTargets() {
+				std::erase_if(retiredTargets, [](OwnedObject& texture) {
+					if (HasPendingReadback(texture.handle)) return false;
+					ReturnPanelTexture(texture);
+					return true;
+				});
+			}
+
 			void CloseSplitPreviews() {
-				StopMvWindowCapture();
+				StopMvCameraWindows();
 				for (int i = 0; i < 2; ++i) {
 					splitPreviews[i].Close();
 					SetMvSplitPreviewPane(i, -1);
+					for (auto& pending : previewRequests[i])
+						if (pending.target && textureReadback.done(&pending.request)) pending = {};
 				}
+				CollectRetiredTargets();
 			}
 
-			void UpdateSplitPreviews(const std::array<BarLayout, mvSplitPanelCount>& layouts, int count) {
-				int panes[2]{};
-				bool open = false;
+			bool UpdatePreviewFeed(int index, const Panel* panel, int frame, std::string& error) {
+				auto& preview = splitPreviews[index];
+				auto& requests = previewRequests[index];
+				CameraReadback latest{};
+				for (auto& pending : requests) {
+					if (!pending.target || !textureReadback.done(&pending.request)) continue;
+					if (panel && pending.target == panel->texture.handle && pending.frame > preview.lastFrame) {
+						if (!textureReadback.failed(&pending.request)) {
+							if (pending.frame > latest.frame) latest = pending;
+						} else {
+							++preview.errors;
+							preview.useLinearReadback = true;
+						}
+					}
+					pending = {};
+				}
+				if (!panel) return true;
+				if (latest.target) {
+					const int bytes = textureReadback.size(&latest.request);
+					const void* pixels = textureReadback.data(&latest.request, 0);
+					const int pitch = bytes / panel->height;
+					if (!pixels || bytes % panel->height || pitch < panel->width * 4) {
+						error = "camera readback returned an unexpected image size";
+						return false;
+					}
+					bool displayed = false;
+					if (!DrawMvCameraFrame(index, preview.window, pixels, pitch, panel->width, panel->height, displayed, error))
+						return false;
+					preview.lastFrame = latest.frame;
+					preview.errors = 0;
+					if (displayed && !std::exchange(preview.displayed, true))
+						Log(std::format("[mv-split] direct camera preview {} displayed its first frame at {}x{}",
+							index + 1, panel->width, panel->height));
+				}
+				if (preview.errors >= 6) {
+					error = "Unity could not read the camera texture";
+					return false;
+				}
+				if (frame < panel->firstPreviewFrame || IsIconic(preview.window)) return true;
+				for (auto& pending : requests) {
+					if (pending.target) continue;
+					auto* target = panel->texture.Get();
+					if (!Alive(target)) return true;
+					void* nativeTexture = il2cpp_symbols::read_field<void*>(target, textureReadback.cachedPtr);
+					if (!nativeTexture) return true;
+					constexpr int rgbaSrgb = 4; // UnityEngine.Experimental.Rendering.GraphicsFormat.R8G8B8A8_SRGB
+					constexpr int rgbaLinear = 8; // GraphicsFormat.R8G8B8A8_UNorm
+					const int format = preview.useLinearReadback ? rgbaLinear : rgbaSrgb;
+					textureReadback.submit(nativeTexture, 0, format, nullptr, &pending.request);
+					pending.target = panel->texture.handle;
+					pending.frame = frame;
+					break;
+				}
+				return true;
+			}
+
+			void UpdateSplitPreviews(Panel* panels, int count, int frame) {
+				int panes[2]{-1, -1};
+				unsigned largePanels = 0;
 				for (int i = 0; i < 2; ++i) {
 					auto& preview = splitPreviews[i];
 					preview.Pump();
-					panes[i] = GetMvSplitPreviewPane(i);
-					if (panes[i] < 0) {
-						if (preview.window || preview.displayed) preview.Close();
-					} else if (preview.window || preview.Open(i)) {
-						open = true;
+					const int pane = GetMvSplitPreviewPane(i);
+					if (pane < 0) {
+						if (preview.window) preview.Close();
+						ResetMvCameraWindow(i);
+					} else if (!textureReadback.Available() || (!preview.window && !preview.Open(i))) {
+						Log(std::format("[mv-split] direct camera preview {} unavailable", i + 1));
+						SetMvSplitPreviewPane(i, -1);
 					} else {
-						Log(std::format("[mv-split] preview {} window could not open", i + 1));
+						panes[i] = std::min(pane, count - 1);
+						largePanels |= 1u << panes[i];
+					}
+				}
+				for (int i = 0; i < count; ++i)
+					panels[i].SetPreviewResolution((largePanels & (1u << i)) != 0, frame);
+				for (int i = 0; i < 2; ++i) {
+					std::string error;
+					if (!UpdatePreviewFeed(i, panes[i] < 0 ? nullptr : &panels[panes[i]], frame, error)) {
+						Log(std::format("[mv-split] direct camera preview {} stopped: {}", i + 1, error));
+						ResetMvCameraWindow(i);
+						splitPreviews[i].Close();
 						SetMvSplitPreviewPane(i, -1);
 					}
 				}
-				if (!open) {
-					StopMvWindowCapture();
-					return;
-				}
-
-				HWND windows[2]{};
-				float anchors[2][4]{};
-				for (int i = 0; i < 2; ++i) {
-					if (panes[i] < 0 || !splitPreviews[i].window) continue;
-					windows[i] = splitPreviews[i].window;
-					const auto& pane = layouts[std::min(panes[i], count - 1)];
-					anchors[i][0] = pane.minAnchor.x;
-					anchors[i][1] = pane.minAnchor.y;
-					anchors[i][2] = pane.maxAnchor.x;
-					anchors[i][3] = pane.maxAnchor.y;
-				}
-				unsigned displayed = 0;
-				std::string error;
-				if (!DrawMvWindowCapture(windows, anchors, displayed, error)) {
-					Log(std::format("[mv-split] previews stopped: {}", error));
-					CloseSplitPreviews();
-					return;
-				}
-				for (int i = 0; i < 2; ++i) {
-					auto& preview = splitPreviews[i];
-					if ((displayed & (1u << i)) && !std::exchange(preview.displayed, true))
-						Log(std::format("[mv-split] GPU preview {} displayed its first frame", i + 1));
-				}
+				CollectRetiredTargets();
+				if (!largePanels) StopMvCameraWindows();
 			}
 
 			std::array<BarLayout, mvSplitPanelCount> PanelLayouts(int layout, float aspect) {
@@ -9678,10 +9830,11 @@ namespace
 					panes[1] = {{0, 0}, {0.5f, 0.36f}, {}, {}};
 					panes[2] = {{0.5f, 0}, {1, 0.36f}, {}, {}};
 				} else if (layout == SplitPictureInPicture) {
-					constexpr float scale = 1.8f;
-					const float inset = std::min(0.24f / aspect, 0.26f) * scale;
+					constexpr float heightScale = 1.8f;
+					constexpr float widthScale = heightScale * 1.2f;
+					const float inset = std::min(0.24f / aspect, 0.26f) * widthScale;
 					panes[0] = {{0, 0}, {1, 1}, {}, {}};
-					panes[1] = {{0.035f, 0.94f - (0.94f - 0.57f) * scale}, {0.035f + inset, 0.94f}, {}, {}};
+					panes[1] = {{0.035f, 0.94f - (0.94f - 0.57f) * heightScale}, {0.035f + inset, 0.94f}, {}, {}};
 				} else {
 					for (int i = 0; i < count; ++i)
 						panes[i] = {{static_cast<float>(i) / count, 0}, {static_cast<float>(i + 1) / count, 1}, {}, {}};
@@ -9912,7 +10065,7 @@ namespace
 					const int actor = GetMvSplitActorForLayout(i, layout);
 					FramePanel(i, centers[actor < count && found[actor] ? actor : first]);
 				}
-				UpdateSplitPreviews(PanelLayouts(layout, static_cast<float>(w) / h), paneCount);
+				UpdateSplitPreviews(renderer.panels, paneCount, frame);
 				return true;
 			}
 
