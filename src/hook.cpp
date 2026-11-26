@@ -4874,6 +4874,7 @@ namespace
 		}
 
 		// walk MasterData.Songs once and patch every part-capable song
+		namespace ExtraSpreadVocals { void AddPartsCharacters(void* master); }
 		void PatchAllSongs() {
 			auto masterData = TryMasterData();
 			if (!masterData) return;
@@ -4891,6 +4892,7 @@ namespace
 				if (items && size > 0) { arr = items; n = size; }
 			}
 			if (n <= 0) return;
+			ExtraSpreadVocals::AddPartsCharacters(masterData);
 			g_songsPatched = true;
 			Log(std::format("[v26] MasterData.Songs rows = {}", n));
 			int parts = 0, solo = 0;
@@ -8546,6 +8548,176 @@ namespace
 			} catch (...) { Log("[original-mv-outfit] fallback failed"); }
 		}
 
+		namespace ExtraSpreadVocals {
+			constexpr int songId = 5;
+			constexpr std::pair<int, std::string_view> roles[]{
+				{78,"mami"}, {79,"ami"}, {80,"azusa"}, {81,"ritsuko"}, {83,"iori"}, {84,"yayoi"},
+				{85,"miki"}, {86,"chihaya"}, {87,"takane"}, {88,"makoto"}, {89,"haruka"},
+			};
+			const MethodInfo* addCueSheet = nullptr;
+			const MethodInfo* getCueSheet = nullptr;
+			HOOK_ORIG_TYPE loadCueSheetOriginal;
+			HOOK_ORIG_TYPE loadAndGetOriginal;
+			HOOK_ORIG_TYPE candidateOriginal;
+			HOOK_ORIG_TYPE eligibleOriginal;
+			unsigned loadResultSize = 0;
+			unsigned loadResultOffset = 0;
+			std::unordered_set<int> installedRoles;
+
+			std::string CueName(int actor, std::string_view role) {
+				return std::format("005_STWing_{:02}{}", actor, role);
+			}
+
+			std::filesystem::path CuePath(const std::string& name) {
+				return std::filesystem::absolute(std::filesystem::path("extra-mv-vocals") / (name + ".acb"));
+			}
+
+			const MethodInfo* Method(const char* ns, const char* klass, const char* name, int count) {
+				auto* type = (Il2CppClass*)ViewDiag::find_class_anywhere(ns, klass);
+				return type ? il2cpp_class_get_method_from_name(type, name, count) : nullptr;
+			}
+
+			bool ParamIs(const MethodInfo* method, int index, const char* type) {
+				const char* name = method ? il2cpp_symbols::il2cpp_method_get_param_type_name(method, index) : nullptr;
+				if (!name) return false;
+				const char* shortName = strrchr(type, '.');
+				return strcmp(name, type) == 0 || (shortName && strcmp(name, shortName + 1) == 0);
+			}
+
+			Il2CppObject* EnsureCueSheet(Il2CppString* label) {
+				if (!addCueSheet || !getCueSheet || !label) return nullptr;
+				std::string name = label->ToUtf8String();
+				const auto slash = name.find_last_of("/\\");
+				if (slash != std::string::npos) name.erase(0, slash + 1);
+				if (name.ends_with(".acb")) name.resize(name.size() - 4);
+				const auto found = std::find_if(std::begin(roles), std::end(roles), [&](const auto& role) {
+					return installedRoles.contains(role.first) && _stricmp(CueName(role.first, role.second).c_str(), name.c_str()) == 0;
+				});
+				if (found == std::end(roles)) return nullptr;
+				auto* alias = reinterpret_cast<Il2CppObject*>(label);
+				if (auto* sheet = getCueSheet->Invoke<Il2CppObject*>(nullptr, {alias})) return sheet;
+				const auto path = CuePath(CueName(found->first, found->second));
+				if (!std::filesystem::is_regular_file(path)) return nullptr;
+				auto* file = reinterpret_cast<Il2CppObject*>(il2cpp_symbols::NewWStr(path.wstring()));
+				auto* empty = reinterpret_cast<Il2CppObject*>(il2cpp_string_new(""));
+				Il2CppObject* error = nullptr;
+				Il2CppObject* args[]{alias, file, empty, nullptr};
+				auto* sheet = reflection::InvokeInTry(addCueSheet, nullptr, args, &error, "Extra Spread vocals");
+				if (error || !sheet || !RunwayDump::ReadPtr(sheet, "acb")) return nullptr;
+				Log(std::format("[extra-mv-vocals] loaded {} actor={}", name, found->first));
+				return sheet;
+			}
+
+			void* LoadCueSheet(void* result, void* self, Il2CppString* label, uintptr_t ct, const MethodInfo* method) {
+				if (EnsureCueSheet(label)) {
+					std::memset(result, 0, 16);
+					return result;
+				}
+				return reinterpret_cast<void*(*)(void*, void*, Il2CppString*, uintptr_t, const MethodInfo*)>(
+					loadCueSheetOriginal)(result, self, label, ct, method);
+			}
+
+			void* LoadAndGet(void* result, void* self, Il2CppString* label, uintptr_t ct, const MethodInfo* method) {
+				if (auto* sheet = EnsureCueSheet(label)) {
+					std::memset(result, 0, loadResultSize);
+					std::memcpy(static_cast<char*>(result) + loadResultOffset, &sheet, sizeof(sheet));
+					return result;
+				}
+				return reinterpret_cast<void*(*)(void*, void*, Il2CppString*, uintptr_t, const MethodInfo*)>(
+					loadAndGetOriginal)(result, self, label, ct, method);
+			}
+
+			bool VoiceAvailable(void* music, int actor) {
+				return installedRoles.contains(actor) &&
+					OutfitNumber(OutfitCall(music, "get_Master"), "get_Id") == songId;
+			}
+
+			bool Candidate(void* self, int actor, const MethodInfo* method) {
+				return VoiceAvailable(self, actor) ||
+					reinterpret_cast<bool(*)(void*, int, const MethodInfo*)>(candidateOriginal)(self, actor, method);
+			}
+
+			bool Eligible(void* self, int actor, const MethodInfo* method) {
+				return VoiceAvailable(self, actor) ||
+					reinterpret_cast<bool(*)(void*, int, const MethodInfo*)>(eligibleOriginal)(self, actor, method);
+			}
+
+			void AddPartsCharacters(void* master) {
+				if (!master || installedRoles.empty()) return;
+				const auto rows = OutfitList(CenterCutSceneTableRows(master, "SongPartsCharacters"));
+				for (int i = 0; i < rows.count; ++i) {
+					auto* row = il2cpp_symbols::array_get_value(rows.data, i);
+					if (OutfitNumber(row, "get_MstSongId") != songId) continue;
+					auto* ids = OutfitCall(row, "get_MstCharacterIdList");
+					int added = 0;
+					for (const auto& [actor, name] : roles) {
+						if (!installedRoles.contains(actor) || OutfitIntListContains(ids, actor)) continue;
+						int id = actor;
+						OutfitCall(ids, "Add", {reinterpret_cast<Il2CppObject*>(&id)});
+						if (OutfitIntListContains(ids, actor)) ++added;
+					}
+					Log(std::format("[extra-mv-vocals] song={} voices added={}", songId, added));
+					break;
+				}
+			}
+
+			void Install() {
+				auto* cri = (Il2CppClass*)ViewDiag::find_class_anywhere("CriWare", "CriAtom");
+				if (!cri) return;
+				void* iterator = nullptr;
+				while (const auto* method = il2cpp_class_get_methods(cri, &iterator)) {
+					if (strcmp(method->name, "AddCueSheet") == 0 && method->parameters_count == 4 &&
+						ParamIs(method, 0, "System.String") && ParamIs(method, 1, "System.String"))
+						addCueSheet = method;
+				}
+				getCueSheet = il2cpp_class_get_method_from_name(cri, "GetCueSheet", 1);
+				if (!addCueSheet || !getCueSheet) return;
+
+				auto* module = GetModuleHandleW(L"GameAssembly.dll");
+				auto valueSize = reinterpret_cast<int(*)(Il2CppClass*, unsigned*)>(GetProcAddress(module, "il2cpp_class_value_size"));
+				const auto* load = Method("PRISM", "SoundManager", "LoadCueSheetAsync", 2);
+				const auto* loadGet = Method("PRISM", "SoundManager", "LoadAndGetCueSheetAsync", 2);
+				bool loading = false, getting = false;
+				if (auto* t = load && load->return_type ? il2cpp_type_get_class_or_element_class(load->return_type) : nullptr;
+					valueSize && t && valueSize(t, nullptr) == 16 && ParamIs(load, 0, "System.String") &&
+					ParamIs(load, 1, "System.Threading.CancellationToken") &&
+					strcmp(il2cpp_class_get_name(t), "UniTask") == 0) {
+					loading = HookAt("SoundManager.LoadCueSheetAsync extra vocals", (void*)load->methodPointer,
+						(void*)LoadCueSheet, loadCueSheetOriginal);
+				}
+				if (auto* t = loadGet && loadGet->return_type ? il2cpp_type_get_class_or_element_class(loadGet->return_type) : nullptr;
+					valueSize && t && ParamIs(loadGet, 0, "System.String") &&
+					ParamIs(loadGet, 1, "System.Threading.CancellationToken")) {
+					const char* type = il2cpp_type_get_name(loadGet->return_type);
+					const auto* field = FieldOf(t, "result");
+					const int size = valueSize(t, nullptr);
+					if (type && strstr(type, "UniTask") && strstr(type, "CriAtomCueSheet") &&
+						field && field->offset >= 16 && size >= 16 && size <= 40 &&
+						field->offset - 16 + sizeof(void*) <= static_cast<unsigned>(size)) {
+						loadResultSize = size;
+						loadResultOffset = field->offset - 16;
+						getting = HookAt("SoundManager.LoadAndGetCueSheetAsync extra vocals", (void*)loadGet->methodPointer,
+							(void*)LoadAndGet, loadAndGetOriginal);
+					}
+				}
+				if (loading || getting) {
+					for (const auto& [actor, role] : roles)
+						if (std::filesystem::is_regular_file(CuePath(CueName(actor, role)))) installedRoles.insert(actor);
+				}
+				if (!installedRoles.empty()) {
+					const auto* candidate = Method("PRISM.Live", "MusicData", "IsCandidateVocalSeparatedCharacter", 1);
+					const auto* eligible = Method("PRISM.Live", "MusicData", "IsVocalSeparatedCharacter", 1);
+					if (ParamIs(candidate, 0, "System.Int32"))
+						HookAt("MusicData.IsCandidateVocalSeparatedCharacter extra vocals",
+							(void*)candidate->methodPointer, (void*)Candidate, candidateOriginal);
+					if (ParamIs(eligible, 0, "System.Int32"))
+						HookAt("MusicData.IsVocalSeparatedCharacter extra vocals",
+							(void*)eligible->methodPointer, (void*)Eligible, eligibleOriginal);
+				}
+				Log(std::format("[extra-mv-vocals] available={} load={} get={}", installedRoles.size(), loading, getting));
+			}
+		}
+
 		constexpr int kWetOutfitOffset = 40000000;
 		constexpr int kFirstSwimsuitModel = 343;
 		constexpr int kLastSwimsuitModel = 370;
@@ -10010,7 +10182,7 @@ namespace
 				return OutfitList(OutfitCall(scene, "get_Characters"));
 			}
 
-			bool ActorCenter(void* actor, Vector3_t& center) {
+			bool ActorCenter(void* actor, Vector3_t& center, Vector3_t& legs) {
 				if (!actor) return false;
 				const char* type = RunwayDump::ClassNameOf(actor);
 				if (type && std::string_view(type) == "TimelineSceneCharacter") {
@@ -10024,6 +10196,7 @@ namespace
 					std::hypot(center.x - root.x, center.z - root.z) > 1.25f ||
 					center.y < root.y || center.y > root.y + 2.3f)
 					center = {root.x, root.y + 0.9f, root.z};
+				legs = {center.x, root.y + std::clamp((center.y - root.y) * 0.5f, 0.32f, 0.58f), center.z};
 				return std::isfinite(center.x) && std::isfinite(center.y) && std::isfinite(center.z);
 			}
 
@@ -10090,11 +10263,11 @@ namespace
 				lastFrame = frame;
 				const auto actors = Actors(owner, source);
 				const int count = std::clamp(actors.count, 0, maxActors);
-				Vector3_t centers[maxActors]{};
+				Vector3_t centers[maxActors]{}, legs[maxActors]{};
 				bool found[maxActors]{};
 				int first = -1;
 				for (int i = 0; i < count; ++i) {
-					found[i] = ActorCenter(il2cpp_symbols::array_get_value(actors.data, i), centers[i]);
+					found[i] = ActorCenter(il2cpp_symbols::array_get_value(actors.data, i), centers[i], legs[i]);
 					if (found[i] && first < 0) first = i;
 				}
 				if (first < 0) {
@@ -10134,8 +10307,9 @@ namespace
 					const bool render = showOverlay || (detachedPanels & (1u << i)) != 0;
 					renderer.panels[i].SetOutput(render, showOverlay);
 					if (!render) continue;
-					const int actor = GetMvSplitActorForLayout(i, layout);
-					FramePanel(i, centers[actor < count && found[actor] ? actor : first]);
+					const int requestedActor = GetMvSplitActorForLayout(i, layout);
+					const int actor = requestedActor >= 0 && requestedActor < count && found[requestedActor] ? requestedActor : first;
+					FramePanel(i, layout == SplitPictureInPicture && i == 1 ? legs[actor] : centers[actor]);
 				}
 				return true;
 			}
@@ -12261,6 +12435,7 @@ namespace
 
 		void Install() {
 			InstallOutfitHooks();
+			ExtraSpreadVocals::Install();
 			FocusFraming::Install();
 			FocusCamera::Install();
 			const char* e1 = getenv("SCSP_SOLO_UNLOCK");
