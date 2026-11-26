@@ -9130,440 +9130,6 @@ namespace
 			});
 		}
 
-		namespace MvTools {
-			void* confirmHandle = nullptr;
-			void* previewHandle = nullptr;
-			void* selectionHandle = nullptr;
-			void* savedCostume = nullptr;
-			std::atomic_int request{0};
-			std::mutex queueMutex;
-			std::string status;
-			std::string songs, actors;
-			int randomMode = 0, partsFilter = 0, requestedCount = 3, requestedInterval = 5;
-			int pendingSong = 0, pendingMode = 0;
-			std::vector<int> pendingActors;
-			ULONGLONG pendingUntil = 0;
-			struct PlaylistEntry { void* music = nullptr; int id = 0, mode = 0; std::vector<int> actors; };
-			std::vector<PlaylistEntry> playlist;
-			size_t nextTrack = 0;
-			int interval = 5;
-			void* playingOverlay = nullptr;
-			bool waitingForOverlay = false;
-			ULONGLONG nextAt = 0, overlayDeadline = 0;
-
-			void Remember(void*& handle, void* value) {
-				if (handle) il2cpp_gchandle_free(std::exchange(handle, nullptr));
-				if (value) handle = newWeakHandle(value, false);
-			}
-
-			void* Target(void* handle) { return handle ? il2cpp_gchandle_get_target(handle) : nullptr; }
-
-			void SetStatus(std::string message) {
-				Log("[mv-tools] " + message);
-				std::lock_guard lock(queueMutex);
-				status = std::move(message);
-			}
-
-			std::string String(void* obj, const char* getter) {
-				return Il2CppStrOf(OutfitCall(obj, getter));
-			}
-
-			bool Flag(void* obj, const char* getter, std::initializer_list<Il2CppObject*> args = {}) {
-				auto* value = OutfitCall(obj, getter, args);
-				return value && value->unbox_value<bool>();
-			}
-
-			void* Unit(void* model) {
-				auto* current = OutfitCall(model, "get_CurrentUnit");
-				if (OutfitCall(current, "get_Idols")) return current;
-				return OutfitCall(current, "get_Value");
-			}
-
-			std::string Family(std::string name) {
-				const std::string_view close = "】";
-				if (const size_t end = name.find(close); end != std::string::npos) {
-					const size_t length = end + close.size();
-					return name.substr(0, length) + (name.find("（濡れ）") == std::string::npos ? "" : "（濡れ）");
-				}
-				return name;
-			}
-
-			struct Sets {
-				void* service = nullptr;
-				const MethodInfo* getSet = nullptr;
-				OutfitArray rows;
-
-				Il2CppObject* Get(int id) const {
-					return getSet && id > 0 ? getSet->Invoke<Il2CppObject*>((Il2CppObject*)service,
-						{reinterpret_cast<Il2CppObject*>(&id)}) : nullptr;
-				}
-
-				void* Default(int actor) const {
-					int standard = 0, fallback = 0;
-					for (int i = 0; i < rows.count; ++i) {
-						void* row = il2cpp_symbols::array_get_value(rows.data, i);
-						void* costume = OutfitCall(row, "get_Costume");
-						if (OutfitNumber(costume, "get_MstCharacterInfoId") != actor ||
-							!Flag(costume, "get_IsWearableLive")) continue;
-						void* hair = OutfitCall(row, "get_Hairstyle");
-						if (OutfitNumber(hair, "get_MstCharacterInfoId") != actor) continue;
-						const int id = OutfitNumber(row, "get_Id");
-						const auto hairName = String(hair, "get_Name");
-						if (hairName.find("デフォルト髪型") != std::string::npos) {
-							if (OutfitNumber(costume, "get_ResourceId") == 1) return Get(id);
-							if (!standard) standard = id;
-						}
-						if (!fallback && OutfitNumber(costume, "get_ResourceId") == 1) fallback = id;
-					}
-					return Get(standard ? standard : fallback);
-				}
-
-				Il2CppObject* Match(int actor, const std::string& family, void* sourceCostume) const {
-					int winner = 0;
-					int priority = -1;
-					for (int i = 0; i < rows.count; ++i) {
-						void* row = il2cpp_symbols::array_get_value(rows.data, i);
-						void* costume = OutfitCall(row, "get_Costume");
-						if (OutfitNumber(costume, "get_MstCharacterInfoId") != actor ||
-							Family(String(costume, "get_Name")) != family || !Flag(costume, "get_IsWearableLive")) continue;
-						int rank = OutfitNumber(costume, "get_CostumeType") == OutfitNumber(sourceCostume, "get_CostumeType") ? 1 : 0;
-						if (OutfitNumber(costume, "get_ResourceId") == OutfitNumber(sourceCostume, "get_ResourceId")) rank += 2;
-						if (rank > priority) {
-							winner = OutfitNumber(row, "get_Id");
-							priority = rank;
-						}
-					}
-					return Get(winner);
-				}
-			};
-
-			Sets GetSets(void* model, void* wardrobe = nullptr) {
-				void* service = RunwayDump::ReadPtr(model, "costumeService");
-				if (!service) service = RunwayDump::ReadPtr(wardrobe, "costumeService");
-				return {service, service ? GetOutfitSetByIdMethod(service) : nullptr,
-					OutfitList(CenterCutSceneTableRows(TryMasterData(), "CostumeSets"))};
-			}
-
-			bool CanBorrow(void* costume, int actor, const std::string& family) {
-				if (IsCollaborationWardrobeActor(actor) || family.find("バスクオンシャイニー") != std::string::npos)
-					return true;
-				const auto* method = ExtraSpreadVocals::Method("PRISM.Domain", "CostumeStatusExtensions", "CanWear", 3);
-				if (!method) return false;
-				bool ordered = true;
-				auto* allowed = method->Invoke<Il2CppObject*>(nullptr, {(Il2CppObject*)costume,
-					reinterpret_cast<Il2CppObject*>(&actor), reinterpret_cast<Il2CppObject*>(&ordered)});
-				return allowed && allowed->unbox_value<bool>();
-			}
-
-			void ReadPreview() {
-				auto* preview = OutfitCall(Target(previewHandle), "get_PreviewCostumeSet");
-				if (!OutfitCall(preview, "get_Costume")) { SetStatus("Open the wardrobe preview first."); return; }
-				auto* klass = (Il2CppClass*)ViewDiag::find_class_anywhere("PRISM.Domain", "CostumeSetData");
-				auto* copy = klass ? (Il2CppObject*)il2cpp_object_new(klass) : nullptr;
-				if (!copy) { SetStatus("Could not read the preview outfit."); return; }
-				OutfitCall(copy, ".ctor");
-				OutfitCall(copy, "CopyFrom", {preview});
-				if (savedCostume) il2cpp_gchandle_free(savedCostume);
-				savedCostume = il2cpp_gchandle_new(copy, false);
-				SetStatus("Captured the current wardrobe preview.");
-			}
-
-			void GroupDress(int flags) {
-				const bool fromPreview = (flags & 1) != 0, borrow = (flags & 2) != 0, matching = (flags & 4) != 0;
-				void* presenter = Target(confirmHandle);
-				void* model = RunwayDump::ReadPtr(presenter, "model");
-				void* unit = Unit(model);
-				const auto idols = OutfitList(OutfitCall(unit, "get_Idols"));
-				if (idols.count <= 0) { SetStatus("Open an MV formation first."); return; }
-				auto* first = il2cpp_symbols::array_get_value(idols.data, 0);
-				auto* source = fromPreview ? static_cast<Il2CppObject*>(Target(savedCostume)) :
-					OutfitCall(first, "get_CostumeSet");
-				auto* sourceStatus = OutfitCall(source, "get_Costume");
-				const int sourceId = OutfitNumber(sourceStatus, "get_MstCostumeId");
-				auto* master = TryMasterData();
-				auto* sourceCostume = FindWardrobeMasterRow(CenterCutSceneTableRows(master, "Costumes"), sourceId);
-				const auto family = Family(String(sourceCostume, "get_Name"));
-				const auto sets = GetSets(model, Target(previewHandle));
-				if (family.empty() || !sets.getSet) { SetStatus("No outfit source or wardrobe data."); return; }
-				int changed = 0;
-				for (int i = 0; i < idols.count; ++i) {
-					auto* idol = il2cpp_symbols::array_get_value(idols.data, i);
-					const int actor = OutfitNumber(idol, "get_CharacterId");
-					auto* current = OutfitCall(idol, "get_CostumeSet");
-					if (actor <= 0 || !current) continue;
-					auto* own = sets.Match(actor, family, sourceCostume);
-					const int owner = OutfitNumber(sourceCostume, "get_MstCharacterInfoId");
-					Il2CppObject* costume = OutfitCall(own, "get_Costume");
-					if ((borrow || !costume) && (actor == owner || CanBorrow(sourceStatus, actor, family))) costume = sourceStatus;
-					if (!costume) continue;
-					auto* style = matching && actor == owner ? source : matching ? own : nullptr;
-					auto* hair = OutfitCall(style, "get_Hairstyle");
-					if (!hair || OutfitNumber(hair, "get_MstCharacterInfoId") != actor)
-						style = static_cast<Il2CppObject*>(sets.Default(actor));
-					if (!style || !OutfitCall(style, "get_Hairstyle")) continue;
-					OutfitCall(current, "CopyFrom", {style});
-					OutfitCall(current, "set_Costume", {costume});
-					if (OutfitNumber(OutfitCall(current, "get_Costume"), "get_MstCostumeId") ==
-						OutfitNumber(costume, "get_MstCostumeId")) ++changed;
-				}
-				OutfitCall(model, "UpdateUnit", {(Il2CppObject*)unit});
-				OutfitCall(presenter, "_invokeUpdateUnitListWindow");
-				SetStatus(std::format("Applied the outfit to {} of {} MV slots.", changed, idols.count));
-			}
-
-			std::vector<int> ParseIds(const std::string& text) {
-				std::vector<int> ids;
-				std::istringstream parts(text);
-				std::string part;
-				while (std::getline(parts, part, ',')) {
-					const size_t left = part.find_first_not_of(" \t");
-					if (left == std::string::npos) continue;
-					part = part.substr(left, part.find_last_not_of(" \t") - left + 1);
-					const auto dash = part.find('-');
-					const int first = std::stoi(part);
-					const int last = dash == std::string::npos ? first : std::stoi(part.substr(dash + 1));
-					if (first <= 0 || last < first || last > 10000)
-						throw std::invalid_argument("Invalid ID range");
-					for (int i = first; i <= last; ++i) ids.push_back(i);
-				}
-				std::sort(ids.begin(), ids.end());
-				ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
-				return ids;
-			}
-
-			bool HasVoice(void* music, int song, int actor) {
-				static const auto localTracks = [] {
-					std::unordered_map<int, std::unordered_set<int>> tracks;
-					std::ifstream input("mv-playlist-vocals.tsv");
-					int id = 0, singer = 0;
-					while (input >> id >> singer) tracks[id].insert(singer);
-					return tracks;
-				}();
-				if (ExtraSpreadVocals::VoiceAvailable(music, actor)) return true;
-				const auto it = localTracks.find(song);
-				return it != localTracks.end() && it->second.contains(actor) &&
-					Flag(OutfitCall(music, "get_Master"), "get_IsSongParts");
-			}
-
-			struct SongChoice {
-				Il2CppObject* music;
-				int id;
-				int mode;
-				std::vector<int> singers;
-			};
-
-			void ResetPlaylist() {
-				for (auto& entry : playlist) if (entry.music) il2cpp_gchandle_free(entry.music);
-				playlist.clear();
-				nextTrack = 0;
-				nextAt = 0;
-				pendingSong = 0;
-				playingOverlay = nullptr;
-				waitingForOverlay = false;
-				g_randomMvStartSong = 0;
-			}
-
-			void OpenNextFormation() {
-				if (nextTrack >= playlist.size()) return;
-				auto& entry = playlist[nextTrack++];
-				auto* music = static_cast<Il2CppObject*>(Target(entry.music));
-				auto* type = (Il2CppClass*)ViewDiag::find_class_anywhere("PRISM.Adapters", "LiveMvUnitConfirmationArgument");
-				auto* connector = (Il2CppClass*)ViewDiag::find_class_anywhere("PRISM.Adapters", "ILiveMvUnitConfirmationConnector");
-				auto* argument = type ? (Il2CppObject*)il2cpp_object_new(type) : nullptr;
-				if (!argument || !connector || !g_liveViewManager || !ViewDiag::ViewManager_JumpView_orig || !music) {
-					ResetPlaylist();
-					SetStatus("The MV formation entry is unavailable.");
-					return;
-				}
-				OutfitCall(argument, ".ctor", {music});
-				pendingSong = entry.id;
-				pendingMode = entry.mode;
-				pendingActors = entry.actors;
-				pendingUntil = GetTickCount64() + 12000;
-				nextAt = 0;
-				auto* connectorType = il2cpp_type_get_object(il2cpp_class_get_type(connector));
-				reinterpret_cast<void(*)(void*, Il2CppReflectionType*, bool, void*, int)>(
-					ViewDiag::ViewManager_JumpView_orig)(g_liveViewManager, connectorType, false, argument, 0);
-				SetStatus(std::format("MV {}/{}: song {}.", nextTrack, playlist.size(), entry.id));
-			}
-
-			void ChooseRandomMv() {
-				std::string songText, actorText;
-				int mode, filter, count, gap;
-				{
-					std::lock_guard lock(queueMutex);
-					songText = songs; actorText = actors; mode = randomMode; filter = partsFilter;
-					count = requestedCount; gap = requestedInterval;
-				}
-				if (count < 1 || count > 300 || gap < 0 || gap > 3600) {
-					SetStatus("Choose 1–300 songs and a gap of 0–3600 seconds.");
-					return;
-				}
-				const auto songIds = ParseIds(songText);
-				auto actorIds = ParseIds(actorText);
-				void* presenter = Target(selectionHandle);
-				void* model = RunwayDump::ReadPtr(presenter, "model");
-				const auto musicList = OutfitList(OutfitCall(model, "get_AllMusic"));
-				if (!musicList.count) { SetStatus("Open the MV song list first."); return; }
-				if (actorIds.empty()) {
-					const auto rows = OutfitList(CenterCutSceneTableRows(TryMasterData(), "CharacterInfos"));
-					for (int i = 0; i < rows.count; ++i) {
-						const int actor = OutfitNumber(il2cpp_symbols::array_get_value(rows.data, i), "get_Id");
-						if ((actor > 0 && actor <= 28) || IsCollaborationWardrobeActor(actor)) actorIds.push_back(actor);
-					}
-				}
-				std::vector<SongChoice> candidates;
-				std::unordered_set<int> seen;
-				for (int i = 0; i < musicList.count; ++i) {
-					auto* music = static_cast<Il2CppObject*>(il2cpp_symbols::array_get_value(musicList.data, i));
-					auto* master = OutfitCall(music, "get_Master");
-					const int id = OutfitNumber(master, "get_Id");
-					if (id <= 0 || (!songIds.empty() && !std::binary_search(songIds.begin(), songIds.end(), id))) continue;
-					if (OutfitNumber(music, "get_UnitSize") <= 0 || seen.contains(id)) continue;
-					std::vector<int> singers;
-					for (int actor : actorIds) if (HasVoice(music, id, actor)) singers.push_back(actor);
-					if ((mode == 2 || filter == 1) && singers.empty()) continue;
-					if (filter == 2 && !singers.empty()) continue;
-					const int playMode = mode == 2 ? 2 : singers.empty() ? 0 : 1;
-					candidates.push_back({music, id, playMode, std::move(singers)});
-					seen.insert(id);
-				}
-				if (static_cast<int>(candidates.size()) < count) {
-					SetStatus(std::format("Only {} distinct MV songs match; requested {}.", candidates.size(), count));
-					return;
-				}
-				ResetPlaylist();
-				interval = gap;
-				static std::mt19937 random(std::random_device{}());
-				std::shuffle(candidates.begin(), candidates.end(), random);
-				for (int i = 0; i < count; ++i) {
-					const auto& choice = candidates[i];
-					std::shuffle(actorIds.begin(), actorIds.end(), random);
-					auto lineup = filter == 1 && mode != 2 ? choice.singers : actorIds;
-					std::shuffle(lineup.begin(), lineup.end(), random);
-					if ((mode == 2 || filter == 1) && !choice.singers.empty()) {
-						const int singer = choice.singers[std::uniform_int_distribution<size_t>(0, choice.singers.size() - 1)(random)];
-						const auto pos = std::find(lineup.begin(), lineup.end(), singer);
-						std::rotate(lineup.begin(), pos, pos + 1);
-					}
-					playlist.push_back({il2cpp_gchandle_new(choice.music, false), choice.id, choice.mode, std::move(lineup)});
-				}
-				OpenNextFormation();
-			}
-
-			void OverlayOpened(void* self) {
-				if (!waitingForOverlay) return;
-				waitingForOverlay = false;
-				playingOverlay = self;
-			}
-
-			HOOK_ORIG_TYPE Overlay_Dispose_orig;
-			void Overlay_Dispose_hook(void* self, const MethodInfo* method) {
-				const bool finished = self && self == playingOverlay;
-				HOOK_CAST_CALL(void, Overlay_Dispose)(self, method);
-				if (!finished) return;
-				playingOverlay = nullptr;
-				if (nextTrack >= playlist.size()) {
-					const auto count = playlist.size();
-					ResetPlaylist();
-					SetStatus(std::format("Played {} distinct MV songs.", count));
-				} else {
-					nextAt = GetTickCount64() + std::max(250, interval * 1000);
-					SetStatus(std::format("Next MV in {} seconds.", interval));
-				}
-			}
-
-			void CompleteRandomMv() {
-				if (!pendingSong) return;
-				if (GetTickCount64() > pendingUntil) {
-					ResetPlaylist();
-					SetStatus("The selected MV formation did not finish loading.");
-					return;
-				}
-				void* presenter = Target(confirmHandle);
-				void* model = RunwayDump::ReadPtr(presenter, "model");
-				auto* music = OutfitCall(model, "get_MusicData");
-				if (OutfitNumber(OutfitCall(music, "get_Master"), "get_Id") != pendingSong) return;
-				void* unit = Unit(model);
-				auto* managedIds = OutfitCall(unit, "get_Idols");
-				const auto idols = OutfitList(managedIds);
-				if (!idols.count) return;
-				const auto sets = GetSets(model);
-				auto* klass = (Il2CppClass*)ViewDiag::find_class_anywhere("PRISM.Live", "LiveMVIdol");
-				if (!klass || !sets.getSet || pendingActors.empty()) {
-					ResetPlaylist();
-					SetStatus("The random formation could not be prepared.");
-					return;
-				}
-				std::vector<Il2CppObject*> lineup;
-				for (int i = 0; i < idols.count; ++i) {
-					bool owned = true;
-					int actor = pendingActors[i % pendingActors.size()];
-					auto* outfit = static_cast<Il2CppObject*>(sets.Default(actor));
-					if (!outfit) {
-						ResetPlaylist();
-						SetStatus(std::format("Default MV outfit unavailable for idol {}.", actor));
-						return;
-					}
-					auto* member = (Il2CppObject*)il2cpp_object_new(klass);
-					if (!member) return;
-					OutfitCall(member, ".ctor", {reinterpret_cast<Il2CppObject*>(&actor),
-						reinterpret_cast<Il2CppObject*>(&owned), outfit});
-					lineup.push_back(member);
-				}
-				for (int i = 0; i < idols.count; ++i) {
-					if (std::string_view(RunwayDump::ClassNameOf(managedIds)).ends_with("[]"))
-						il2cpp_symbols::array_set_value(managedIds, lineup[i], i);
-					else
-						OutfitCall(managedIds, "set_Item", {reinterpret_cast<Il2CppObject*>(&i), lineup[i]});
-				}
-				OutfitCall(model, "UpdateUnit", {(Il2CppObject*)unit});
-				OutfitCall(presenter, "_invokeUpdateUnitListWindow");
-				g_randomMvStartMode = pendingMode;
-				g_randomMvStartSong = pendingSong;
-				g_randomMvStartUntil = GetTickCount64() + 8000;
-				pendingSong = 0;
-				waitingForOverlay = true;
-				overlayDeadline = GetTickCount64() + 20000;
-				uintptr_t cancellation = 0;
-				OutfitCall(presenter, "_invokeStartLiveAsync", {reinterpret_cast<Il2CppObject*>(&cancellation)});
-			}
-
-			void Tick() {
-				try {
-					const int cmd = request.exchange(0);
-					if (cmd == 1) ReadPreview();
-					else if (cmd == 2) ChooseRandomMv();
-					else if (cmd == 3) { ResetPlaylist(); SetStatus("Random MV queue stopped."); }
-					else if (cmd >= 16) GroupDress(cmd - 16);
-					if (nextAt && GetTickCount64() >= nextAt) OpenNextFormation();
-					if (waitingForOverlay && GetTickCount64() >= overlayDeadline) {
-						ResetPlaylist();
-						SetStatus("The MV playback did not start.");
-					}
-					CompleteRandomMv();
-				} catch (...) {
-					ResetPlaylist();
-					SetStatus("MV tool could not complete the requested change.");
-				}
-			}
-
-			HOOK_ORIG_TYPE Confirm_ctor_orig;
-			void Confirm_ctor_hook(void* self, void* arg, void* view, void* loader, const MethodInfo* method) {
-				HOOK_CAST_CALL(void, Confirm_ctor)(self, arg, view, loader, method);
-				Remember(confirmHandle, self);
-			}
-
-			void Install() {
-				auto* ctor = ExtraSpreadVocals::Method("PRISM.Adapters", "LiveMvUnitConfirmationPresenter", ".ctor", 3);
-				if (ctor && ctor->methodPointer) HookAt("MV tools formation", (void*)ctor->methodPointer,
-					(void*)Confirm_ctor_hook, Confirm_ctor_orig);
-				auto* dispose = ExtraSpreadVocals::Method("PRISM.Adapters.Live", "LiveMVOverlaySequencer", "Dispose", 0);
-				if (dispose && dispose->methodPointer)
-					HookAt("MV tools playlist finished", (void*)dispose->methodPointer, (void*)Overlay_Dispose_hook, Overlay_Dispose_orig);
-			}
-		}
-
 		// The home screen uses the game's non-story outfit setting.
 		constexpr int kOtherOutfitScene = 2;
 		constexpr int kAllOutfitTypes = 15;
@@ -10136,6 +9702,440 @@ namespace
 				if (!output) return;
 				const bool setup = hook(mv, "MvSceneCamerawork", "Setup", 1, (void*)ModernSetup_hook, ModernSetup_orig);
 				Log(std::format("[focus-framing] output camera hooks cinemachine={} setup={} controls={}", output, setup, control));
+			}
+		}
+
+		namespace MvTools {
+			void* confirmHandle = nullptr;
+			void* previewHandle = nullptr;
+			void* selectionHandle = nullptr;
+			void* savedCostume = nullptr;
+			std::atomic_int request{0};
+			std::mutex queueMutex;
+			std::string status;
+			std::string songs, actors;
+			int randomMode = 0, partsFilter = 0, requestedCount = 3, requestedInterval = 5;
+			int pendingSong = 0, pendingMode = 0;
+			std::vector<int> pendingActors;
+			ULONGLONG pendingUntil = 0;
+			struct PlaylistEntry { void* music = nullptr; int id = 0, mode = 0; std::vector<int> actors; };
+			std::vector<PlaylistEntry> playlist;
+			size_t nextTrack = 0;
+			int interval = 5;
+			void* playingOverlay = nullptr;
+			bool waitingForOverlay = false;
+			ULONGLONG nextAt = 0, overlayDeadline = 0;
+
+			void Remember(void*& handle, void* value) {
+				if (handle) il2cpp_gchandle_free(std::exchange(handle, nullptr));
+				if (value && FocusFraming::newWeakHandle) handle = FocusFraming::newWeakHandle(value, false);
+			}
+
+			void* Target(void* handle) { return handle ? il2cpp_gchandle_get_target(handle) : nullptr; }
+
+			void SetStatus(std::string message) {
+				Log("[mv-tools] " + message);
+				std::lock_guard lock(queueMutex);
+				status = std::move(message);
+			}
+
+			std::string String(void* obj, const char* getter) {
+				return Il2CppStrOf(OutfitCall(obj, getter));
+			}
+
+			bool Flag(void* obj, const char* getter, std::initializer_list<Il2CppObject*> args = {}) {
+				auto* value = OutfitCall(obj, getter, args);
+				return value && value->unbox_value<bool>();
+			}
+
+			void* Unit(void* model) {
+				auto* current = OutfitCall(model, "get_CurrentUnit");
+				if (OutfitCall(current, "get_Idols")) return current;
+				return OutfitCall(current, "get_Value");
+			}
+
+			std::string Family(std::string name) {
+				const std::string_view close = "】";
+				if (const size_t end = name.find(close); end != std::string::npos) {
+					const size_t length = end + close.size();
+					return name.substr(0, length) + (name.find("（濡れ）") == std::string::npos ? "" : "（濡れ）");
+				}
+				return name;
+			}
+
+			struct Sets {
+				void* service = nullptr;
+				const MethodInfo* getSet = nullptr;
+				OutfitArray rows;
+
+				Il2CppObject* Get(int id) const {
+					return getSet && id > 0 ? getSet->Invoke<Il2CppObject*>((Il2CppObject*)service,
+						{reinterpret_cast<Il2CppObject*>(&id)}) : nullptr;
+				}
+
+				void* Default(int actor) const {
+					int standard = 0, fallback = 0;
+					for (int i = 0; i < rows.count; ++i) {
+						void* row = il2cpp_symbols::array_get_value(rows.data, i);
+						void* costume = OutfitCall(row, "get_Costume");
+						if (OutfitNumber(costume, "get_MstCharacterInfoId") != actor ||
+							!Flag(costume, "get_IsWearableLive")) continue;
+						void* hair = OutfitCall(row, "get_Hairstyle");
+						if (OutfitNumber(hair, "get_MstCharacterInfoId") != actor) continue;
+						const int id = OutfitNumber(row, "get_Id");
+						const auto hairName = String(hair, "get_Name");
+						if (hairName.find("デフォルト髪型") != std::string::npos) {
+							if (OutfitNumber(costume, "get_ResourceId") == 1) return Get(id);
+							if (!standard) standard = id;
+						}
+						if (!fallback && OutfitNumber(costume, "get_ResourceId") == 1) fallback = id;
+					}
+					return Get(standard ? standard : fallback);
+				}
+
+				Il2CppObject* Match(int actor, const std::string& family, void* sourceCostume) const {
+					int winner = 0;
+					int priority = -1;
+					for (int i = 0; i < rows.count; ++i) {
+						void* row = il2cpp_symbols::array_get_value(rows.data, i);
+						void* costume = OutfitCall(row, "get_Costume");
+						if (OutfitNumber(costume, "get_MstCharacterInfoId") != actor ||
+							Family(String(costume, "get_Name")) != family || !Flag(costume, "get_IsWearableLive")) continue;
+						int rank = OutfitNumber(costume, "get_CostumeType") == OutfitNumber(sourceCostume, "get_CostumeType") ? 1 : 0;
+						if (OutfitNumber(costume, "get_ResourceId") == OutfitNumber(sourceCostume, "get_ResourceId")) rank += 2;
+						if (rank > priority) {
+							winner = OutfitNumber(row, "get_Id");
+							priority = rank;
+						}
+					}
+					return Get(winner);
+				}
+			};
+
+			Sets GetSets(void* model, void* wardrobe = nullptr) {
+				void* service = RunwayDump::ReadPtr(model, "costumeService");
+				if (!service) service = RunwayDump::ReadPtr(wardrobe, "costumeService");
+				return {service, service ? GetOutfitSetByIdMethod(service) : nullptr,
+					OutfitList(CenterCutSceneTableRows(TryMasterData(), "CostumeSets"))};
+			}
+
+			bool CanBorrow(void* costume, int actor, const std::string& family) {
+				if (IsCollaborationWardrobeActor(actor) || family.find("バスクオンシャイニー") != std::string::npos)
+					return true;
+				const auto* method = ExtraSpreadVocals::Method("PRISM.Domain", "CostumeStatusExtensions", "CanWear", 3);
+				if (!method) return false;
+				bool ordered = true;
+				auto* allowed = method->Invoke<Il2CppObject*>(nullptr, {(Il2CppObject*)costume,
+					reinterpret_cast<Il2CppObject*>(&actor), reinterpret_cast<Il2CppObject*>(&ordered)});
+				return allowed && allowed->unbox_value<bool>();
+			}
+
+			void ReadPreview() {
+				auto* preview = OutfitCall(Target(previewHandle), "get_PreviewCostumeSet");
+				if (!OutfitCall(preview, "get_Costume")) { SetStatus("Open the wardrobe preview first."); return; }
+				auto* klass = (Il2CppClass*)ViewDiag::find_class_anywhere("PRISM.Domain", "CostumeSetData");
+				auto* copy = klass ? (Il2CppObject*)il2cpp_object_new(klass) : nullptr;
+				if (!copy) { SetStatus("Could not read the preview outfit."); return; }
+				OutfitCall(copy, ".ctor");
+				OutfitCall(copy, "CopyFrom", {preview});
+				if (savedCostume) il2cpp_gchandle_free(savedCostume);
+				savedCostume = il2cpp_gchandle_new(copy, false);
+				SetStatus("Captured the current wardrobe preview.");
+			}
+
+			void GroupDress(int flags) {
+				const bool fromPreview = (flags & 1) != 0, borrow = (flags & 2) != 0, matching = (flags & 4) != 0;
+				void* presenter = Target(confirmHandle);
+				void* model = RunwayDump::ReadPtr(presenter, "model");
+				void* unit = Unit(model);
+				const auto idols = OutfitList(OutfitCall(unit, "get_Idols"));
+				if (idols.count <= 0) { SetStatus("Open an MV formation first."); return; }
+				auto* first = il2cpp_symbols::array_get_value(idols.data, 0);
+				auto* source = fromPreview ? static_cast<Il2CppObject*>(Target(savedCostume)) :
+					OutfitCall(first, "get_CostumeSet");
+				auto* sourceStatus = OutfitCall(source, "get_Costume");
+				const int sourceId = OutfitNumber(sourceStatus, "get_MstCostumeId");
+				auto* master = TryMasterData();
+				auto* sourceCostume = FindWardrobeMasterRow(CenterCutSceneTableRows(master, "Costumes"), sourceId);
+				const auto family = Family(String(sourceCostume, "get_Name"));
+				const auto sets = GetSets(model, Target(previewHandle));
+				if (family.empty() || !sets.getSet) { SetStatus("No outfit source or wardrobe data."); return; }
+				int changed = 0;
+				for (int i = 0; i < idols.count; ++i) {
+					auto* idol = il2cpp_symbols::array_get_value(idols.data, i);
+					const int actor = OutfitNumber(idol, "get_CharacterId");
+					auto* current = OutfitCall(idol, "get_CostumeSet");
+					if (actor <= 0 || !current) continue;
+					auto* own = sets.Match(actor, family, sourceCostume);
+					const int owner = OutfitNumber(sourceCostume, "get_MstCharacterInfoId");
+					Il2CppObject* costume = OutfitCall(own, "get_Costume");
+					if ((borrow || !costume) && (actor == owner || CanBorrow(sourceStatus, actor, family))) costume = sourceStatus;
+					if (!costume) continue;
+					auto* style = matching && actor == owner ? source : matching ? own : nullptr;
+					auto* hair = OutfitCall(style, "get_Hairstyle");
+					if (!hair || OutfitNumber(hair, "get_MstCharacterInfoId") != actor)
+						style = static_cast<Il2CppObject*>(sets.Default(actor));
+					if (!style || !OutfitCall(style, "get_Hairstyle")) continue;
+					OutfitCall(current, "CopyFrom", {style});
+					OutfitCall(current, "set_Costume", {costume});
+					if (OutfitNumber(OutfitCall(current, "get_Costume"), "get_MstCostumeId") ==
+						OutfitNumber(costume, "get_MstCostumeId")) ++changed;
+				}
+				OutfitCall(model, "UpdateUnit", {(Il2CppObject*)unit});
+				OutfitCall(presenter, "_invokeUpdateUnitListWindow");
+				SetStatus(std::format("Applied the outfit to {} of {} MV slots.", changed, idols.count));
+			}
+
+			std::vector<int> ParseIds(const std::string& text) {
+				std::vector<int> ids;
+				std::istringstream parts(text);
+				std::string part;
+				while (std::getline(parts, part, ',')) {
+					const size_t left = part.find_first_not_of(" \t");
+					if (left == std::string::npos) continue;
+					part = part.substr(left, part.find_last_not_of(" \t") - left + 1);
+					const auto dash = part.find('-');
+					const int first = std::stoi(part);
+					const int last = dash == std::string::npos ? first : std::stoi(part.substr(dash + 1));
+					if (first <= 0 || last < first || last > 10000)
+						throw std::invalid_argument("Invalid ID range");
+					for (int i = first; i <= last; ++i) ids.push_back(i);
+				}
+				std::sort(ids.begin(), ids.end());
+				ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+				return ids;
+			}
+
+			bool HasVoice(void* music, int song, int actor) {
+				static const auto localTracks = [] {
+					std::unordered_map<int, std::unordered_set<int>> tracks;
+					std::ifstream input("mv-playlist-vocals.tsv");
+					int id = 0, singer = 0;
+					while (input >> id >> singer) tracks[id].insert(singer);
+					return tracks;
+				}();
+				if (ExtraSpreadVocals::VoiceAvailable(music, actor)) return true;
+				const auto it = localTracks.find(song);
+				return it != localTracks.end() && it->second.contains(actor) &&
+					Flag(OutfitCall(music, "get_Master"), "get_IsSongParts");
+			}
+
+			struct SongChoice {
+				Il2CppObject* music;
+				int id;
+				int mode;
+				std::vector<int> singers;
+			};
+
+			void ResetPlaylist() {
+				for (auto& entry : playlist) if (entry.music) il2cpp_gchandle_free(entry.music);
+				playlist.clear();
+				nextTrack = 0;
+				nextAt = 0;
+				pendingSong = 0;
+				playingOverlay = nullptr;
+				waitingForOverlay = false;
+				g_randomMvStartSong = 0;
+			}
+
+			void OpenNextFormation() {
+				if (nextTrack >= playlist.size()) return;
+				auto& entry = playlist[nextTrack++];
+				auto* music = static_cast<Il2CppObject*>(Target(entry.music));
+				auto* type = (Il2CppClass*)ViewDiag::find_class_anywhere("PRISM.Adapters", "LiveMvUnitConfirmationArgument");
+				auto* connector = (Il2CppClass*)ViewDiag::find_class_anywhere("PRISM.Adapters", "ILiveMvUnitConfirmationConnector");
+				auto* argument = type ? (Il2CppObject*)il2cpp_object_new(type) : nullptr;
+				if (!argument || !connector || !g_liveViewManager || !ViewDiag::ViewManager_JumpView_orig || !music) {
+					ResetPlaylist();
+					SetStatus("The MV formation entry is unavailable.");
+					return;
+				}
+				OutfitCall(argument, ".ctor", {music});
+				pendingSong = entry.id;
+				pendingMode = entry.mode;
+				pendingActors = entry.actors;
+				pendingUntil = GetTickCount64() + 12000;
+				nextAt = 0;
+				auto* connectorType = il2cpp_type_get_object(il2cpp_class_get_type(connector));
+				reinterpret_cast<void(*)(void*, Il2CppReflectionType*, bool, void*, int)>(
+					ViewDiag::ViewManager_JumpView_orig)(g_liveViewManager, connectorType, false, argument, 0);
+				SetStatus(std::format("MV {}/{}: song {}.", nextTrack, playlist.size(), entry.id));
+			}
+
+			void ChooseRandomMv() {
+				std::string songText, actorText;
+				int mode, filter, count, gap;
+				{
+					std::lock_guard lock(queueMutex);
+					songText = songs; actorText = actors; mode = randomMode; filter = partsFilter;
+					count = requestedCount; gap = requestedInterval;
+				}
+				if (count < 1 || count > 300 || gap < 0 || gap > 3600) {
+					SetStatus("Choose 1–300 songs and a gap of 0–3600 seconds.");
+					return;
+				}
+				const auto songIds = ParseIds(songText);
+				auto actorIds = ParseIds(actorText);
+				void* presenter = Target(selectionHandle);
+				void* model = RunwayDump::ReadPtr(presenter, "model");
+				const auto musicList = OutfitList(OutfitCall(model, "get_AllMusic"));
+				if (!musicList.count) { SetStatus("Open the MV song list first."); return; }
+				if (actorIds.empty()) {
+					const auto rows = OutfitList(CenterCutSceneTableRows(TryMasterData(), "CharacterInfos"));
+					for (int i = 0; i < rows.count; ++i) {
+						const int actor = OutfitNumber(il2cpp_symbols::array_get_value(rows.data, i), "get_Id");
+						if ((actor > 0 && actor <= 28) || IsCollaborationWardrobeActor(actor)) actorIds.push_back(actor);
+					}
+				}
+				std::vector<SongChoice> candidates;
+				std::unordered_set<int> seen;
+				for (int i = 0; i < musicList.count; ++i) {
+					auto* music = static_cast<Il2CppObject*>(il2cpp_symbols::array_get_value(musicList.data, i));
+					auto* master = OutfitCall(music, "get_Master");
+					const int id = OutfitNumber(master, "get_Id");
+					if (id <= 0 || (!songIds.empty() && !std::binary_search(songIds.begin(), songIds.end(), id))) continue;
+					if (OutfitNumber(music, "get_UnitSize") <= 0 || seen.contains(id)) continue;
+					std::vector<int> singers;
+					for (int actor : actorIds) if (HasVoice(music, id, actor)) singers.push_back(actor);
+					if ((mode == 2 || filter == 1) && singers.empty()) continue;
+					if (filter == 2 && !singers.empty()) continue;
+					const int playMode = mode == 2 ? 2 : singers.empty() ? 0 : 1;
+					candidates.push_back({music, id, playMode, std::move(singers)});
+					seen.insert(id);
+				}
+				if (static_cast<int>(candidates.size()) < count) {
+					SetStatus(std::format("Only {} distinct MV songs match; requested {}.", candidates.size(), count));
+					return;
+				}
+				ResetPlaylist();
+				interval = gap;
+				static std::mt19937 random(std::random_device{}());
+				std::shuffle(candidates.begin(), candidates.end(), random);
+				for (int i = 0; i < count; ++i) {
+					const auto& choice = candidates[i];
+					std::shuffle(actorIds.begin(), actorIds.end(), random);
+					auto lineup = filter == 1 && mode != 2 ? choice.singers : actorIds;
+					std::shuffle(lineup.begin(), lineup.end(), random);
+					if ((mode == 2 || filter == 1) && !choice.singers.empty()) {
+						const int singer = choice.singers[std::uniform_int_distribution<size_t>(0, choice.singers.size() - 1)(random)];
+						const auto pos = std::find(lineup.begin(), lineup.end(), singer);
+						std::rotate(lineup.begin(), pos, pos + 1);
+					}
+					playlist.push_back({il2cpp_gchandle_new(choice.music, false), choice.id, choice.mode, std::move(lineup)});
+				}
+				OpenNextFormation();
+			}
+
+			void OverlayOpened(void* self) {
+				if (!waitingForOverlay) return;
+				waitingForOverlay = false;
+				playingOverlay = self;
+			}
+
+			HOOK_ORIG_TYPE Overlay_Dispose_orig;
+			void Overlay_Dispose_hook(void* self, const MethodInfo* method) {
+				const bool finished = self && self == playingOverlay;
+				HOOK_CAST_CALL(void, Overlay_Dispose)(self, method);
+				if (!finished) return;
+				playingOverlay = nullptr;
+				if (nextTrack >= playlist.size()) {
+					const auto count = playlist.size();
+					ResetPlaylist();
+					SetStatus(std::format("Played {} distinct MV songs.", count));
+				} else {
+					nextAt = GetTickCount64() + std::max(250, interval * 1000);
+					SetStatus(std::format("Next MV in {} seconds.", interval));
+				}
+			}
+
+			void CompleteRandomMv() {
+				if (!pendingSong) return;
+				if (GetTickCount64() > pendingUntil) {
+					ResetPlaylist();
+					SetStatus("The selected MV formation did not finish loading.");
+					return;
+				}
+				void* presenter = Target(confirmHandle);
+				void* model = RunwayDump::ReadPtr(presenter, "model");
+				auto* music = OutfitCall(model, "get_MusicData");
+				if (OutfitNumber(OutfitCall(music, "get_Master"), "get_Id") != pendingSong) return;
+				void* unit = Unit(model);
+				auto* managedIds = OutfitCall(unit, "get_Idols");
+				const auto idols = OutfitList(managedIds);
+				if (!idols.count) return;
+				const auto sets = GetSets(model);
+				auto* klass = (Il2CppClass*)ViewDiag::find_class_anywhere("PRISM.Live", "LiveMVIdol");
+				if (!klass || !sets.getSet || pendingActors.empty()) {
+					ResetPlaylist();
+					SetStatus("The random formation could not be prepared.");
+					return;
+				}
+				std::vector<Il2CppObject*> lineup;
+				for (int i = 0; i < idols.count; ++i) {
+					bool owned = true;
+					int actor = pendingActors[i % pendingActors.size()];
+					auto* outfit = static_cast<Il2CppObject*>(sets.Default(actor));
+					if (!outfit) {
+						ResetPlaylist();
+						SetStatus(std::format("Default MV outfit unavailable for idol {}.", actor));
+						return;
+					}
+					auto* member = (Il2CppObject*)il2cpp_object_new(klass);
+					if (!member) return;
+					OutfitCall(member, ".ctor", {reinterpret_cast<Il2CppObject*>(&actor),
+						reinterpret_cast<Il2CppObject*>(&owned), outfit});
+					lineup.push_back(member);
+				}
+				for (int i = 0; i < idols.count; ++i) {
+					if (std::string_view(RunwayDump::ClassNameOf(managedIds)).ends_with("[]"))
+						il2cpp_symbols::array_set_value(managedIds, lineup[i], i);
+					else
+						OutfitCall(managedIds, "set_Item", {reinterpret_cast<Il2CppObject*>(&i), lineup[i]});
+				}
+				OutfitCall(model, "UpdateUnit", {(Il2CppObject*)unit});
+				OutfitCall(presenter, "_invokeUpdateUnitListWindow");
+				g_randomMvStartMode = pendingMode;
+				g_randomMvStartSong = pendingSong;
+				g_randomMvStartUntil = GetTickCount64() + 8000;
+				pendingSong = 0;
+				waitingForOverlay = true;
+				overlayDeadline = GetTickCount64() + 20000;
+				uintptr_t cancellation = 0;
+				OutfitCall(presenter, "_invokeStartLiveAsync", {reinterpret_cast<Il2CppObject*>(&cancellation)});
+			}
+
+			void Tick() {
+				try {
+					const int cmd = request.exchange(0);
+					if (cmd == 1) ReadPreview();
+					else if (cmd == 2) ChooseRandomMv();
+					else if (cmd == 3) { ResetPlaylist(); SetStatus("Random MV queue stopped."); }
+					else if (cmd >= 16) GroupDress(cmd - 16);
+					if (nextAt && GetTickCount64() >= nextAt) OpenNextFormation();
+					if (waitingForOverlay && GetTickCount64() >= overlayDeadline) {
+						ResetPlaylist();
+						SetStatus("The MV playback did not start.");
+					}
+					CompleteRandomMv();
+				} catch (...) {
+					ResetPlaylist();
+					SetStatus("MV tool could not complete the requested change.");
+				}
+			}
+
+			HOOK_ORIG_TYPE Confirm_ctor_orig;
+			void Confirm_ctor_hook(void* self, void* arg, void* view, void* loader, const MethodInfo* method) {
+				HOOK_CAST_CALL(void, Confirm_ctor)(self, arg, view, loader, method);
+				Remember(confirmHandle, self);
+			}
+
+			void Install() {
+				auto* ctor = ExtraSpreadVocals::Method("PRISM.Adapters", "LiveMvUnitConfirmationPresenter", ".ctor", 3);
+				if (ctor && ctor->methodPointer) HookAt("MV tools formation", (void*)ctor->methodPointer,
+					(void*)Confirm_ctor_hook, Confirm_ctor_orig);
+				auto* dispose = ExtraSpreadVocals::Method("PRISM.Adapters.Live", "LiveMVOverlaySequencer", "Dispose", 0);
+				if (dispose && dispose->methodPointer)
+					HookAt("MV tools playlist finished", (void*)dispose->methodPointer, (void*)Overlay_Dispose_hook, Overlay_Dispose_orig);
 			}
 		}
 
