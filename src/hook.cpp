@@ -7,7 +7,6 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
-#pragma comment(lib, "gdi32.lib")
 #include <cstdint>
 #include <cstdlib>
 #include <cstdio>
@@ -32,7 +31,7 @@ std::function<void()> g_on_close;
 std::function<void()> on_hotKey_0;
 bool needPrintStack = false;
 
-extern bool ReadMvWindowCapture(void (*display)(void*, const void*, unsigned, const RECT&), void* state, std::string& error);
+extern bool DrawMvWindowCapture(const HWND* windows, const float (*bounds)[4], unsigned& displayed, std::string& error);
 extern void StopMvWindowCapture();
 
 namespace {
@@ -67,7 +66,7 @@ namespace {
 		{"5 vertical panes", 5, {4, 2, 0, 1, 3}, 2},
 		{"Large left + stacked right", 3, {}, 0},
 		{"Large top + two below", 3, {}, 0},
-		{"Main view + two corner insets", 3, {}, 0}
+		{"Main view + upper-left inset", 2, {}, 0}
 	};
 	static_assert(std::size(splitLayouts) == SplitLayoutCount);
 	struct SplitLayoutState {
@@ -9550,8 +9549,8 @@ namespace
 
 			struct SplitPreview {
 				HWND window = nullptr;
-				std::vector<uint32_t> pixels;
-				int id = 0, width = 0, height = 0;
+				bool displayed = false;
+				int id = 0;
 
 				static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
 					if (message == WM_NCCREATE) {
@@ -9565,26 +9564,11 @@ namespace
 						DestroyWindow(hwnd);
 						return 0;
 					}
-					if (message == WM_NCDESTROY && self) self->window = nullptr;
+					if (message == WM_NCDESTROY && self) { self->window = nullptr; self->displayed = false; }
 					if (message == WM_ERASEBKGND) return 1;
-					if (message == WM_PAINT && self) {
+					if (message == WM_PAINT) {
 						PAINTSTRUCT paint{};
-						auto dc = BeginPaint(hwnd, &paint);
-						RECT area{};
-						GetClientRect(hwnd, &area);
-						FillRect(dc, &area, reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
-						if (!self->pixels.empty() && area.right > 0 && area.bottom > 0) {
-							const double scale = std::min(double(area.right) / self->width, double(area.bottom) / self->height);
-							const int w = static_cast<int>(self->width * scale), h = static_cast<int>(self->height * scale);
-							BITMAPINFO info{};
-							info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-							info.bmiHeader.biWidth = self->width;
-							info.bmiHeader.biHeight = -self->height;
-							info.bmiHeader.biPlanes = 1;
-							info.bmiHeader.biBitCount = 32;
-							StretchDIBits(dc, (area.right - w) / 2, (area.bottom - h) / 2, w, h, 0, 0,
-								self->width, self->height, self->pixels.data(), &info, DIB_RGB_COLORS, SRCCOPY);
-						}
+						BeginPaint(hwnd, &paint);
 						EndPaint(hwnd, &paint);
 						return 0;
 					}
@@ -9610,8 +9594,7 @@ namespace
 
 				void Close() {
 					if (window) DestroyWindow(window);
-					pixels.clear();
-					width = height = 0;
+					displayed = false;
 				}
 
 				void Pump() const {
@@ -9624,28 +9607,6 @@ namespace
 					}
 				}
 			};
-			void CopyPane(SplitPreview& preview, const void* bytes, unsigned stride, const RECT& area, const BarLayout& pane) {
-				const auto x = [&](float ratio) { return static_cast<int>(area.left + std::lround((area.right - area.left) * ratio)); };
-				const auto y = [&](float ratio) { return static_cast<int>(area.top + std::lround((area.bottom - area.top) * (1.0f - ratio))); };
-				const int left = x(pane.minAnchor.x), top = y(pane.maxAnchor.y);
-				const int w = x(pane.maxAnchor.x) - left, h = y(pane.minAnchor.y) - top;
-				if (w <= 0 || h <= 0) return;
-				const float scale = std::min(1.0f, 360.0f / std::max(w, h));
-				const int outWidth = std::max(1, static_cast<int>(std::lround(w * scale)));
-				const int outHeight = std::max(1, static_cast<int>(std::lround(h * scale)));
-				const bool first = preview.pixels.empty();
-				preview.pixels.resize(static_cast<size_t>(outWidth) * outHeight);
-				for (int row = 0; row < outHeight; ++row) {
-					const auto* line = reinterpret_cast<const uint32_t*>(
-						static_cast<const uint8_t*>(bytes) + size_t(top + row * h / outHeight) * stride);
-					for (int col = 0; col < outWidth; ++col)
-						preview.pixels[size_t(row) * outWidth + col] = line[left + col * w / outWidth];
-				}
-				preview.width = outWidth;
-				preview.height = outHeight;
-				InvalidateRect(preview.window, nullptr, FALSE);
-				if (first) Log(std::format("[mv-split] preview {} displayed its first frame", preview.id + 1));
-			}
 			SplitPreview splitPreviews[2];
 
 			void CloseSplitPreviews() {
@@ -9664,7 +9625,7 @@ namespace
 					preview.Pump();
 					panes[i] = GetMvSplitPreviewPane(i);
 					if (panes[i] < 0) {
-						if (preview.window || !preview.pixels.empty()) preview.Close();
+						if (preview.window || preview.displayed) preview.Close();
 					} else if (preview.window || preview.Open(i)) {
 						open = true;
 					} else {
@@ -9677,22 +9638,28 @@ namespace
 					return;
 				}
 
-				struct CaptureOutput {
-					const std::array<BarLayout, mvSplitPanelCount>& layouts;
-					const int* panes;
-					int count;
-				} output{layouts, panes, count};
-				const auto display = [](void* state, const void* bytes, unsigned stride, const RECT& area) {
-					const auto& output = *static_cast<CaptureOutput*>(state);
-					for (int i = 0; i < 2; ++i)
-						if (output.panes[i] >= 0 && splitPreviews[i].window && !IsIconic(splitPreviews[i].window))
-							CopyPane(splitPreviews[i], bytes, stride, area,
-								output.layouts[std::min(output.panes[i], output.count - 1)]);
-				};
+				HWND windows[2]{};
+				float anchors[2][4]{};
+				for (int i = 0; i < 2; ++i) {
+					if (panes[i] < 0 || !splitPreviews[i].window) continue;
+					windows[i] = splitPreviews[i].window;
+					const auto& pane = layouts[std::min(panes[i], count - 1)];
+					anchors[i][0] = pane.minAnchor.x;
+					anchors[i][1] = pane.minAnchor.y;
+					anchors[i][2] = pane.maxAnchor.x;
+					anchors[i][3] = pane.maxAnchor.y;
+				}
+				unsigned displayed = 0;
 				std::string error;
-				if (!ReadMvWindowCapture(display, &output, error)) {
+				if (!DrawMvWindowCapture(windows, anchors, displayed, error)) {
 					Log(std::format("[mv-split] previews stopped: {}", error));
 					CloseSplitPreviews();
+					return;
+				}
+				for (int i = 0; i < 2; ++i) {
+					auto& preview = splitPreviews[i];
+					if ((displayed & (1u << i)) && !std::exchange(preview.displayed, true))
+						Log(std::format("[mv-split] GPU preview {} displayed its first frame", i + 1));
 				}
 			}
 
@@ -9711,10 +9678,10 @@ namespace
 					panes[1] = {{0, 0}, {0.5f, 0.36f}, {}, {}};
 					panes[2] = {{0.5f, 0}, {1, 0.36f}, {}, {}};
 				} else if (layout == SplitPictureInPicture) {
-					const float inset = std::min(0.24f / aspect, 0.26f);
+					constexpr float scale = 1.8f;
+					const float inset = std::min(0.24f / aspect, 0.26f) * scale;
 					panes[0] = {{0, 0}, {1, 1}, {}, {}};
-					panes[1] = {{0.035f, 0.57f}, {0.035f + inset, 0.94f}, {}, {}};
-					panes[2] = {{0.965f - inset, 0.10f}, {0.965f, 0.47f}, {}, {}};
+					panes[1] = {{0.035f, 0.94f - (0.94f - 0.57f) * scale}, {0.035f + inset, 0.94f}, {}, {}};
 				} else {
 					for (int i = 0; i < count; ++i)
 						panes[i] = {{static_cast<float>(i) / count, 0}, {static_cast<float>(i + 1) / count, 1}, {}, {}};
