@@ -84,6 +84,7 @@ namespace {
 			states[i].actors = splitLayouts[i].actors;
 			states[i].selected = splitLayouts[i].selected;
 		}
+		states[SplitPictureInPicture].framing[1].zoom = 1.0f;
 		return states;
 	}();
 	std::mutex mvFixedFramingMutex;
@@ -218,6 +219,11 @@ void ResetMvSplitFraming() {
 		mvSplitStates[i].actors = splitLayouts[i].actors;
 		mvSplitStates[i].selected = splitLayouts[i].selected;
 	}
+	mvSplitStates[SplitPictureInPicture].framing[1].zoom = 1.0f;
+}
+
+void ResetMvFixedPanel(int panel) {
+	SetMvFixedFraming(0, 0, 0, 0, 0, ResolveSplitLayout() == SplitPictureInPicture && panel == 1 ? 1.0f : 0.0f, panel);
 }
 
 void ResetMvFraming(bool fixed) {
@@ -8706,19 +8712,19 @@ namespace
 					OutfitNumber(OutfitCall(music, "get_Master"), "get_Id") == songId;
 			}
 
-			bool Candidate(void* self, int actor, const MethodInfo* method) {
-				return VoiceAvailable(self, actor) ||
-					reinterpret_cast<bool(*)(void*, int, const MethodInfo*)>(candidateOriginal)(self, actor, method);
+			bool Candidate(void* self, void* idol, const MethodInfo* method) {
+				return VoiceAvailable(self, OutfitNumber(idol, "get_CharacterId")) ||
+					reinterpret_cast<bool(*)(void*, void*, const MethodInfo*)>(candidateOriginal)(self, idol, method);
 			}
 
-			bool Eligible(void* self, int actor, const MethodInfo* method) {
-				return VoiceAvailable(self, actor) ||
-					reinterpret_cast<bool(*)(void*, int, const MethodInfo*)>(eligibleOriginal)(self, actor, method);
+			bool Eligible(void* self, void* idol, const MethodInfo* method) {
+				return VoiceAvailable(self, OutfitNumber(idol, "get_CharacterId")) ||
+					reinterpret_cast<bool(*)(void*, void*, const MethodInfo*)>(eligibleOriginal)(self, idol, method);
 			}
 
-			bool CandidateAll(void* self, int actor, const MethodInfo* method) {
-				return VoiceAvailable(self, actor) ||
-					reinterpret_cast<bool(*)(void*, int, const MethodInfo*)>(candidateAllOriginal)(self, actor, method);
+			bool CandidateAll(void* self, void* idol, const MethodInfo* method) {
+				return VoiceAvailable(self, OutfitNumber(idol, "get_CharacterId")) ||
+					reinterpret_cast<bool(*)(void*, void*, const MethodInfo*)>(candidateAllOriginal)(self, idol, method);
 			}
 
 			void* GetAcb(void* self, Il2CppString* label, const MethodInfo* method) {
@@ -8847,14 +8853,14 @@ namespace
 				if (!installedRoles.empty()) {
 					const auto* candidate = Method("PRISM.Live", "MusicData", "IsCandidateVocalSeparatedCharacter", 1);
 					const auto* eligible = Method("PRISM.Live", "MusicData", "IsVocalSeparatedCharacter", 1);
-					if (ParamIs(candidate, 0, "System.Int32"))
+					if (ParamIs(candidate, 0, "PRISM.Live.IIdol"))
 						HookAt("MusicData.IsCandidateVocalSeparatedCharacter extra vocals",
 							(void*)candidate->methodPointer, (void*)Candidate, candidateOriginal);
-					if (ParamIs(eligible, 0, "System.Int32"))
+					if (ParamIs(eligible, 0, "PRISM.Live.IIdol"))
 						HookAt("MusicData.IsVocalSeparatedCharacter extra vocals",
 							(void*)eligible->methodPointer, (void*)Eligible, eligibleOriginal);
 					const auto* all = Method("PRISM.Live", "MusicData", "IsCandidateAllCharacterVocalSeparated", 1);
-					if (ParamIs(all, 0, "System.Int32"))
+					if (ParamIs(all, 0, "PRISM.Live.IIdol"))
 						HookAt("MusicData.IsCandidateAllCharacterVocalSeparated extra vocals",
 							(void*)all->methodPointer, (void*)CandidateAll, candidateAllOriginal);
 					const auto* ids = Method("PRISM.Live", "MusicData", "GetLimitedVocalSeparatedCharacterIds", 0);
@@ -9325,9 +9331,18 @@ namespace
 				return ids;
 			}
 
-			bool HasVoice(void* music, int actor) {
-				return Flag(music, "IsCandidateVocalSeparatedCharacter", {reinterpret_cast<Il2CppObject*>(&actor)}) ||
-					ExtraSpreadVocals::VoiceAvailable(music, actor);
+			bool HasVoice(void* music, int song, int actor) {
+				static const auto localTracks = [] {
+					std::unordered_map<int, std::unordered_set<int>> tracks;
+					std::ifstream input("mv-playlist-vocals.tsv");
+					int id = 0, singer = 0;
+					while (input >> id >> singer) tracks[id].insert(singer);
+					return tracks;
+				}();
+				if (ExtraSpreadVocals::VoiceAvailable(music, actor)) return true;
+				const auto it = localTracks.find(song);
+				return it != localTracks.end() && it->second.contains(actor) &&
+					Flag(OutfitCall(music, "get_Master"), "get_IsSongParts");
 			}
 
 			struct SongChoice {
@@ -9406,7 +9421,7 @@ namespace
 					if (id <= 0 || (!songIds.empty() && !std::binary_search(songIds.begin(), songIds.end(), id))) continue;
 					if (OutfitNumber(music, "get_UnitSize") <= 0 || seen.contains(id)) continue;
 					std::vector<int> singers;
-					for (int actor : actorIds) if (HasVoice(music, actor)) singers.push_back(actor);
+					for (int actor : actorIds) if (HasVoice(music, id, actor)) singers.push_back(actor);
 					if ((mode == 2 || filter == 1) && singers.empty()) continue;
 					if (filter == 2 && !singers.empty()) continue;
 					const int playMode = mode == 2 ? 2 : singers.empty() ? 0 : 1;
@@ -9424,7 +9439,8 @@ namespace
 				for (int i = 0; i < count; ++i) {
 					const auto& choice = candidates[i];
 					std::shuffle(actorIds.begin(), actorIds.end(), random);
-					auto lineup = actorIds;
+					auto lineup = filter == 1 && mode != 2 ? choice.singers : actorIds;
+					std::shuffle(lineup.begin(), lineup.end(), random);
 					if ((mode == 2 || filter == 1) && !choice.singers.empty()) {
 						const int singer = choice.singers[std::uniform_int_distribution<size_t>(0, choice.singers.size() - 1)(random)];
 						const auto pos = std::find(lineup.begin(), lineup.end(), singer);
@@ -9698,7 +9714,7 @@ namespace
 					const bool continuous = last.camera == current.camera && last.window == current.window &&
 						last.mode == current.mode && frame - last.frame <= 3;
 					if (current.resetHeld && (!continuous || !last.resetHeld)) {
-						SetMvFixedFraming(0, 0, 0, 0, 0, 0, panel);
+						ResetMvFixedPanel(panel);
 						static bool reported = false;
 						LogOnce(true, reported, "reset");
 						return;

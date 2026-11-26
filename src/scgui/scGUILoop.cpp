@@ -26,6 +26,7 @@ extern void SetMvFocusFraming(float roll, float horizontal, float vertical);
 extern bool GetMvKeepFraming(bool fixed);
 extern void SetMvKeepFraming(bool fixed, bool keep);
 extern void ResetMvFraming(bool fixed);
+extern void ResetMvFixedPanel(int panel);
 extern void GetMvFixedFraming(float& yaw, float& pitch, float& roll, float& horizontal, float& vertical, float& zoom, int panel = -1);
 extern void SetMvFixedFraming(float yaw, float pitch, float roll, float horizontal, float vertical, float zoom, int panel = -1);
 extern bool GetMvSplitEnabled();
@@ -709,7 +710,7 @@ namespace SCGUILoop {
 					if (ImGui::Button("90 deg right")) { roll = 90.0f; changed = true; }
 					ImGui::SameLine();
 					if (ImGui::Button("Reset state")) {
-						if (panel >= 0) SetMvFixedFraming(0, 0, 0, 0, 0, 0, panel);
+						if (panel >= 0) ResetMvFixedPanel(panel);
 						else ResetMvFraming(fixed);
 					}
 					else if (changed) {
