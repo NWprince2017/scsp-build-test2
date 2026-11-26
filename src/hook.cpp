@@ -7,19 +7,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
-#include <d3d11.h>
-#include <dwmapi.h>
-#include <roapi.h>
-#include <windows.graphics.capture.interop.h>
-#include <windows.graphics.directx.direct3d11.interop.h>
-#include <winrt/Windows.Foundation.h>
-#include <winrt/Windows.Graphics.Capture.h>
-#include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
-#pragma comment(lib, "d3d11.lib")
-#pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "gdi32.lib")
-#pragma comment(lib, "runtimeobject.lib")
-#pragma comment(lib, "windowsapp.lib")
 #include <cstdint>
 #include <cstdlib>
 #include <cstdio>
@@ -43,6 +31,9 @@ std::function<void()> g_on_hook_ready;
 std::function<void()> g_on_close;
 std::function<void()> on_hotKey_0;
 bool needPrintStack = false;
+
+extern bool ReadMvWindowCapture(void (*display)(void*, const void*, unsigned, const RECT&), void* state, std::string& error);
+extern void StopMvWindowCapture();
 
 namespace {
 	std::atomic_bool mvCenterCloseupsAnyCostume{false};
@@ -9633,143 +9624,32 @@ namespace
 					}
 				}
 			};
-			namespace Wgc = winrt::Windows::Graphics::Capture;
-			namespace Wgd = winrt::Windows::Graphics::DirectX;
-			using PreviewDevice = Wgd::Direct3D11::IDirect3DDevice;
-			using PreviewSize = winrt::Windows::Graphics::SizeInt32;
-
-			struct SplitWindowCapture {
-				HWND source = nullptr;
-				bool ownsApartment = false, pending = false;
-				Wgc::Direct3D11CaptureFramePool frames{nullptr};
-				Wgc::GraphicsCaptureSession session{nullptr};
-				PreviewDevice captureDevice{nullptr};
-				PreviewSize size{};
-				winrt::com_ptr<ID3D11Device> device;
-				winrt::com_ptr<ID3D11DeviceContext> context;
-				winrt::com_ptr<ID3D11Texture2D> staging;
-				int width = 0, height = 0;
-
-				void Start() {
-					source = FindWindowW(L"UnityWndClass", L"imasscprism");
-					DWORD pid = 0;
-					if (!source || !GetWindowThreadProcessId(source, &pid) || pid != GetCurrentProcessId())
-						winrt::throw_hresult(E_HANDLE);
-					const HRESULT apartment = RoInitialize(RO_INIT_MULTITHREADED);
-					ownsApartment = SUCCEEDED(apartment);
-					if (!ownsApartment && apartment != RPC_E_CHANGED_MODE) winrt::check_hresult(apartment);
-					if (!Wgc::GraphicsCaptureSession::IsSupported()) winrt::throw_hresult(E_NOTIMPL);
-
-					winrt::check_hresult(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
-						D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION,
-						device.put(), nullptr, context.put()));
-					auto dxgi = device.as<IDXGIDevice>();
-					winrt::com_ptr<::IInspectable> wrapped;
-					winrt::check_hresult(CreateDirect3D11DeviceFromDXGIDevice(dxgi.get(), wrapped.put()));
-					captureDevice = wrapped.as<PreviewDevice>();
-					auto interop = winrt::get_activation_factory<Wgc::GraphicsCaptureItem, IGraphicsCaptureItemInterop>();
-					Wgc::GraphicsCaptureItem item{nullptr};
-					winrt::check_hresult(interop->CreateForWindow(source, winrt::guid_of<Wgc::IGraphicsCaptureItem>(),
-						winrt::put_abi(item)));
-					size = item.Size();
-					frames = Wgc::Direct3D11CaptureFramePool::CreateFreeThreaded(captureDevice,
-						Wgd::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size);
-					session = frames.CreateCaptureSession(item);
-					session.StartCapture();
+			void CopyPane(SplitPreview& preview, const void* bytes, unsigned stride, const RECT& area, const BarLayout& pane) {
+				const auto x = [&](float ratio) { return static_cast<int>(area.left + std::lround((area.right - area.left) * ratio)); };
+				const auto y = [&](float ratio) { return static_cast<int>(area.top + std::lround((area.bottom - area.top) * (1.0f - ratio))); };
+				const int left = x(pane.minAnchor.x), top = y(pane.maxAnchor.y);
+				const int w = x(pane.maxAnchor.x) - left, h = y(pane.minAnchor.y) - top;
+				if (w <= 0 || h <= 0) return;
+				const float scale = std::min(1.0f, 360.0f / std::max(w, h));
+				const int outWidth = std::max(1, static_cast<int>(std::lround(w * scale)));
+				const int outHeight = std::max(1, static_cast<int>(std::lround(h * scale)));
+				const bool first = preview.pixels.empty();
+				preview.pixels.resize(static_cast<size_t>(outWidth) * outHeight);
+				for (int row = 0; row < outHeight; ++row) {
+					const auto* line = reinterpret_cast<const uint32_t*>(
+						static_cast<const uint8_t*>(bytes) + size_t(top + row * h / outHeight) * stride);
+					for (int col = 0; col < outWidth; ++col)
+						preview.pixels[size_t(row) * outWidth + col] = line[left + col * w / outWidth];
 				}
-
-				void Stop() {
-					try { if (session) session.Close(); } catch (const winrt::hresult_error&) {}
-					try { if (frames) frames.Close(); } catch (const winrt::hresult_error&) {}
-					session = nullptr;
-					frames = nullptr;
-					captureDevice = nullptr;
-					staging = nullptr;
-					context = nullptr;
-					device = nullptr;
-					pending = false;
-					width = height = 0;
-					source = nullptr;
-					if (std::exchange(ownsApartment, false)) RoUninitialize();
-				}
-
-				void QueueFrame() {
-					auto frame = frames.TryGetNextFrame();
-					if (!frame) return;
-					const auto content = frame.ContentSize();
-					if (content.Width <= 0 || content.Height <= 0) return;
-					if (size.Width != content.Width || size.Height != content.Height) {
-						frame.Close();
-						size = content;
-						frames.Recreate(captureDevice, Wgd::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size);
-						staging = nullptr;
-						return;
-					}
-					auto surface = frame.Surface().as<::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>();
-					winrt::com_ptr<ID3D11Texture2D> texture;
-					winrt::check_hresult(surface->GetInterface(__uuidof(ID3D11Texture2D), texture.put_void()));
-					D3D11_TEXTURE2D_DESC desc{};
-					texture->GetDesc(&desc);
-					width = std::min(content.Width, static_cast<int>(desc.Width));
-					height = std::min(content.Height, static_cast<int>(desc.Height));
-					if (!staging) {
-						desc.Usage = D3D11_USAGE_STAGING;
-						desc.BindFlags = 0;
-						desc.MiscFlags = 0;
-						desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-						winrt::check_hresult(device->CreateTexture2D(&desc, nullptr, staging.put()));
-					}
-					context->CopyResource(staging.get(), texture.get());
-					context->Flush();
-					pending = true;
-				}
-
-				RECT ClientArea() const {
-					RECT bounds{}, client{};
-					POINT a{}, b{};
-					const RECT full{0, 0, width, height};
-					if (FAILED(DwmGetWindowAttribute(source, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds))) &&
-						!GetWindowRect(source, &bounds)) return full;
-					if (!GetClientRect(source, &client) || bounds.right <= bounds.left || bounds.bottom <= bounds.top) return full;
-					if (client.right == width && client.bottom == height) return full;
-					b = {client.right, client.bottom};
-					if (!ClientToScreen(source, &a) || !ClientToScreen(source, &b)) return full;
-					const auto x = [&](LONG value) { return std::clamp(std::lround(
-						(value - bounds.left) * double(width) / (bounds.right - bounds.left)), 0l, static_cast<long>(width)); };
-					const auto y = [&](LONG value) { return std::clamp(std::lround(
-						(value - bounds.top) * double(height) / (bounds.bottom - bounds.top)), 0l, static_cast<long>(height)); };
-					return {x(a.x), y(a.y), x(b.x), y(b.y)};
-				}
-
-				void CopyPane(SplitPreview& preview, const D3D11_MAPPED_SUBRESOURCE& map, const BarLayout& pane) const {
-					const auto area = ClientArea();
-					const auto x = [&](float ratio) { return static_cast<int>(area.left + std::lround((area.right - area.left) * ratio)); };
-					const auto y = [&](float ratio) { return static_cast<int>(area.top + std::lround((area.bottom - area.top) * (1.0f - ratio))); };
-					const int left = x(pane.minAnchor.x), top = y(pane.maxAnchor.y);
-					const int w = x(pane.maxAnchor.x) - left, h = y(pane.minAnchor.y) - top;
-					if (w <= 0 || h <= 0) return;
-					const float scale = std::min(1.0f, 360.0f / std::max(w, h));
-					const int outWidth = std::max(1, static_cast<int>(std::lround(w * scale)));
-					const int outHeight = std::max(1, static_cast<int>(std::lround(h * scale)));
-					const bool first = preview.pixels.empty();
-					preview.pixels.resize(static_cast<size_t>(outWidth) * outHeight);
-					for (int row = 0; row < outHeight; ++row) {
-						const auto* line = reinterpret_cast<const uint32_t*>(
-							static_cast<const uint8_t*>(map.pData) + size_t(top + row * h / outHeight) * map.RowPitch);
-						for (int col = 0; col < outWidth; ++col)
-							preview.pixels[size_t(row) * outWidth + col] = line[left + col * w / outWidth];
-					}
-					preview.width = outWidth;
-					preview.height = outHeight;
-					InvalidateRect(preview.window, nullptr, FALSE);
-					if (first) Log(std::format("[mv-split] preview {} displayed its first frame", preview.id + 1));
-				}
-			};
+				preview.width = outWidth;
+				preview.height = outHeight;
+				InvalidateRect(preview.window, nullptr, FALSE);
+				if (first) Log(std::format("[mv-split] preview {} displayed its first frame", preview.id + 1));
+			}
 			SplitPreview splitPreviews[2];
-			SplitWindowCapture splitCapture;
 
 			void CloseSplitPreviews() {
-				if (splitCapture.source) splitCapture.Stop();
+				StopMvWindowCapture();
 				for (int i = 0; i < 2; ++i) {
 					splitPreviews[i].Close();
 					SetMvSplitPreviewPane(i, -1);
@@ -9793,35 +9673,25 @@ namespace
 					}
 				}
 				if (!open) {
-					if (splitCapture.source) splitCapture.Stop();
+					StopMvWindowCapture();
 					return;
 				}
-				try {
-					auto& capture = splitCapture;
-					if (!capture.session) capture.Start();
-					if (capture.pending) {
-						D3D11_MAPPED_SUBRESOURCE map{};
-						auto result = capture.context->Map(capture.staging.get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &map);
-						if (result == DXGI_ERROR_WAS_STILL_DRAWING) return;
-						winrt::check_hresult(result);
-						struct UnmapOnExit {
-							ID3D11DeviceContext* context;
-							ID3D11Texture2D* texture;
-							~UnmapOnExit() { context->Unmap(texture, 0); }
-						} unmap{capture.context.get(), capture.staging.get()};
-						for (int i = 0; i < 2; ++i)
-							if (panes[i] >= 0 && splitPreviews[i].window && !IsIconic(splitPreviews[i].window))
-								capture.CopyPane(splitPreviews[i], map, layouts[std::min(panes[i], count - 1)]);
-						capture.pending = false;
-					}
-					static ULONGLONG nextUpdate = 0;
-					const auto now = GetTickCount64();
-					if (now >= nextUpdate) {
-						capture.QueueFrame();
-						nextUpdate = now + 65;
-					}
-				} catch (const winrt::hresult_error& error) {
-					Log(std::format("[mv-split] previews stopped: {}", winrt::to_string(error.message())));
+
+				struct CaptureOutput {
+					const std::array<BarLayout, mvSplitPanelCount>& layouts;
+					const int* panes;
+					int count;
+				} output{layouts, panes, count};
+				const auto display = [](void* state, const void* bytes, unsigned stride, const RECT& area) {
+					const auto& output = *static_cast<CaptureOutput*>(state);
+					for (int i = 0; i < 2; ++i)
+						if (output.panes[i] >= 0 && splitPreviews[i].window && !IsIconic(splitPreviews[i].window))
+							CopyPane(splitPreviews[i], bytes, stride, area,
+								output.layouts[std::min(output.panes[i], output.count - 1)]);
+				};
+				std::string error;
+				if (!ReadMvWindowCapture(display, &output, error)) {
+					Log(std::format("[mv-split] previews stopped: {}", error));
 					CloseSplitPreviews();
 				}
 			}
