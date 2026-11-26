@@ -9477,6 +9477,9 @@ namespace
 				OwnedObject cameraObject, imageObject, texture;
 				int width = 0, height = 0;
 				int baseWidth = 0, baseHeight = 0, firstPreviewFrame = 0;
+				int requestedWidth = 0, requestedHeight = 0;
+				ULONGLONG resizeAfter = 0;
+				bool triedResize = false;
 				bool previewResolution = false;
 				bool cameraActive = false, imageVisible = false;
 				Il2CppObject* Camera() const { return OutfitCall(cameraObject.Get(), "GetComponent", {reinterpret_cast<Il2CppObject*>(engine.cameraType)}); }
@@ -9535,14 +9538,25 @@ namespace
 					return true;
 				}
 
-				void SetPreviewResolution(bool enabled, int frame) {
-					if (enabled == previewResolution) return;
-					previewResolution = enabled;
-					firstPreviewFrame = frame + 1;
-					const float scale = enabled ? std::max(1.0f, std::min(1080.0f / baseHeight, 1920.0f / baseWidth)) : 1.0f;
+				void SetPreviewResolution(float clientScale, int frame) {
+					const bool enabled = clientScale > 0;
+					if (!enabled && !previewResolution) return;
+					const bool changedOutput = std::exchange(previewResolution, enabled) != enabled;
+					const float minimumScale = std::max(1.0f, std::min(1080.0f / baseHeight, 1920.0f / baseWidth));
+					const float maximumScale = std::min(2160.0f / baseHeight, 3840.0f / baseWidth);
+					const float scale = enabled ? std::min(maximumScale, std::max(clientScale, minimumScale)) : 1.0f;
 					const int w = static_cast<int>(std::lround(baseWidth * scale));
 					const int h = static_cast<int>(std::lround(baseHeight * scale));
-					if (w == width && h == height) return;
+					const ULONGLONG now = GetTickCount64();
+					if (changedOutput || w != requestedWidth || h != requestedHeight) {
+						requestedWidth = w;
+						requestedHeight = h;
+						resizeAfter = changedOutput ? now : now + 160;
+						triedResize = false;
+					}
+					if (changedOutput) firstPreviewFrame = frame + 1;
+					if ((w == width && h == height) || now < resizeAfter || triedResize) return;
+					triedResize = true;
 					auto* camera = Camera();
 					auto* image = OutfitCall(imageObject.Get(), "GetComponent", {reinterpret_cast<Il2CppObject*>(engine.rawImageType)});
 					if (!Alive(camera) || !Alive(image)) return;
@@ -9556,6 +9570,7 @@ namespace
 					texture.handle = handle;
 					width = w;
 					height = h;
+					firstPreviewFrame = frame + 1;
 				}
 
 				void SetOutput(bool render, bool show) {
@@ -9589,6 +9604,8 @@ namespace
 				bool displayed = false;
 				bool useLinearReadback = false;
 				int lastFrame = -1, errors = 0;
+				unsigned mvFrames = 0, readbacks = 0, presented = 0;
+				ULONGLONG sampleStart = 0;
 				int id = 0;
 
 				static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -9619,6 +9636,8 @@ namespace
 					lastFrame = -1;
 					errors = 0;
 					useLinearReadback = false;
+					mvFrames = readbacks = presented = 0;
+					sampleStart = GetTickCount64();
 					constexpr auto className = L"ScspMvSplitPreviewWindow";
 					HINSTANCE instance = GetModuleHandleW(nullptr);
 					WNDCLASSW wc{};
@@ -9690,8 +9709,8 @@ namespace
 				void* target = nullptr;
 				int frame = -1;
 			};
-			// Keep two frames in flight per window so a readback need not stall the next frame.
-			CameraReadback previewRequests[2][2]{};
+			// Preserve the frame cadence when Unity takes several frames to return a readback.
+			CameraReadback previewRequests[2][4]{};
 			std::vector<OwnedObject> retiredTargets;
 
 			void ReturnPanelTexture(OwnedObject& texture) {
@@ -9764,6 +9783,7 @@ namespace
 						return false;
 					preview.lastFrame = latest.frame;
 					preview.errors = 0;
+					if (displayed) ++preview.presented;
 					if (displayed && !std::exchange(preview.displayed, true))
 						Log(std::format("[mv-split] direct camera preview {} displayed its first frame at {}x{}",
 							index + 1, panel->width, panel->height));
@@ -9773,6 +9793,7 @@ namespace
 					return false;
 				}
 				if (frame < panel->firstPreviewFrame || IsIconic(preview.window)) return true;
+				++preview.mvFrames;
 				for (auto& pending : requests) {
 					if (pending.target) continue;
 					auto* target = panel->texture.Get();
@@ -9785,14 +9806,24 @@ namespace
 					textureReadback.submit(nativeTexture, 0, format, nullptr, &pending.request);
 					pending.target = panel->texture.handle;
 					pending.frame = frame;
+					++preview.readbacks;
 					break;
+				}
+				const ULONGLONG now = GetTickCount64();
+				if (now - preview.sampleStart >= 8000) {
+					const double perSecond = 1000.0 / (now - preview.sampleStart);
+					Log(std::format("[mv-split] preview {} {}x{}: MV {:.1f} fps, sampled {:.1f} fps, presented {:.1f} fps",
+						index + 1, panel->width, panel->height, preview.mvFrames * perSecond,
+						preview.readbacks * perSecond, preview.presented * perSecond));
+					preview.mvFrames = preview.readbacks = preview.presented = 0;
+					preview.sampleStart = now;
 				}
 				return true;
 			}
 
 			unsigned UpdateSplitPreviews(Panel* panels, int count, int frame) {
 				int panes[2]{-1, -1};
-				unsigned largePanels = 0;
+				float clientScale[mvSplitPanelCount]{};
 				for (int i = 0; i < 2; ++i) {
 					auto& preview = splitPreviews[i];
 					preview.Pump();
@@ -9805,11 +9836,16 @@ namespace
 						SetMvSplitPreviewPane(i, -1);
 					} else {
 						panes[i] = std::min(pane, count - 1);
-						largePanels |= 1u << panes[i];
+						const auto& panel = panels[panes[i]];
+						RECT client{};
+						GetClientRect(preview.window, &client);
+						const float scale = std::min(static_cast<float>(client.right) / panel.baseWidth,
+							static_cast<float>(client.bottom) / panel.baseHeight);
+						clientScale[panes[i]] = std::max({1.0f, scale, clientScale[panes[i]]});
 					}
 				}
 				for (int i = 0; i < count; ++i)
-					panels[i].SetPreviewResolution((largePanels & (1u << i)) != 0, frame);
+					panels[i].SetPreviewResolution(clientScale[i], frame);
 				unsigned detachedPanels = 0;
 				for (int i = 0; i < 2; ++i) {
 					std::string error;
