@@ -7,7 +7,19 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#include <d3d11.h>
+#include <dwmapi.h>
+#include <roapi.h>
+#include <windows.graphics.capture.interop.h>
+#include <windows.graphics.directx.direct3d11.interop.h>
+#include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Graphics.Capture.h>
+#include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
+#pragma comment(lib, "d3d11.lib")
+#pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "gdi32.lib")
+#pragma comment(lib, "runtimeobject.lib")
+#pragma comment(lib, "windowsapp.lib")
 #include <cstdint>
 #include <cstdlib>
 #include <cstdio>
@@ -9545,90 +9557,9 @@ namespace
 				}
 			};
 
-			struct PreviewCapture {
-				OwnedObject readable, target;
-				Il2CppClass* textureClass = nullptr;
-				const MethodInfo *construct = nullptr, *blit = nullptr, *getActive = nullptr,
-					*setActive = nullptr, *readPixels = nullptr, *rawBytes = nullptr;
-				int width = 0, height = 0;
-
-				bool Resolve() {
-					textureClass = (Il2CppClass*)il2cpp_symbols_logged::get_class(core, "UnityEngine", "Texture2D");
-					if (!textureClass) return false;
-					construct = il2cpp_class_get_method_from_name(textureClass, ".ctor", 4);
-					readPixels = il2cpp_class_get_method_from_name(textureClass, "ReadPixels", 3);
-					blit = il2cpp_symbols_logged::get_method(core, "UnityEngine", "Graphics", "Blit", 2);
-					getActive = il2cpp_symbols_logged::get_method(core, "UnityEngine", "RenderTexture", "get_active", 0);
-					setActive = il2cpp_symbols_logged::get_method(core, "UnityEngine", "RenderTexture", "set_active", 1);
-					void* iter = nullptr;
-					while (const auto* method = il2cpp_class_get_methods(textureClass, &iter)) {
-						if (!method->is_generic && method->parameters_count == 0 && std::string_view(method->name) == "GetRawTextureData") {
-							rawBytes = method;
-							break;
-						}
-					}
-					const MethodInfo* methods[]{construct, blit, getActive, setActive, readPixels, rawBytes};
-					return std::all_of(std::begin(methods), std::end(methods),
-						[](const MethodInfo* method) { return method && method->methodPointer; });
-				}
-
-				void Release() {
-					readable.Destroy();
-					if (auto* rt = target.Get(); Alive(rt)) engine.releaseTemporary->InvokeAsVoid(nullptr, {rt});
-					if (target.handle) il2cpp_gchandle_free(std::exchange(target.handle, nullptr));
-					width = height = 0;
-				}
-
-				bool Capture(const Panel& panel, std::vector<uint32_t>& pixels, int& outWidth, int& outHeight) {
-					auto* source = panel.texture.Get();
-					if (!source || panel.width < 1 || panel.height < 1) return false;
-					const float scale = std::min(1.0f, 360.0f / std::max(panel.width, panel.height));
-					int w = std::max(1, static_cast<int>(std::lround(panel.width * scale)));
-					int h = std::max(1, static_cast<int>(std::lround(panel.height * scale)));
-					if (width != w || height != h) {
-						Release();
-						auto* canvas = NewTargetTexture(w, h);
-						if (!Alive(canvas)) return false;
-						target.handle = il2cpp_gchandle_new(canvas, false);
-						auto* cpuTexture = (Il2CppObject*)il2cpp_object_new(textureClass);
-						if (!cpuTexture) { Release(); return false; }
-						readable.handle = il2cpp_gchandle_new(cpuTexture, false);
-						int rgba32 = 4;
-						bool mipmaps = false;
-						InvokeCreation(construct, cpuTexture, {reinterpret_cast<Il2CppObject*>(&w),
-							reinterpret_cast<Il2CppObject*>(&h), reinterpret_cast<Il2CppObject*>(&rgba32),
-							reinterpret_cast<Il2CppObject*>(&mipmaps)});
-						if (!Alive(cpuTexture)) { Release(); return false; }
-						width = w;
-						height = h;
-					}
-
-					auto* previous = getActive->Invoke<Il2CppObject*>(nullptr, {});
-					auto* rt = target.Get();
-					blit->InvokeAsVoid(nullptr, {source, rt});
-					setActive->InvokeAsVoid(nullptr, {rt});
-					Rect_t area{0, 0, static_cast<float>(w), static_cast<float>(h)};
-					int zero = 0;
-					readPixels->InvokeAsVoid(readable.Get(), {reinterpret_cast<Il2CppObject*>(&area),
-						reinterpret_cast<Il2CppObject*>(&zero), reinterpret_cast<Il2CppObject*>(&zero)});
-					setActive->InvokeAsVoid(nullptr, {previous});
-					auto* bytes = rawBytes->Invoke<Il2CppObject*>(readable.Get(), {});
-					const auto count = static_cast<size_t>(w) * h;
-					if (!bytes || il2cpp_array_length(bytes) != count * 4) return false;
-					const auto* rgba = reinterpret_cast<const uint8_t*>(il2cpp_array_addr_with_size(bytes, 1, 0));
-					pixels.resize(count);
-					for (size_t i = 0; i < count; ++i)
-						pixels[i] = (uint32_t(rgba[i * 4]) << 16) | (uint32_t(rgba[i * 4 + 1]) << 8) | rgba[i * 4 + 2];
-					outWidth = w;
-					outHeight = h;
-					return true;
-				}
-			};
-
 			struct SplitPreview {
 				HWND window = nullptr;
 				std::vector<uint32_t> pixels;
-				PreviewCapture capture;
 				int id = 0, width = 0, height = 0;
 
 				static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -9657,7 +9588,7 @@ namespace
 							BITMAPINFO info{};
 							info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
 							info.bmiHeader.biWidth = self->width;
-							info.bmiHeader.biHeight = self->height;
+							info.bmiHeader.biHeight = -self->height;
 							info.bmiHeader.biPlanes = 1;
 							info.bmiHeader.biBitCount = 32;
 							StretchDIBits(dc, (area.right - w) / 2, (area.bottom - h) / 2, w, h, 0, 0,
@@ -9688,7 +9619,6 @@ namespace
 
 				void Close() {
 					if (window) DestroyWindow(window);
-					capture.Release();
 					pixels.clear();
 					width = height = 0;
 				}
@@ -9703,56 +9633,196 @@ namespace
 					}
 				}
 			};
+			namespace Wgc = winrt::Windows::Graphics::Capture;
+			namespace Wgd = winrt::Windows::Graphics::DirectX;
+			using PreviewDevice = Wgd::Direct3D11::IDirect3DDevice;
+			using PreviewSize = winrt::Windows::Graphics::SizeInt32;
+
+			struct SplitWindowCapture {
+				HWND source = nullptr;
+				bool ownsApartment = false, pending = false;
+				Wgc::Direct3D11CaptureFramePool frames{nullptr};
+				Wgc::GraphicsCaptureSession session{nullptr};
+				PreviewDevice captureDevice{nullptr};
+				PreviewSize size{};
+				winrt::com_ptr<ID3D11Device> device;
+				winrt::com_ptr<ID3D11DeviceContext> context;
+				winrt::com_ptr<ID3D11Texture2D> staging;
+				int width = 0, height = 0;
+
+				void Start() {
+					source = FindWindowW(L"UnityWndClass", L"imasscprism");
+					DWORD pid = 0;
+					if (!source || !GetWindowThreadProcessId(source, &pid) || pid != GetCurrentProcessId())
+						winrt::throw_hresult(E_HANDLE);
+					const HRESULT apartment = RoInitialize(RO_INIT_MULTITHREADED);
+					ownsApartment = SUCCEEDED(apartment);
+					if (!ownsApartment && apartment != RPC_E_CHANGED_MODE) winrt::check_hresult(apartment);
+					if (!Wgc::GraphicsCaptureSession::IsSupported()) winrt::throw_hresult(E_NOTIMPL);
+
+					winrt::check_hresult(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+						D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION,
+						device.put(), nullptr, context.put()));
+					auto dxgi = device.as<IDXGIDevice>();
+					winrt::com_ptr<::IInspectable> wrapped;
+					winrt::check_hresult(CreateDirect3D11DeviceFromDXGIDevice(dxgi.get(), wrapped.put()));
+					captureDevice = wrapped.as<PreviewDevice>();
+					auto interop = winrt::get_activation_factory<Wgc::GraphicsCaptureItem, IGraphicsCaptureItemInterop>();
+					Wgc::GraphicsCaptureItem item{nullptr};
+					winrt::check_hresult(interop->CreateForWindow(source, winrt::guid_of<Wgc::IGraphicsCaptureItem>(),
+						winrt::put_abi(item)));
+					size = item.Size();
+					frames = Wgc::Direct3D11CaptureFramePool::CreateFreeThreaded(captureDevice,
+						Wgd::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size);
+					session = frames.CreateCaptureSession(item);
+					session.StartCapture();
+				}
+
+				void Stop() {
+					try { if (session) session.Close(); } catch (const winrt::hresult_error&) {}
+					try { if (frames) frames.Close(); } catch (const winrt::hresult_error&) {}
+					session = nullptr;
+					frames = nullptr;
+					captureDevice = nullptr;
+					staging = nullptr;
+					context = nullptr;
+					device = nullptr;
+					pending = false;
+					width = height = 0;
+					source = nullptr;
+					if (std::exchange(ownsApartment, false)) RoUninitialize();
+				}
+
+				void QueueFrame() {
+					auto frame = frames.TryGetNextFrame();
+					if (!frame) return;
+					const auto content = frame.ContentSize();
+					if (content.Width <= 0 || content.Height <= 0) return;
+					if (size.Width != content.Width || size.Height != content.Height) {
+						frame.Close();
+						size = content;
+						frames.Recreate(captureDevice, Wgd::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size);
+						staging = nullptr;
+						return;
+					}
+					auto surface = frame.Surface().as<::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>();
+					winrt::com_ptr<ID3D11Texture2D> texture;
+					winrt::check_hresult(surface->GetInterface(__uuidof(ID3D11Texture2D), texture.put_void()));
+					D3D11_TEXTURE2D_DESC desc{};
+					texture->GetDesc(&desc);
+					width = std::min(content.Width, static_cast<int>(desc.Width));
+					height = std::min(content.Height, static_cast<int>(desc.Height));
+					if (!staging) {
+						desc.Usage = D3D11_USAGE_STAGING;
+						desc.BindFlags = 0;
+						desc.MiscFlags = 0;
+						desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+						winrt::check_hresult(device->CreateTexture2D(&desc, nullptr, staging.put()));
+					}
+					context->CopyResource(staging.get(), texture.get());
+					context->Flush();
+					pending = true;
+				}
+
+				RECT ClientArea() const {
+					RECT bounds{}, client{};
+					POINT a{}, b{};
+					const RECT full{0, 0, width, height};
+					if (FAILED(DwmGetWindowAttribute(source, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds))) &&
+						!GetWindowRect(source, &bounds)) return full;
+					if (!GetClientRect(source, &client) || bounds.right <= bounds.left || bounds.bottom <= bounds.top) return full;
+					if (client.right == width && client.bottom == height) return full;
+					b = {client.right, client.bottom};
+					if (!ClientToScreen(source, &a) || !ClientToScreen(source, &b)) return full;
+					const auto x = [&](LONG value) { return std::clamp(std::lround(
+						(value - bounds.left) * double(width) / (bounds.right - bounds.left)), 0l, static_cast<long>(width)); };
+					const auto y = [&](LONG value) { return std::clamp(std::lround(
+						(value - bounds.top) * double(height) / (bounds.bottom - bounds.top)), 0l, static_cast<long>(height)); };
+					return {x(a.x), y(a.y), x(b.x), y(b.y)};
+				}
+
+				void CopyPane(SplitPreview& preview, const D3D11_MAPPED_SUBRESOURCE& map, const BarLayout& pane) const {
+					const auto area = ClientArea();
+					const auto x = [&](float ratio) { return static_cast<int>(area.left + std::lround((area.right - area.left) * ratio)); };
+					const auto y = [&](float ratio) { return static_cast<int>(area.top + std::lround((area.bottom - area.top) * (1.0f - ratio))); };
+					const int left = x(pane.minAnchor.x), top = y(pane.maxAnchor.y);
+					const int w = x(pane.maxAnchor.x) - left, h = y(pane.minAnchor.y) - top;
+					if (w <= 0 || h <= 0) return;
+					const float scale = std::min(1.0f, 360.0f / std::max(w, h));
+					const int outWidth = std::max(1, static_cast<int>(std::lround(w * scale)));
+					const int outHeight = std::max(1, static_cast<int>(std::lround(h * scale)));
+					const bool first = preview.pixels.empty();
+					preview.pixels.resize(static_cast<size_t>(outWidth) * outHeight);
+					for (int row = 0; row < outHeight; ++row) {
+						const auto* line = reinterpret_cast<const uint32_t*>(
+							static_cast<const uint8_t*>(map.pData) + size_t(top + row * h / outHeight) * map.RowPitch);
+						for (int col = 0; col < outWidth; ++col)
+							preview.pixels[size_t(row) * outWidth + col] = line[left + col * w / outWidth];
+					}
+					preview.width = outWidth;
+					preview.height = outHeight;
+					InvalidateRect(preview.window, nullptr, FALSE);
+					if (first) Log(std::format("[mv-split] preview {} displayed its first frame", preview.id + 1));
+				}
+			};
 			SplitPreview splitPreviews[2];
+			SplitWindowCapture splitCapture;
 
 			void CloseSplitPreviews() {
+				if (splitCapture.source) splitCapture.Stop();
 				for (int i = 0; i < 2; ++i) {
 					splitPreviews[i].Close();
 					SetMvSplitPreviewPane(i, -1);
 				}
 			}
 
-			void UpdateSplitPreviews(const Panel* panels, int count) {
+			void UpdateSplitPreviews(const std::array<BarLayout, mvSplitPanelCount>& layouts, int count) {
 				int panes[2]{};
+				bool open = false;
 				for (int i = 0; i < 2; ++i) {
 					auto& preview = splitPreviews[i];
 					preview.Pump();
 					panes[i] = GetMvSplitPreviewPane(i);
 					if (panes[i] < 0) {
-						if (preview.window || preview.capture.target.handle) preview.Close();
-						continue;
-					}
-					if (!preview.window) {
-						if (preview.capture.Resolve() && preview.Open(i)) {
-							Log(std::format("[mv-split] opened preview {}", i + 1));
-						} else {
-							Log(std::format("[mv-split] preview {} unavailable", i + 1));
-							SetMvSplitPreviewPane(i, -1);
-							preview.Close();
-							panes[i] = -1;
-						}
+						if (preview.window || !preview.pixels.empty()) preview.Close();
+					} else if (preview.window || preview.Open(i)) {
+						open = true;
+					} else {
+						Log(std::format("[mv-split] preview {} window could not open", i + 1));
+						SetMvSplitPreviewPane(i, -1);
 					}
 				}
-
-				// Alternate readbacks, at most one GPU-to-CPU copy per 42 ms.
-				static ULONGLONG nextUpdate = 0;
-				static int next = 0;
-				const auto now = GetTickCount64();
-				if (now < nextUpdate) return;
-				for (int offset = 0; offset < 2; ++offset) {
-					const int i = (next + offset) % 2;
-					auto& preview = splitPreviews[i];
-					if (panes[i] < 0 || !preview.window || IsIconic(preview.window)) continue;
-					if (!preview.capture.Capture(panels[std::min(panes[i], count - 1)], preview.pixels, preview.width, preview.height)) {
-						Log(std::format("[mv-split] preview {} readback failed", i + 1));
-						SetMvSplitPreviewPane(i, -1);
-						preview.Close();
-					} else {
-						InvalidateRect(preview.window, nullptr, FALSE);
+				if (!open) {
+					if (splitCapture.source) splitCapture.Stop();
+					return;
+				}
+				try {
+					auto& capture = splitCapture;
+					if (!capture.session) capture.Start();
+					if (capture.pending) {
+						D3D11_MAPPED_SUBRESOURCE map{};
+						auto result = capture.context->Map(capture.staging.get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &map);
+						if (result == DXGI_ERROR_WAS_STILL_DRAWING) return;
+						winrt::check_hresult(result);
+						struct UnmapOnExit {
+							ID3D11DeviceContext* context;
+							ID3D11Texture2D* texture;
+							~UnmapOnExit() { context->Unmap(texture, 0); }
+						} unmap{capture.context.get(), capture.staging.get()};
+						for (int i = 0; i < 2; ++i)
+							if (panes[i] >= 0 && splitPreviews[i].window && !IsIconic(splitPreviews[i].window))
+								capture.CopyPane(splitPreviews[i], map, layouts[std::min(panes[i], count - 1)]);
+						capture.pending = false;
 					}
-					next = 1 - i;
-					nextUpdate = now + 42;
-					break;
+					static ULONGLONG nextUpdate = 0;
+					const auto now = GetTickCount64();
+					if (now >= nextUpdate) {
+						capture.QueueFrame();
+						nextUpdate = now + 65;
+					}
+				} catch (const winrt::hresult_error& error) {
+					Log(std::format("[mv-split] previews stopped: {}", winrt::to_string(error.message())));
+					CloseSplitPreviews();
 				}
 			}
 
@@ -10005,7 +10075,7 @@ namespace
 					const int actor = GetMvSplitActorForLayout(i, layout);
 					FramePanel(i, centers[actor < count && found[actor] ? actor : first]);
 				}
-				UpdateSplitPreviews(renderer.panels, paneCount);
+				UpdateSplitPreviews(PanelLayouts(layout, static_cast<float>(w) / h), paneCount);
 				return true;
 			}
 
