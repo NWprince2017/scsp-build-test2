@@ -9841,6 +9841,11 @@ namespace
 				return name;
 			}
 
+			bool IsNamedDefaultHair(void* hair) {
+				const auto name = String(hair, "get_Name");
+				return name.ends_with("デフォルト髪型") || name.ends_with("默认发型") || name.ends_with("預設髮型");
+			}
+
 			struct Sets {
 				void* service = nullptr;
 				const MethodInfo* getSet = nullptr;
@@ -9863,16 +9868,26 @@ namespace
 						if (OutfitNumber(hair, "get_MstCharacterInfoId") != actor) continue;
 						const int hairId = OutfitNumber(hair, "get_Id");
 						auto [known, added] = defaultHair.try_emplace(hairId, false);
-						if (added) {
-							const auto name = String(hair, "get_Name");
-							known->second = name.ends_with("デフォルト髪型") || name.ends_with("默认发型") || name.ends_with("預設髮型");
-						}
+						if (added) known->second = IsNamedDefaultHair(hair);
 						if (!known->second) continue;
 						const int id = OutfitNumber(row, "get_Id");
 						if (OutfitNumber(costume, "get_ResourceId") == 1) return Get(id);
 						if (!best) best = id;
 					}
 					return Get(best);
+				}
+
+				Il2CppObject* DefaultHairstyle(void* master, int actor) const {
+					const auto hairstyles = OutfitList(CenterCutSceneTableRows(master, "Hairstyles"));
+					for (int i = 0; i < hairstyles.count; ++i) {
+						auto* row = il2cpp_symbols::array_get_value(hairstyles.data, i);
+						if (OutfitNumber(row, "get_MstCharacterInfoId") != actor || !IsNamedDefaultHair(row)) continue;
+						int id = OutfitNumber(row, "get_Id");
+						if (id <= 0) continue;
+						auto* hair = OutfitCall(service, "GetHairstyle", {reinterpret_cast<Il2CppObject*>(&id)});
+						if (OutfitNumber(hair, "get_MstCharacterInfoId") == actor) return hair;
+					}
+					return nullptr;
 				}
 
 				Il2CppObject* Match(int actor, const std::string& family, void* sourceCostume) const {
@@ -9993,7 +10008,13 @@ namespace
 					return;
 				}
 				const int owner = OutfitNumber(sourceCostume, "get_MstCharacterInfoId");
-				struct Dressing { Il2CppObject* outfit; Il2CppObject* style; Il2CppObject* costume; };
+				struct Dressing {
+					Il2CppObject* outfit;
+					Il2CppObject* style;
+					Il2CppObject* hair;
+					Il2CppObject* costume;
+					int actor;
+				};
 				std::vector<Dressing> changes;
 				int changed = 0, targetCount = 0;
 				for (int i = 0; i < idols.count; ++i) {
@@ -10010,13 +10031,24 @@ namespace
 					auto* hair = OutfitCall(style, "get_Hairstyle");
 					if (!hair || OutfitNumber(hair, "get_MstCharacterInfoId") != actor)
 						style = sets.Default(actor);
-					if (!style || !OutfitCall(style, "get_Hairstyle")) continue;
-					changes.push_back({current, style, costume});
+					if (OutfitNumber(OutfitCall(style, "get_Hairstyle"), "get_MstCharacterInfoId") != actor) {
+						style = nullptr;
+						if (!IsCollaborationWardrobeActor(actor)) continue;
+					}
+					// A guest may have a default hairstyle without any owned MV set.
+					auto* defaultHair = style ? nullptr : sets.DefaultHairstyle(master, actor);
+					changes.push_back({current, style, defaultHair, costume, actor});
 				}
 				for (const auto& change : changes) {
-					OutfitCall(change.outfit, "CopyFrom", {change.style});
+					if (change.style) OutfitCall(change.outfit, "CopyFrom", {change.style});
+					else if (change.hair) OutfitCall(change.outfit, "set_Hairstyle", {change.hair});
 					OutfitCall(change.outfit, "set_Costume", {change.costume});
-					if (CostumeId(change.outfit) == OutfitNumber(change.costume, "get_MstCostumeId")) ++changed;
+					const int applied = CostumeId(change.outfit);
+					const int wanted = OutfitNumber(change.costume, "get_MstCostumeId");
+					if (applied == wanted) ++changed;
+					if (IsCollaborationWardrobeActor(change.actor))
+						Log(std::format("[mv-tools] guest outfit actor={} costume={}/{} hair={}",
+							change.actor, applied, wanted, change.style ? "set" : change.hair ? "default" : "existing"));
 				}
 				if (changed) RefreshFormation(model, unit, presenter);
 				SetStatus(std::format("已给 {} / {} 个其他 MV 站位应用服装。", changed, targetCount));
