@@ -10559,7 +10559,8 @@ namespace
 						auto* savedSet = sets.Get(saved.setId);
 						auto* sourceCostume = OutfitCall(savedSet, "get_Costume");
 						if (OutfitNumber(sourceCostume, "get_MstCostumeId") != saved.costumeId)
-							sourceCostume = FindWardrobeMasterRow(CenterCutSceneTableRows(TryMasterData(), "Costumes"), saved.costumeId);
+							sourceCostume = static_cast<Il2CppObject*>(FindWardrobeMasterRow(
+								CenterCutSceneTableRows(TryMasterData(), "Costumes"), saved.costumeId));
 						const auto family = Family(String(sourceCostume, "get_Name"));
 						auto* own = family.empty() ? nullptr : sets.Match(actor, family, sourceCostume);
 						auto* defaultSet = sets.Default(actor);
