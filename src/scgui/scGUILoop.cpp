@@ -49,13 +49,23 @@ extern int GetMvSplitActor(int panel);
 extern void SetMvSplitActor(int panel, int actor);
 extern int GetMvSplitPreviewPane(int preview);
 extern void SetMvSplitPreviewPane(int preview, int pane);
+extern bool GetMvNormalFocusWindow();
+extern void SetMvNormalFocusWindow(bool enabled);
+extern int GetMvNormalFocusActor();
+extern void SetMvNormalFocusActor(int actor);
+extern void GetMvNormalFocusFraming(float& yaw, float& pitch, float& roll, float& horizontal, float& vertical, float& zoom);
+extern void SetMvNormalFocusFraming(float yaw, float pitch, float roll, float horizontal, float vertical, float zoom);
+extern void ResetMvNormalFocusFraming();
 extern void RequestMvFormationTool(int action);
-extern void RequestRandomMv(std::vector<int> songs, std::vector<int> actors, int mode, int parts, int count, int interval);
+extern void RequestMvOutfitTable(int action);
+extern void RequestRandomMv(std::vector<int> songs, std::vector<int> actors, int kinds, int policy,
+	int count, int interval, bool preferSongOutfit, int outfitMode, int hairMode);
 extern std::string GetMvFormationToolStatus();
 extern std::array<std::string, 3> GetMvOutfitSources();
 using MvPlaylistEntries = std::vector<std::pair<int, std::string>>;
 using MvPlaylistGroups = std::vector<std::tuple<int, std::string, MvPlaylistEntries>>;
 extern std::shared_ptr<const MvPlaylistGroups> GetMvPlaylistGroups(bool songs);
+extern std::vector<std::pair<int, std::string>> GetMvSavedOutfits();
 
 
 #define INPUT_AND_SLIDER_FLOAT(label, data, min, max) \
@@ -693,12 +703,13 @@ namespace SCGUILoop {
 				ImGui::InputFloat3("Game Camera LookAt (x, y, z)", &SCGUIData::sysCamLookAt.x);
 				ImGui::InputFloat4("Game Camera Rotation (w, x, y, z)", &SCGUIData::sysCamRot.w);
 
-				const auto framingControls = [](bool fixed, int panel = -1) {
+				const auto framingControls = [](bool fixed, int panel = -1, bool normalFocus = false) {
 					float yaw = 0, pitch = 0, zoom = 0;
 					float roll, horizontal, vertical;
 					bool changed = false;
 					if (fixed) {
-						GetMvFixedFraming(yaw, pitch, roll, horizontal, vertical, zoom, panel);
+						if (normalFocus) GetMvNormalFocusFraming(yaw, pitch, roll, horizontal, vertical, zoom);
+						else GetMvFixedFraming(yaw, pitch, roll, horizontal, vertical, zoom, panel);
 						const bool orbit = panel >= 0;
 						const float maxPitch = orbit ? 180.0f : 90.0f;
 						changed |= ImGui::SliderFloat(orbit ? "Zoom toward actor" : "Zoom", &zoom,
@@ -718,11 +729,13 @@ namespace SCGUILoop {
 					if (ImGui::Button("90 deg right")) { roll = 90.0f; changed = true; }
 					ImGui::SameLine();
 					if (ImGui::Button("Reset state")) {
-						if (panel >= 0) ResetMvFixedPanel(panel);
+						if (normalFocus) ResetMvNormalFocusFraming();
+						else if (panel >= 0) ResetMvFixedPanel(panel);
 						else ResetMvFraming(fixed);
 					}
 					else if (changed) {
-						if (fixed) SetMvFixedFraming(yaw, pitch, roll, horizontal, vertical, zoom, panel);
+						if (normalFocus) SetMvNormalFocusFraming(yaw, pitch, roll, horizontal, vertical, zoom);
+						else if (fixed) SetMvFixedFraming(yaw, pitch, roll, horizontal, vertical, zoom, panel);
 						else SetMvFocusFraming(roll, horizontal, vertical);
 					}
 					bool keep = GetMvKeepFraming(fixed);
@@ -733,6 +746,20 @@ namespace SCGUILoop {
 					HELP_TOOLTIP("Controls (?)", "I / K / J / L: move camera up / down / left / right");
 					framingControls(false);
 					ImGui::PopID();
+				}
+				if (ImGui::TreeNode("正常自动镜头：竖向聚焦窗")) {
+					bool enabled = GetMvNormalFocusWindow();
+					if (ImGui::Checkbox("单独打开竖向聚焦窗口", &enabled)) SetMvNormalFocusWindow(enabled);
+					if (enabled) {
+						int slots = std::max(1, GetMvSplitActorCount());
+						int actor = std::clamp(GetMvNormalFocusActor(), 0, slots - 1);
+						if (ImGui::SliderInt("聚焦角色站位", &actor, 0, slots - 1)) SetMvNormalFocusActor(actor);
+						ImGui::TextDisabled("普通自动镜头保持原样；聚焦镜头以竖屏独立窗口显示。");
+						ImGui::PushID("Normal vertical focus window");
+						framingControls(true, 0, true);
+						ImGui::PopID();
+					}
+					ImGui::TreePop();
 				}
 				if (ImGui::CollapsingHeader("Fixed framing")) {
 					ImGui::PushID("Fixed framing");
@@ -785,7 +812,7 @@ namespace SCGUILoop {
 					ImGui::PopID();
 				}
 
-				if (ImGui::CollapsingHeader("MV formation tools")) {
+				if (ImGui::TreeNode("全员换装")) {
 					static int outfitSource = 0;
 					static int outfitStyle = 0;
 					static int hairStyle = 0;
@@ -799,8 +826,10 @@ namespace SCGUILoop {
 					ImGui::Combo("发型与配饰", &hairStyle, "优先使用该套服装的搭配\0使用偶像默认搭配\0");
 					if (ImGui::Button("全员换装"))
 						RequestMvFormationTool(16 + outfitSource + (outfitStyle ? 2 : 0) + (hairStyle ? 0 : 4));
+					ImGui::TreePop();
+				}
 
-					ImGui::Separator();
+				if (ImGui::TreeNode("随机歌曲")) {
 					static std::unordered_map<int, bool> songs, idols;
 					const auto groupPicker = [](const char* label, bool isSong, auto& checked) {
 						std::vector<int> selected;
@@ -848,17 +877,43 @@ namespace SCGUILoop {
 					};
 					auto selectedSongs = groupPicker("歌曲", true, songs);
 					auto selectedIdols = groupPicker("偶像", false, idols);
-					static int vocals = 0, parts = 0, count = 3, interval = 5;
-					ImGui::Combo("播放方式", &vocals, "自动\0全唱\0独唱\0");
-					ImGui::Combo("分唱筛选", &parts, "不限\0所选偶像有可用分唱\0所选偶像无可用分唱\0");
+					static int policy = 0, count = 3, interval = 5;
+					static bool partsSongs = true, ordinarySongs = true, twoDimensional = true;
+					ImGui::TextUnformatted("加入歌曲类型");
+					ImGui::SameLine(); ImGui::Checkbox("有分唱", &partsSongs);
+					ImGui::SameLine(); ImGui::Checkbox("无分唱", &ordinarySongs);
+					ImGui::SameLine(); ImGui::Checkbox("2D MV", &twoDimensional);
+					ImGui::Combo("人员不足时", &policy, "按人员条件筛选\0不限制（分唱优先）\0");
 					ImGui::InputInt("不重复歌曲数量", &count);
 					ImGui::InputInt("每首间隔（秒）", &interval);
+					static bool preferSongOutfit = false;
+					ImGui::Checkbox("优先使用乐曲 MV 原始服装", &preferSongOutfit);
+					static int outfitMode = 0, randomHairMode = 0;
+					ImGui::Combo("随机衣装方式", &outfitMode, "全随机\0和首位保持一致\0同名服装（本人优先）\0");
+					ImGui::Combo("发型与配饰", &randomHairMode, "使用服装配套搭配\0使用本人默认搭配\0");
+					ImGui::Separator();
+					if (ImGui::Button("把当前预览服装加入随机表")) RequestMvOutfitTable(4);
+					ImGui::SameLine(); if (ImGui::Button("导入 TXT")) RequestMvOutfitTable(6);
+					ImGui::SameLine(); if (ImGui::Button("保存为 TXT")) RequestMvOutfitTable(5);
+					ImGui::SameLine(); if (ImGui::Button("清空列表")) RequestMvOutfitTable(7);
+					const auto savedOutfits = GetMvSavedOutfits();
+					for (const auto& [index, name] : savedOutfits) {
+						ImGui::PushID(2000 + index);
+						ImGui::TextWrapped("%s", name.c_str());
+						ImGui::SameLine();
+						if (ImGui::SmallButton("删除")) RequestMvOutfitTable(2000 + index);
+						ImGui::PopID();
+					}
 					if (ImGui::Button("开始随机播放"))
-						RequestRandomMv(std::move(selectedSongs), std::move(selectedIdols), vocals, parts, count, interval);
+						RequestRandomMv(std::move(selectedSongs), std::move(selectedIdols),
+							(partsSongs ? 1 : 0) | (ordinarySongs ? 2 : 0) | (twoDimensional ? 4 : 0),
+							policy, count, interval, preferSongOutfit, outfitMode, randomHairMode);
 					ImGui::SameLine();
 					if (ImGui::Button("停止队列")) RequestMvFormationTool(3);
 					const auto status = GetMvFormationToolStatus();
 					if (!status.empty()) ImGui::TextWrapped("%s", status.c_str());
+					ImGui::TextDisabled("服装表文件：mv-random-outfits.txt");
+					ImGui::TreePop();
 				}
 
 				if (ImGui::CollapsingHeader("Free Camera", ImGuiTreeNodeFlags_DefaultOpen)) {

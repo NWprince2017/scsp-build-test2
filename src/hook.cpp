@@ -57,7 +57,7 @@ namespace {
 	FixedFraming mvFixedFraming{};
 	constexpr int mvSplitPanelCount = 5;
 	enum MvSplitLayout { SplitAuto, SplitTwo, SplitThree, SplitFour, SplitFive,
-		SplitRightStack, SplitBottomPair, SplitPictureInPicture, SplitLayoutCount };
+		SplitRightStack, SplitBottomPair, SplitPictureInPicture, SplitFocusPortrait, SplitLayoutCount };
 	struct SplitLayoutInfo {
 		const char* name;
 		int count;
@@ -73,7 +73,8 @@ namespace {
 		{"5 vertical panes", 5, {4, 2, 0, 1, 3}, 2},
 		{"Large left + stacked right", 3, {}, 0},
 		{"Large top + two below", 3, {}, 0},
-		{"Main view + upper-left inset", 2, {}, 0}
+		{"Main view + upper-left inset", 2, {}, 0},
+		{"Normal camera + vertical focus window", 1, {0}, 0}
 	};
 	static_assert(std::size(splitLayouts) == SplitLayoutCount);
 	struct SplitLayoutState {
@@ -92,6 +93,10 @@ namespace {
 	}();
 	std::mutex mvFixedFramingMutex;
 	std::atomic_bool mvSplitEnabled{false};
+	std::atomic_bool mvNormalFocusWindowEnabled{false};
+	std::atomic<int> mvNormalFocusActor{0};
+	std::atomic_bool mvNormalPreviewSnapshot{false};
+	std::atomic<int> mvSavedPreviewA{-1}, mvSavedPreviewB{-1};
 	std::atomic<int> mvSplitLayout{SplitAuto};
 	std::atomic<int> mvSplitActorCount{0};
 	std::atomic<int> mvPreviewPanes[2]{-1, -1};
@@ -144,11 +149,11 @@ void SetMvKeepFraming(bool fixed, bool keep) {
 bool GetMvSplitEnabled() { return mvSplitEnabled.load(std::memory_order_relaxed); }
 void SetMvSplitEnabled(bool enabled) { mvSplitEnabled.store(enabled, std::memory_order_relaxed); }
 int GetMvSplitLayout() { return mvSplitLayout.load(std::memory_order_relaxed); }
-void SetMvSplitLayout(int layout) { mvSplitLayout.store(std::clamp(layout, 0, int(SplitLayoutCount) - 1), std::memory_order_relaxed); }
-int GetMvSplitLayoutChoiceCount() { return SplitLayoutCount; }
+void SetMvSplitLayout(int layout) { mvSplitLayout.store(std::clamp(layout, 0, int(SplitFocusPortrait) - 1), std::memory_order_relaxed); }
+int GetMvSplitLayoutChoiceCount() { return SplitFocusPortrait; }
 const char* GetMvSplitLayoutName(int layout) { return splitLayouts[layout].name; }
 int GetMvSplitVisibleCount() { return splitLayouts[ResolveSplitLayout()].count; }
-bool IsMvSplitMixedLayout() { return ResolveSplitLayout() >= SplitRightStack; }
+bool IsMvSplitMixedLayout() { return ResolveSplitLayout() >= SplitRightStack && ResolveSplitLayout() < SplitFocusPortrait; }
 int GetMvSplitPanelForLayout(int layout) {
 	std::lock_guard lock(mvFixedFramingMutex);
 	return mvSplitStates[layout].selected;
@@ -181,6 +186,34 @@ void SetMvSplitActor(int panel, int actor) { SetMvSplitActorForLayout(panel, act
 
 int GetMvSplitPreviewPane(int preview) { return mvPreviewPanes[preview].load(std::memory_order_relaxed); }
 void SetMvSplitPreviewPane(int preview, int pane) { mvPreviewPanes[preview].store(pane, std::memory_order_relaxed); }
+void GetMvNormalFocusFraming(float& yaw, float& pitch, float& roll, float& horizontal, float& vertical, float& zoom) {
+	std::lock_guard lock(mvFixedFramingMutex);
+	const auto& framing = mvSplitStates[SplitFocusPortrait].framing[0];
+	yaw = framing.yaw; pitch = framing.pitch; roll = framing.roll;
+	horizontal = framing.horizontal; vertical = framing.vertical; zoom = framing.zoom;
+}
+void SetMvNormalFocusFraming(float yaw, float pitch, float roll, float horizontal, float vertical, float zoom) {
+	std::lock_guard lock(mvFixedFramingMutex);
+	mvSplitStates[SplitFocusPortrait].framing[0] = {BoundFraming(yaw, 180.0f), BoundFraming(pitch, 180.0f),
+		BoundFraming(roll, 180.0f), BoundFraming(horizontal, 3.0f), BoundFraming(vertical, 3.0f), BoundFraming(zoom, 3.0f)};
+}
+void ResetMvNormalFocusFraming() { SetMvNormalFocusFraming(0, 0, 0, 0, 0, 0); }
+bool GetMvNormalFocusWindow() { return mvNormalFocusWindowEnabled.load(std::memory_order_relaxed); }
+void SetMvNormalFocusWindow(bool enabled) {
+	const bool previous = mvNormalFocusWindowEnabled.exchange(enabled, std::memory_order_relaxed);
+	if (enabled && !previous) {
+		mvSavedPreviewA.store(GetMvSplitPreviewPane(0), std::memory_order_relaxed);
+		mvSavedPreviewB.store(GetMvSplitPreviewPane(1), std::memory_order_relaxed);
+		mvNormalPreviewSnapshot.store(true, std::memory_order_relaxed);
+		SetMvSplitPreviewPane(0, 0);
+		SetMvSplitPreviewPane(1, -1);
+	} else if (!enabled && previous && mvNormalPreviewSnapshot.exchange(false, std::memory_order_relaxed)) {
+		SetMvSplitPreviewPane(0, mvSavedPreviewA.load(std::memory_order_relaxed));
+		SetMvSplitPreviewPane(1, mvSavedPreviewB.load(std::memory_order_relaxed));
+	}
+}
+int GetMvNormalFocusActor() { return mvNormalFocusActor.load(std::memory_order_relaxed); }
+void SetMvNormalFocusActor(int actor) { mvNormalFocusActor.store(std::clamp(actor, 0, 15), std::memory_order_relaxed); }
 
 void GetMvFixedFramingForLayout(float& yaw, float& pitch, float& roll, float& horizontal, float& vertical, float& zoom, int panel, int layout) {
 	std::lock_guard lock(mvFixedFramingMutex);
@@ -3369,6 +3402,7 @@ namespace
 		int g_autoLiveModeOverride = -1;
 		int g_autoLiveSoloIndexOverride = -999;
 		int g_randomMvStartSong = 0, g_randomMvStartMode = 0;
+		std::atomic_bool g_randomMvForceAutoCamera{false};
 		ULONGLONG g_randomMvStartUntil = 0;
 	int g_lastSoloIsSortIdols = 0;
 	int g_soloPositionLogCalls = 0;
@@ -9687,6 +9721,12 @@ namespace
 			HOOK_ORIG_TYPE ModernSetup_orig;
 			void ModernSetup_hook(void* self, bool portrait, const MethodInfo* method) {
 				HOOK_CAST_CALL(void, ModernSetup)(self, portrait, method);
+				if (g_randomMvForceAutoCamera.load(std::memory_order_relaxed)) {
+					int normal = static_cast<int>(CameraMode::Normal);
+					OutfitCall(self, "set_Mode", {reinterpret_cast<Il2CppObject*>(&normal)});
+					Log(std::format("[mv-random] set automatic camera mode={} for random queue",
+						OutfitNumber(self, "get_Mode")));
+				}
 				modernOwner.Register(self);
 			}
 
@@ -9767,8 +9807,12 @@ namespace
 			using GroupList = std::vector<std::tuple<int, std::string, NamedEntries>>;
 			std::shared_ptr<const GroupList> songGroups, idolGroups;
 			std::vector<int> chosenSongs, chosenIdols;
+			struct SavedOutfit { int owner = 0, setId = 0, costumeId = 0; std::string name; };
+			std::vector<SavedOutfit> savedOutfits;
 			std::atomic_bool readToolData{false};
-			int randomMode = 0, partsFilter = 0, requestedCount = 3, requestedInterval = 5;
+			int songKinds = 7, songPolicy = 0, requestedCount = 3, requestedInterval = 5;
+			int randomOutfitMode = 0, randomHairMode = 0;
+			bool preferSongOutfit = false;
 			int pendingSong = 0, pendingMode = 0;
 			std::vector<int> pendingActors;
 			ULONGLONG pendingUntil = 0;
@@ -9911,6 +9955,8 @@ namespace
 				}
 			};
 
+			int CostumeId(void* outfit);
+
 			Sets GetSets(void* model, void* wardrobe = nullptr) {
 				const auto rows = OutfitList(CenterCutSceneTableRows(TryMasterData(), "CostumeSets"));
 				for (void* holder : {model, wardrobe}) {
@@ -9923,6 +9969,31 @@ namespace
 					}
 				}
 				return {};
+			}
+
+			Il2CppObject* CloneSet(Il2CppObject* source) {
+				if (!source) return nullptr;
+				auto* klass = (Il2CppClass*)ViewDiag::find_class_anywhere("PRISM.Domain", "CostumeSetData");
+				auto* copy = klass ? (Il2CppObject*)il2cpp_object_new(klass) : nullptr;
+				if (!copy) return nullptr;
+				OutfitCall(copy, ".ctor");
+				OutfitCall(copy, "CopyFrom", {source});
+				return CostumeId(copy) == CostumeId(source) ? copy : nullptr;
+			}
+
+			Il2CppObject* OriginalForActor(void* master, int song, int actor, const Sets& sets) {
+				const auto rows = OutfitList(CenterCutSceneTableRows(master, "CostumeSets"));
+				int bestPriority = 0, bestId = 0;
+				for (int i = 0; i < rows.count; ++i) {
+					auto* row = il2cpp_symbols::array_get_value(rows.data, i);
+					const int priority = OriginalOutfitPriority(row, song);
+					if (priority <= bestPriority) continue;
+					auto* costume = OutfitCall(row, "get_Costume");
+					if (OutfitNumber(costume, "get_MstCharacterInfoId") != actor) continue;
+					bestPriority = priority;
+					bestId = OutfitNumber(row, "get_Id");
+				}
+				return sets.Get(bestId);
 			}
 
 			bool CanBorrow(void* costume, int actor, const std::string& family) {
@@ -9974,6 +10045,58 @@ namespace
 					outfitSources[2] = DescribeOutfit(TryMasterData(), savedActor, costumeId);
 				}
 				SetStatus("已保存当前预览服装。");
+			}
+
+			void AddPreviewOutfit() {
+				auto* wardrobe = Target(previewHandle);
+				auto* preview = OutfitCall(wardrobe, "get_PreviewCostumeSet");
+				const int actor = RunwayDump::ReadInt(wardrobe, "CharacterId");
+				const int setId = OutfitNumber(preview, "get_Id");
+				const int costumeId = CostumeId(preview);
+				if (actor <= 0 || setId <= 0 || costumeId <= 0) {
+					SetStatus("请在服装预览中先选好一套衣装，再加入随机表。");
+					return;
+				}
+				const auto name = DescribeOutfit(TryMasterData(), actor, costumeId);
+				{
+					std::lock_guard lock(queueMutex);
+					if (std::none_of(savedOutfits.begin(), savedOutfits.end(), [&](const auto& row) { return row.setId == setId; }))
+						savedOutfits.push_back({actor, setId, costumeId, name});
+				}
+				SetStatus(std::format("已加入随机衣装表：{}", name));
+			}
+
+			void SaveRandomOutfits() {
+				std::vector<SavedOutfit> rows;
+				{ std::lock_guard lock(queueMutex); rows = savedOutfits; }
+				std::ofstream output("mv-random-outfits.txt", std::ios::binary | std::ios::trunc);
+				if (!output) { SetStatus("无法写入 mv-random-outfits.txt。"); return; }
+				output << "# actor\tsetId\tcostumeId\tname\n";
+				for (const auto& row : rows) output << row.owner << '\t' << row.setId << '\t' << row.costumeId << '\t' << row.name << '\n';
+				SetStatus(std::format("随机衣装表已保存（{} 套）。", rows.size()));
+			}
+
+			void LoadRandomOutfits() {
+				std::ifstream input("mv-random-outfits.txt", std::ios::binary);
+				if (!input) { SetStatus("找不到 mv-random-outfits.txt。"); return; }
+				std::vector<SavedOutfit> rows;
+				std::string line;
+				while (std::getline(input, line)) {
+					if (line.empty() || line[0] == '#') continue;
+					std::istringstream fields(line);
+					SavedOutfit row;
+					if (!(fields >> row.owner >> row.setId >> row.costumeId)) continue;
+					std::getline(fields, row.name);
+					if (!row.name.empty() && row.name.front() == '\t') row.name.erase(0, 1);
+					if (row.owner > 0 && row.setId > 0 && row.costumeId > 0) rows.push_back(std::move(row));
+				}
+				{ std::lock_guard lock(queueMutex); savedOutfits = std::move(rows); }
+				SetStatus(std::format("已从 mv-random-outfits.txt 导入 {} 套衣装。", savedOutfits.size()));
+			}
+
+			void RemoveRandomOutfit(int index) {
+				std::lock_guard lock(queueMutex);
+				if (index >= 0 && index < static_cast<int>(savedOutfits.size())) savedOutfits.erase(savedOutfits.begin() + index);
 			}
 
 			void GroupDress(int flags) {
@@ -10054,7 +10177,15 @@ namespace
 				SetStatus(std::format("已给 {} / {} 个其他 MV 站位应用服装。", changed, targetCount));
 			}
 
-			int SongGroup(void* song) { return std::max(0, OutfitNumber(song, "get_MstUnitId")); }
+			int SongGroup(void* song, const std::unordered_map<int, std::string>& unitNames) {
+				const int unit = std::max(0, OutfitNumber(song, "get_MstUnitId"));
+				if (unit == 0) return 0;
+				if (const auto it = unitNames.find(unit); it != unitNames.end() &&
+					(it->second.find("Pj:") != std::string::npos || it->second.find("Pj：") != std::string::npos ||
+					 it->second.find("pefrac") != std::string::npos || it->second.find("PeFrac") != std::string::npos)) return 1;
+				if (Flag(song, "get_IsSongPartsSolo")) return 2;
+				return 3;
+			}
 
 			int IdolGroup(void* idol, int actor) {
 				const int unit = OutfitNumber(idol, "get_MstUnitId");
@@ -10085,10 +10216,13 @@ namespace
 				}
 				if (labels.empty()) return;
 				const auto groupName = [&](int id, bool song) -> std::string {
+					if (song) {
+						static constexpr const char* categories[]{"全员曲", "Pj：pefrac7ions", "solo", "other"};
+						return categories[std::clamp(id, 0, 3)];
+					}
 					if (const auto it = labels.find(id); it != labels.end()) return it->second;
-					if (song && id == 0) return "全体曲・跨组合";
 					if (!song && id == -1) return "联动偶像";
-					return song ? "其他歌曲" : "其他偶像";
+					return "其他偶像";
 				};
 				std::map<int, NamedEntries> perGroupSongs, perGroupIdols;
 				const auto music = MusicCatalog(model);
@@ -10100,7 +10234,7 @@ namespace
 					auto name = String(row, "get_Name");
 					if (name.empty()) name = String(row, "get_ReadName");
 					if (name.empty()) return;
-					perGroupSongs[SongGroup(row)].emplace_back(id, std::move(name));
+					perGroupSongs[SongGroup(row, labels)].emplace_back(id, std::move(name));
 					includedSongs.insert(id);
 				};
 				if (music.empty() && master != lastMaster) {
@@ -10202,7 +10336,11 @@ namespace
 				Il2CppObject* music;
 				int id;
 				int mode;
+				int seats;
+				bool hasParts;
+				bool is2D;
 				std::vector<int> singers;
+				std::vector<int> roster;
 			};
 
 			void ResetPlaylist() {
@@ -10214,6 +10352,7 @@ namespace
 				playingOverlay = nullptr;
 				waitingForOverlay = false;
 				g_randomMvStartSong = 0;
+				g_randomMvForceAutoCamera.store(false, std::memory_order_relaxed);
 			}
 
 			void OpenNextFormation() {
@@ -10242,10 +10381,10 @@ namespace
 
 			void ChooseRandomMv() {
 				std::vector<int> songIds, selectedIdols;
-				int mode, filter, count, gap;
+				int kinds, policy, count, gap;
 				{
 					std::lock_guard lock(queueMutex);
-					songIds = chosenSongs; selectedIdols = chosenIdols; mode = randomMode; filter = partsFilter;
+					songIds = chosenSongs; selectedIdols = chosenIdols; kinds = songKinds; policy = songPolicy;
 					count = requestedCount; gap = requestedInterval;
 				}
 				if (count < 1 || count > 300 || gap < 0 || gap > 3600) {
@@ -10276,19 +10415,35 @@ namespace
 				}
 				std::vector<SongChoice> candidates;
 				std::unordered_set<int> seen;
+				const auto characterRows = OutfitList(CenterCutSceneTableRows(TryMasterData(), "CharacterInfos"));
 				for (auto* music : musicList) {
 					auto* master = OutfitCall(music, "get_Master");
 					const int id = OutfitNumber(master, "get_Id");
 					if (id <= 0 || !isSelected(songIds, id) || seen.contains(id)) continue;
 					const int seats = OutfitNumber(music, "get_UnitSize");
-					if (seats <= 0 ||
-						(!Flag(master, "get_Is3D") && !Flag(master, "get_Is2D") && String(master, "get_MvScene").empty())) continue;
+					const bool is2D = Flag(master, "get_Is2D");
+					const bool hasParts = !is2D && Flag(master, "get_IsSongParts");
+					const bool is3D = Flag(master, "get_Is3D") || !String(master, "get_MvScene").empty();
+					if (is2D ? !(kinds & 4) : hasParts ? !(kinds & 1) : !(kinds & 2)) continue;
+					if (!is2D && !is3D) continue;
+					if (seats <= 0 && !is2D) continue;
 					std::vector<int> singers;
 					for (int actor : actorIds) if (HasVoice(music, id, actor)) singers.push_back(actor);
-					if ((mode == 2 || filter == 1) && singers.empty()) continue;
-					if (filter == 2 && !singers.empty()) continue;
-					const int playMode = mode == 2 ? 2 : mode == 0 && static_cast<int>(singers.size()) >= seats ? 1 : 0;
-					candidates.push_back({music, id, playMode, std::move(singers)});
+					std::vector<int> roster;
+					if (!hasParts && !is2D) {
+						const int unit = OutfitNumber(master, "get_MstUnitId");
+						for (int i = 0; i < characterRows.count; ++i) {
+							auto* row = il2cpp_symbols::array_get_value(characterRows.data, i);
+							const int actor = OutfitNumber(row, "get_Id");
+							if (OutfitNumber(row, "get_MstUnitId") == unit && isSelected(actorIds, actor)) roster.push_back(actor);
+						}
+						if (!policy && static_cast<int>(roster.size()) != seats) continue;
+						if (roster.empty() && !policy) continue;
+					}
+					if (hasParts && singers.empty() && !policy) continue;
+					const int playMode = hasParts ? (static_cast<int>(singers.size()) >= seats ? 1 : 2) : 0;
+					candidates.push_back({music, id, playMode, std::max(1, seats), hasParts, is2D,
+						std::move(singers), std::move(roster)});
 					seen.insert(id);
 				}
 				if (static_cast<int>(candidates.size()) < count) {
@@ -10301,13 +10456,18 @@ namespace
 				std::shuffle(candidates.begin(), candidates.end(), random);
 				for (int i = 0; i < count; ++i) {
 					const auto& choice = candidates[i];
-					auto lineup = choice.mode == 1 ? choice.singers : actorIds;
+					auto lineup = choice.hasParts && choice.mode == 1 ? choice.singers :
+						(!choice.hasParts && !choice.is2D && policy == 0 ? choice.roster : actorIds);
 					std::shuffle(lineup.begin(), lineup.end(), random);
-					if ((mode == 2 || filter == 1) && !choice.singers.empty()) {
+					if (choice.hasParts && choice.mode == 1 && static_cast<int>(lineup.size()) > choice.seats)
+						lineup.resize(choice.seats);
+					if (choice.hasParts && choice.mode == 2 && !choice.singers.empty()) {
 						const int singer = choice.singers[std::uniform_int_distribution<size_t>(0, choice.singers.size() - 1)(random)];
 						const auto pos = std::find(lineup.begin(), lineup.end(), singer);
-						if (pos != lineup.end()) std::rotate(lineup.begin(), pos, pos + 1);
+						if (pos == lineup.end()) lineup.insert(lineup.begin(), singer);
+						else std::rotate(lineup.begin(), pos, pos + 1);
 					}
+					if (lineup.empty()) lineup = actorIds;
 					playlist.push_back({il2cpp_gchandle_new(choice.music, false), choice.id, choice.mode,
 						String(OutfitCall(choice.music, "get_Master"), "get_Name"), std::move(lineup)});
 				}
@@ -10360,15 +10520,59 @@ namespace
 					SetStatus("The random formation could not be prepared.");
 					return;
 				}
+				int outfitMode = 0, hairMode = 0;
+				bool preferSong = false;
+				std::vector<SavedOutfit> outfitPool;
+				{ std::lock_guard lock(queueMutex); outfitMode = randomOutfitMode; hairMode = randomHairMode;
+					preferSong = preferSongOutfit; outfitPool = savedOutfits; }
+				static std::mt19937 outfitRandom(std::random_device{}());
+				int sharedOutfit = -1;
 				std::vector<Il2CppObject*> lineup;
 				for (int i = 0; i < idols.count; ++i) {
 					bool owned = true;
 					int actor = pendingActors[i % pendingActors.size()];
-					auto* outfit = sets.Default(actor);
+					auto* original = preferSong ? OriginalForActor(TryMasterData(), pendingSong, actor, sets) : nullptr;
+					auto* baseOutfit = sets.Default(actor);
+					if (!baseOutfit && IsCollaborationWardrobeActor(actor) && !outfitPool.empty())
+						baseOutfit = sets.Get(outfitPool.front().setId);
+					if (!baseOutfit) baseOutfit = OutfitCall(il2cpp_symbols::array_get_value(idols.data, i), "get_CostumeSet");
+					auto* outfit = CloneSet(static_cast<Il2CppObject*>(baseOutfit));
 					if (!outfit) {
 						ResetPlaylist();
-						SetStatus(std::format("无法读取 {} 的默认 MV 服装。", IdolName(TryMasterData(), actor)));
+						SetStatus(std::format("无法准备 {} 的 MV 服装。", IdolName(TryMasterData(), actor)));
 						return;
+					}
+					bool appliedSong = false;
+					if (original && OutfitNumber(OutfitCall(original, "get_Costume"), "get_MstCharacterInfoId") == actor) {
+						OutfitCall(outfit, "CopyFrom", {original});
+						appliedSong = OutfitNumber(OutfitCall(outfit, "get_Costume"), "get_MstCharacterInfoId") == actor;
+					}
+					if (!appliedSong && !outfitPool.empty()) {
+						int pick = 0;
+						if (outfitMode == 0 || sharedOutfit < 0) {
+						pick = std::uniform_int_distribution<int>(0, static_cast<int>(outfitPool.size()) - 1)(outfitRandom);
+						if (outfitMode != 0) sharedOutfit = pick;
+						else if (i == 0) sharedOutfit = pick;
+						else if (outfitMode == 1) pick = sharedOutfit;
+					} else pick = sharedOutfit;
+						const auto& saved = outfitPool[std::clamp(pick, 0, static_cast<int>(outfitPool.size()) - 1)];
+						auto* savedSet = sets.Get(saved.setId);
+						auto* sourceCostume = OutfitCall(savedSet, "get_Costume");
+						if (OutfitNumber(sourceCostume, "get_MstCostumeId") != saved.costumeId)
+							sourceCostume = FindWardrobeMasterRow(CenterCutSceneTableRows(TryMasterData(), "Costumes"), saved.costumeId);
+						const auto family = Family(String(sourceCostume, "get_Name"));
+						auto* own = family.empty() ? nullptr : sets.Match(actor, family, sourceCostume);
+						auto* defaultSet = sets.Default(actor);
+						if (hairMode == 0 && own) OutfitCall(outfit, "CopyFrom", {own});
+						else if (hairMode == 1 && defaultSet) OutfitCall(outfit, "CopyFrom", {defaultSet});
+						else if (hairMode == 0 && saved.owner == actor && savedSet) OutfitCall(outfit, "CopyFrom", {savedSet});
+						Il2CppObject* costume = sourceCostume;
+						if (outfitMode == 2 && own) costume = OutfitCall(own, "get_Costume");
+						if (costume) OutfitCall(outfit, "set_Costume", {costume});
+						if (hairMode == 1 && !defaultSet) {
+							auto* hair = sets.DefaultHairstyle(TryMasterData(), actor);
+							if (hair) OutfitCall(outfit, "set_Hairstyle", {hair});
+						}
 					}
 					auto* member = (Il2CppObject*)il2cpp_object_new(klass);
 					if (!member) return;
@@ -10385,6 +10589,7 @@ namespace
 				RefreshFormation(model, unit, presenter);
 				g_randomMvStartMode = pendingMode;
 				g_randomMvStartSong = pendingSong;
+				g_randomMvForceAutoCamera.store(true, std::memory_order_relaxed);
 				g_randomMvStartUntil = GetTickCount64() + 8000;
 				pendingSong = 0;
 				waitingForOverlay = true;
@@ -10400,6 +10605,11 @@ namespace
 					if (cmd == 1) ReadPreview();
 					else if (cmd == 2) ChooseRandomMv();
 					else if (cmd == 3) { ResetPlaylist(); SetStatus("Random MV queue stopped."); }
+					else if (cmd == 4) AddPreviewOutfit();
+					else if (cmd == 5) SaveRandomOutfits();
+					else if (cmd == 6) LoadRandomOutfits();
+					else if (cmd == 7) { { std::lock_guard lock(queueMutex); savedOutfits.clear(); } SetStatus("已清空随机衣装表。"); }
+					else if (cmd >= 2000) RemoveRandomOutfit(cmd - 2000);
 					else if (cmd >= 16) GroupDress(cmd - 16);
 					if (nextAt && GetTickCount64() >= nextAt) OpenNextFormation();
 					if (waitingForOverlay && GetTickCount64() >= overlayDeadline) {
@@ -10964,6 +11174,9 @@ namespace
 					const float inset = std::min(0.24f / aspect, 0.26f) * widthScale;
 					panes[0] = {{0, 0}, {1, 1}, {}, {}};
 					panes[1] = {{0.035f, 0.94f - (0.94f - 0.57f) * heightScale}, {0.035f + inset, 0.94f}, {}, {}};
+				} else if (layout == SplitFocusPortrait) {
+					const float width = std::min(1.0f, 0.5625f / std::max(0.01f, aspect));
+					panes[0] = {{0, 0}, {width, 1}, {}, {}};
 				} else {
 					for (int i = 0; i < count; ++i)
 						panes[i] = {{static_cast<float>(i) / count, 0}, {static_cast<float>(i + 1) / count, 1}, {}, {}};
@@ -11031,7 +11244,7 @@ namespace
 					return OutfitCall(canvas, "get_transform");
 				}
 
-				bool Create(void* camera, int w, int h, int selectedLayout) {
+				bool Create(void* camera, int w, int h, int selectedLayout, bool showOverlay = true) {
 					auto* view = portraitMask.View();
 					void* left = RunwayDump::ReadPtr(view, "leftBox");
 					void* right = RunwayDump::ReadPtr(view, "rightBox");
@@ -11055,9 +11268,9 @@ namespace
 						if (!panels[i].Create(camera, parent, i, pane, paneWidth, paneHeight)) return false;
 					}
 					portraitMask.Restore();
-					SetOverlayVisible(true);
+					SetOverlayVisible(showOverlay);
 					if (auto* canvas = fallbackCanvas.Get(); Alive(canvas)) WriteValue(canvas, "SetActive", true);
-					for (int i = 0; i < count; ++i) panels[i].SetOutput(true, true);
+					for (int i = 0; i < count; ++i) panels[i].SetOutput(true, showOverlay);
 					source = camera;
 					width = w;
 					height = h;
@@ -11161,13 +11374,15 @@ namespace
 			}
 
 			bool Update(void* camera, void* owner, CameraPath source, CameraMode mode) {
-				if (!installed || !GetMvSplitEnabled() || mode != CameraMode::Fixed || !camera || !owner ||
+				const bool normalFocus = mode == CameraMode::Normal && GetMvNormalFocusWindow();
+				const bool fixedSplit = mode == CameraMode::Fixed && GetMvSplitEnabled();
+				if (!installed || (!fixedSplit && !normalFocus) || !camera || !owner ||
 					!portraitMask.viewHandle || g_enable_free_camera) {
 					if (renderer.source || failedSource) Stop();
 					return false;
 				}
 				const int frame = ReadStaticInt(engine.frameCount);
-				if (lastFrame == frame && renderer.source == camera) return true;
+				if (lastFrame == frame && renderer.source == camera) return !normalFocus;
 				lastFrame = frame;
 				const auto actors = Actors(owner, source);
 				const int count = std::clamp(actors.count, 0, maxActors);
@@ -11183,14 +11398,15 @@ namespace
 					return false;
 				}
 				mvSplitActorCount.store(count, std::memory_order_relaxed);
-				const int layout = ResolveSplitLayout(), paneCount = splitLayouts[layout].count;
+				const int layout = normalFocus ? SplitFocusPortrait : ResolveSplitLayout();
+				const int paneCount = splitLayouts[layout].count;
 				if (failedSource == camera && failedLayout == layout) return false;
 				const int w = ReadStaticInt(engine.width), h = ReadStaticInt(engine.height);
 				if (w < paneCount || h < 1) return false;
 				if (renderer.source != camera || renderer.width != w || renderer.height != h || renderer.layout != layout) {
 					if (renderer.source) renderer.Release();
 					FramingInput::previous = {};
-					if (!renderer.Create(camera, w, h, layout)) {
+					if (!renderer.Create(camera, w, h, layout, !normalFocus)) {
 						renderer.Release();
 						CloseSplitPreviews();
 						failedSource = camera;
@@ -11204,22 +11420,22 @@ namespace
 						renderer.fallbackCanvas.Get() ? "fallback" : "live"));
 				}
 				renderer.owner = owner;
-				FramingInput::Poll(camera, source, mode, GetMvSplitPanelForLayout(layout));
+				if (!normalFocus) FramingInput::Poll(camera, source, mode, GetMvSplitPanelForLayout(layout));
 				const unsigned detachedPanels = UpdateSplitPreviews(renderer.panels, paneCount, frame);
-				const bool showOverlay = detachedPanels == 0;
+				const bool showOverlay = !normalFocus && detachedPanels == 0;
 				if (showOverlay != renderer.overlayVisible) {
 					renderer.SetOverlayVisible(showOverlay);
 					Log(showOverlay ? "[mv-split] restored the in-game split overlay" : "[mv-split] detached output uses the native main window camera");
 				}
 				for (int i = 0; i < paneCount; ++i) {
-					const bool render = showOverlay || (detachedPanels & (1u << i)) != 0;
+					const bool render = normalFocus ? (detachedPanels & 1u) != 0 : showOverlay || (detachedPanels & (1u << i)) != 0;
 					renderer.panels[i].SetOutput(render, showOverlay);
 					if (!render) continue;
-					const int requestedActor = GetMvSplitActorForLayout(i, layout);
+					const int requestedActor = normalFocus ? GetMvNormalFocusActor() : GetMvSplitActorForLayout(i, layout);
 					const int actor = requestedActor >= 0 && requestedActor < count && found[requestedActor] ? requestedActor : first;
 					FramePanel(i, layout == SplitPictureInPicture && i == 1 ? legs[actor] : centers[actor]);
 				}
-				return true;
+				return !normalFocus;
 			}
 
 			void* controlsView = nullptr;
@@ -15676,15 +15892,29 @@ void RequestMvFormationTool(int action) {
 	SoloUnlock::MvTools::request.store(action);
 }
 
-void RequestRandomMv(std::vector<int> songs, std::vector<int> actors, int mode, int parts, int count, int interval) {
+void RequestRandomMv(std::vector<int> songs, std::vector<int> actors, int kinds, int policy,
+	int count, int interval, bool preferSongOutfit, int outfitMode, int hairMode) {
 	std::lock_guard lock(SoloUnlock::MvTools::queueMutex);
 	SoloUnlock::MvTools::chosenSongs = std::move(songs);
 	SoloUnlock::MvTools::chosenIdols = std::move(actors);
-	SoloUnlock::MvTools::randomMode = mode;
-	SoloUnlock::MvTools::partsFilter = parts;
+	SoloUnlock::MvTools::songKinds = kinds;
+	SoloUnlock::MvTools::songPolicy = policy;
 	SoloUnlock::MvTools::requestedCount = count;
 	SoloUnlock::MvTools::requestedInterval = interval;
+	SoloUnlock::MvTools::preferSongOutfit = preferSongOutfit;
+	SoloUnlock::MvTools::randomOutfitMode = outfitMode;
+	SoloUnlock::MvTools::randomHairMode = hairMode;
 	SoloUnlock::MvTools::request.store(2);
+}
+
+void RequestMvOutfitTable(int action) { SoloUnlock::MvTools::request.store(action); }
+
+std::vector<std::pair<int, std::string>> GetMvSavedOutfits() {
+	std::vector<std::pair<int, std::string>> result;
+	std::lock_guard lock(SoloUnlock::MvTools::queueMutex);
+	for (int i = 0; i < static_cast<int>(SoloUnlock::MvTools::savedOutfits.size()); ++i)
+		result.emplace_back(i, SoloUnlock::MvTools::savedOutfits[i].name);
+	return result;
 }
 
 std::array<std::string, 3> GetMvOutfitSources() {
