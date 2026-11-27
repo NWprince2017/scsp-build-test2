@@ -5,6 +5,7 @@
 #include <mutex>
 #include <array>
 #include <atomic>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 #include <random>
@@ -8623,10 +8624,8 @@ namespace
 				{78,"mami"}, {79,"ami"}, {80,"azusa"}, {81,"ritsuko"}, {83,"iori"}, {84,"yayoi"},
 				{85,"miki"}, {86,"chihaya"}, {87,"takane"}, {88,"makoto"}, {89,"haruka"},
 			};
-			const MethodInfo* loadAcbFile = nullptr;
-			const MethodInfo* soundInstance = nullptr;
+			const MethodInfo* loadLocalCache = nullptr;
 			Il2CppClass* cacheClass = nullptr;
-			FieldInfo* cacheRefCount = nullptr;
 			HOOK_ORIG_TYPE loadCueSheetOriginal;
 			HOOK_ORIG_TYPE loadAndGetOriginal;
 			HOOK_ORIG_TYPE initializeVocalsOriginal;
@@ -8635,11 +8634,6 @@ namespace
 			HOOK_ORIG_TYPE candidateAllOriginal;
 			HOOK_ORIG_TYPE validCueOriginal;
 			HOOK_ORIG_TYPE partsIdsOriginal;
-			HOOK_ORIG_TYPE acbOriginal;
-			HOOK_ORIG_TYPE criAcbOriginal;
-			unsigned loadResultSize = 0;
-			unsigned successOffset = 0;
-			unsigned cacheOffset = 0;
 			std::unordered_set<int> installedRoles;
 
 			std::string CueName(int actor, std::string_view role) {
@@ -8695,77 +8689,49 @@ namespace
 				return nullptr;
 			}
 
-			Il2CppObject* GetCache(void* sound, Il2CppString* label, bool acquire) {
+			void PrimeLocalBank(void* sound, Il2CppString* label) {
+				if (installedRoles.empty() || !sound || !label) return;
 				const auto name = CueBasename(label);
 				const auto* role = RoleForCue(name);
-				if (!role || !sound) return nullptr;
+				if (!role) return;
 				auto* cache = RunwayDump::ReadPtr(sound, "atomCache");
-				if (!cache) return nullptr;
+				if (!cache) return;
 
 				auto* key = reinterpret_cast<Il2CppObject*>(label);
 				Il2CppObject* item = nullptr;
 				OutfitCall(cache, "TryGetValue", {key, reinterpret_cast<Il2CppObject*>(&item)});
-				if (!OutfitCall(item, "get_Handle")) {
-					const auto path = CuePath(CueName(role->first, role->second));
-					std::error_code ec;
-					if (!std::filesystem::is_regular_file(path, ec)) return nullptr;
-					auto* file = reinterpret_cast<Il2CppObject*>(il2cpp_symbols::NewWStr(path.wstring()));
-					auto* empty = reinterpret_cast<Il2CppObject*>(il2cpp_string_new(""));
-					Il2CppObject* error = nullptr;
-					Il2CppObject* args[]{nullptr, file, empty};
-					auto* acb = reflection::InvokeInTry(loadAcbFile, nullptr, args, &error, "Load local Spread voice");
-					auto* available = OutfitCall(acb, "get_isAvailable");
-					if (error || !available || !available->unbox_value<bool>()) {
-						OutfitCall(acb, "Dispose");
-						Log(std::format("[extra-mv-vocals] CRI failed to load {} actor={}", name, role->first));
-						return nullptr;
-					}
+				if (OutfitCall(item, "get_Handle")) return;
+				const auto path = CuePath(CueName(role->first, role->second));
+				std::error_code ec;
+				if (!std::filesystem::is_regular_file(path, ec)) return;
+				if (!item) {
 					item = (Il2CppObject*)il2cpp_object_new(cacheClass);
-					if (!item) { OutfitCall(acb, "Dispose"); return nullptr; }
+					if (!item) return;
 					OutfitCall(item, ".ctor", {key});
-					OutfitCall(item, "set_AcbPath", {file});
-					OutfitCall(item, "set_AwbPath", {empty});
-					OutfitCall(item, "set_Handle", {acb});
-					bool loaded = true;
-					OutfitCall(item, "set_Loaded", {reinterpret_cast<Il2CppObject*>(&loaded)});
-					OutfitCall(cache, "set_Item", {key, item});
-					Il2CppObject* stored = nullptr;
-					OutfitCall(cache, "TryGetValue", {key, reinterpret_cast<Il2CppObject*>(&stored)});
-					if (stored != item) {
-						OutfitCall(acb, "Dispose");
-						return nullptr;
-					}
-					Log(std::format("[extra-mv-vocals] native cache {} actor={}", name, role->first));
 				}
-				if (acquire) {
-					int references = std::max(0, il2cpp_symbols::read_field<int>(item, cacheRefCount)) + 1;
-					il2cpp_field_set_value(item, cacheRefCount, &references);
+				auto* file = reinterpret_cast<Il2CppObject*>(il2cpp_symbols::NewWStr(path.wstring()));
+				Il2CppObject* error = nullptr;
+				Il2CppObject* args[]{file, nullptr};
+				reflection::InvokeInTry(loadLocalCache, item, args, &error, "Load local Spread voice");
+				if (error || !OutfitCall(item, "get_Handle")) {
+					Log(std::format("[extra-mv-vocals] CRI failed to load {} actor={}", name, role->first));
+					return;
 				}
-				return item;
+				OutfitCall(cache, "set_Item", {key, item});
+				Log(std::format("[extra-mv-vocals] native cache {} actor={}", name, role->first));
 			}
 
 			void* LoadCueSheet(void* result, void* self, Il2CppString* label, uintptr_t ct, const MethodInfo* method) {
-				if (GetCache(self, label, true)) {
-					std::memset(result, 0, 16);
-					return result;
-				}
+				PrimeLocalBank(self, label);
 				return reinterpret_cast<void*(*)(void*, void*, Il2CppString*, uintptr_t, const MethodInfo*)>(
 					loadCueSheetOriginal)(result, self, label, ct, method);
 			}
 
 			void* LoadAndGet(void* result, void* self, Il2CppString* label, uintptr_t ct, const MethodInfo* method) {
-				if (auto* item = GetCache(self, label, true)) {
-					std::memset(result, 0, loadResultSize);
-					static_cast<char*>(result)[successOffset] = 1;
-					std::memcpy(static_cast<char*>(result) + cacheOffset, &item, sizeof(item));
-					return result;
-				}
+				// A populated cache lets the native task retain and return its own CriAtomCache.
+				PrimeLocalBank(self, label);
 				return reinterpret_cast<void*(*)(void*, void*, Il2CppString*, uintptr_t, const MethodInfo*)>(
 					loadAndGetOriginal)(result, self, label, ct, method);
-			}
-
-			Il2CppObject* SoundInstance() {
-				return soundInstance ? soundInstance->Invoke<Il2CppObject*>(nullptr, {}) : nullptr;
 			}
 
 			void* InitializeVocals(void* result, void* self, Il2CppString* music, void* characters,
@@ -8789,9 +8755,7 @@ namespace
 									[actor](const auto& pair) { return pair.first == actor; });
 								if (role != std::end(roles) && installedRoles.contains(actor)) {
 									const auto canonical = CueName(actor, role->second);
-									const auto name = CueBasename(token);
-									token = il2cpp_string_new(name.starts_with(cuePrefix) ? canonical.c_str() :
-										canonical.c_str() + cuePrefix.size());
+									token = il2cpp_string_new(canonical.c_str() + cuePrefix.size());
 								}
 								il2cpp_symbols::array_set_value(adjusted, token, i);
 								names += std::format(" [{}:{}=>{}]", actor, original, token ? token->ToUtf8String() : "");
@@ -8825,20 +8789,6 @@ namespace
 			bool CandidateAll(void* self, void* idol, const MethodInfo* method) {
 				return VoiceAvailable(self, OutfitNumber(idol, "get_CharacterId")) ||
 					reinterpret_cast<bool(*)(void*, void*, const MethodInfo*)>(candidateAllOriginal)(self, idol, method);
-			}
-
-			void* GetAcb(void* self, Il2CppString* label, const MethodInfo* method) {
-				if (auto* item = GetCache(self, label, false))
-					if (auto* acb = OutfitCall(item, "get_Handle")) return acb;
-				return reinterpret_cast<void*(*)(void*, Il2CppString*, const MethodInfo*)>(acbOriginal)(self, label, method);
-			}
-
-			void* GetCriAcb(Il2CppString* label, const MethodInfo* method) {
-				if (RoleForCue(CueBasename(label))) {
-					if (auto* item = GetCache(SoundInstance(), label, false))
-						if (auto* acb = OutfitCall(item, "get_Handle")) return acb;
-				}
-				return reinterpret_cast<void*(*)(Il2CppString*, const MethodInfo*)>(criAcbOriginal)(label, method);
 			}
 
 			bool ValidCue(void* self, Il2CppString* label, const MethodInfo* method) {
@@ -8909,10 +8859,9 @@ namespace
 
 			void Install() {
 				cacheClass = (Il2CppClass*)ViewDiag::find_class_anywhere("PRISM", "CriAtomCache");
-				cacheRefCount = FieldOf(cacheClass, "refCount");
-				loadAcbFile = Method("CriWare", "CriAtomExAcb", "LoadAcbFile", 3);
-				soundInstance = Method("PRISM", "SoundManager", "get_Instance", 0);
-				if (!cacheClass || !cacheRefCount || !loadAcbFile || !soundInstance) {
+				loadLocalCache = Method("PRISM", "CriAtomCache", "_loadHandle", 2);
+				if (!cacheClass || !ParamIs(loadLocalCache, 0, "System.String") ||
+					!ParamIs(loadLocalCache, 1, "System.String")) {
 					Log("[extra-mv-vocals] native CRI cache layout unavailable");
 					return;
 				}
@@ -8934,29 +8883,15 @@ namespace
 					valueSize && t && ParamIs(loadGet, 0, "System.String") &&
 					ParamIs(loadGet, 1, "System.Threading.CancellationToken")) {
 					const char* type = il2cpp_type_get_name(loadGet->return_type);
-					const auto* result = FieldOf(t, "result");
-					auto* tuple = result && result->type ? il2cpp_type_get_class_or_element_class(result->type) : nullptr;
-					const auto* ok = FieldOf(tuple, "Item1");
-					const auto* item = FieldOf(tuple, "Item2");
 					const int size = valueSize((Il2CppClass*)t, &alignment);
-					if (type && strstr(type, "UniTask") && strstr(type, "ValueTuple") && result && ok && item &&
-						result->offset >= 16 && ok->offset >= 16 && item->offset >= 16 &&
-						size >= 16 && size <= 40 &&
-						il2cpp_type_get_class_or_element_class(item->type) == cacheClass) {
-						const unsigned success = result->offset + ok->offset - 32;
-						const unsigned object = result->offset + item->offset - 32;
-						if (success < static_cast<unsigned>(size) && object + sizeof(void*) <= static_cast<unsigned>(size)) {
-							loadResultSize = size;
-							successOffset = success;
-							cacheOffset = object;
-							getting = HookAt("SoundManager.LoadAndGetCueSheetAsync extra vocals", (void*)loadGet->methodPointer,
-								(void*)LoadAndGet, loadAndGetOriginal);
-						}
+					if (size > 8 && type && strstr(type, "UniTask") && strstr(type, "ValueTuple") &&
+						strstr(type, "CriAtomCache")) {
+						getting = HookAt("SoundManager.LoadAndGetCueSheetAsync extra vocals", (void*)loadGet->methodPointer,
+							(void*)LoadAndGet, loadAndGetOriginal);
 					}
-					Log(std::format("[extra-mv-vocals] native async result size={} success={} cache={} type={}",
-						size, successOffset, cacheOffset, type ? type : ""));
+					Log(std::format("[extra-mv-vocals] native async result size={} type={}", size, type ? type : ""));
 				}
-				if (loading && getting) {
+				if (getting) {
 					for (const auto& [actor, role] : roles)
 						if (std::filesystem::is_regular_file(CuePath(CueName(actor, role)))) installedRoles.insert(actor);
 				}
@@ -8977,13 +8912,6 @@ namespace
 					if (ids && ids->methodPointer)
 						HookAt("MusicData.GetLimitedVocalSeparatedCharacterIds extra vocals",
 							(void*)ids->methodPointer, (void*)PartsIds, partsIdsOriginal);
-					const auto* acb = Method("PRISM", "SoundManager", "GetUnsafeAcbHandle", 1);
-					if (ParamIs(acb, 0, "System.String"))
-						HookAt("SoundManager.GetUnsafeAcbHandle extra vocals",
-							(void*)acb->methodPointer, (void*)GetAcb, acbOriginal);
-					const auto* criAcb = Method("CriWare", "CriAtom", "GetAcb", 1);
-					if (ParamIs(criAcb, 0, "System.String"))
-						HookAt("CriAtom.GetAcb extra vocals", (void*)criAcb->methodPointer, (void*)GetCriAcb, criAcbOriginal);
 					const auto* init = Method("PRISM.RhythmGame", "VocalSeparatedController", "InitializeAsync", 5);
 					if (ParamIs(init, 0, "System.String") && ParamIs(init, 1, "System.String[]") &&
 						valueSize && valueSize((Il2CppClass*)il2cpp_type_get_class_or_element_class(init->return_type), &alignment) == 16)
@@ -9869,7 +9797,9 @@ namespace
 			std::string String(void* obj, const char* getter) {
 				auto* value = OutfitCall(obj, getter);
 				if (!value) return {};
-				const std::string_view type(RunwayDump::ClassNameOf(value));
+				const char* name = RunwayDump::ClassNameOf(value);
+				if (!name) return {};
+				const std::string_view type(name);
 				if (type == "String") return Il2CppStrOf(value);
 				if (type != "LocalizationKey") return {};
 				const auto* instance = ExtraSpreadVocals::Method("ENTERPRISE.Localization", "LocalizationManager", "get_Instance", 0);
@@ -10279,13 +10209,14 @@ namespace
 					auto* master = OutfitCall(music, "get_Master");
 					const int id = OutfitNumber(master, "get_Id");
 					if (id <= 0 || !isSelected(songUnits, SongGroup(master)) || seen.contains(id)) continue;
-					if (OutfitNumber(music, "get_UnitSize") <= 0 ||
+					const int seats = OutfitNumber(music, "get_UnitSize");
+					if (seats <= 0 ||
 						(!Flag(master, "get_Is3D") && !Flag(master, "get_Is2D") && String(master, "get_MvScene").empty())) continue;
 					std::vector<int> singers;
 					for (int actor : actorIds) if (HasVoice(music, id, actor)) singers.push_back(actor);
 					if ((mode == 2 || filter == 1) && singers.empty()) continue;
 					if (filter == 2 && !singers.empty()) continue;
-					const int playMode = mode == 2 ? 2 : (mode == 1 || singers.empty()) ? 0 : 1;
+					const int playMode = mode == 2 ? 2 : mode == 0 && static_cast<int>(singers.size()) >= seats ? 1 : 0;
 					candidates.push_back({music, id, playMode, std::move(singers)});
 					seen.insert(id);
 				}
@@ -10299,7 +10230,7 @@ namespace
 				std::shuffle(candidates.begin(), candidates.end(), random);
 				for (int i = 0; i < count; ++i) {
 					const auto& choice = candidates[i];
-					auto lineup = filter == 1 && mode != 2 ? choice.singers : actorIds;
+					auto lineup = choice.mode == 1 ? choice.singers : actorIds;
 					std::shuffle(lineup.begin(), lineup.end(), random);
 					if ((mode == 2 || filter == 1) && !choice.singers.empty()) {
 						const int singer = choice.singers[std::uniform_int_distribution<size_t>(0, choice.singers.size() - 1)(random)];
@@ -10345,6 +10276,8 @@ namespace
 				void* model = RunwayDump::ReadPtr(presenter, "model");
 				auto* music = OutfitCall(model, "get_MusicData");
 				if (OutfitNumber(OutfitCall(music, "get_Master"), "get_Id") != pendingSong) return;
+				auto* canPlay = RunwayDump::ReadPtr(model, "CanPlay");
+				if (canPlay && !Flag(canPlay, "get_Value")) return;
 				void* unit = Unit(model);
 				auto* managedIds = OutfitCall(unit, "get_Idols");
 				const auto idols = OutfitList(managedIds);
@@ -10360,10 +10293,10 @@ namespace
 				for (int i = 0; i < idols.count; ++i) {
 					bool owned = true;
 					int actor = pendingActors[i % pendingActors.size()];
-					auto* outfit = static_cast<Il2CppObject*>(sets.Default(actor));
+					auto* outfit = sets.Default(actor);
 					if (!outfit) {
 						ResetPlaylist();
-						SetStatus(std::format("Default MV outfit unavailable for idol {}.", actor));
+						SetStatus(std::format("无法读取 {} 的默认 MV 服装。", IdolName(TryMasterData(), actor)));
 						return;
 					}
 					auto* member = (Il2CppObject*)il2cpp_object_new(klass);
