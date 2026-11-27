@@ -10241,8 +10241,10 @@ namespace
 					const auto songs = OutfitList(CenterCutSceneTableRows(master, "Songs"));
 					for (int i = 0; i < songs.count; ++i) addSong(il2cpp_symbols::array_get_value(songs.data, i));
 				} else {
-					for (auto* song : music)
-						if (OutfitNumber(song, "get_UnitSize") > 0) addSong(OutfitCall(song, "get_Master"));
+					for (auto* song : music) {
+						auto* masterSong = OutfitCall(song, "get_Master");
+						if (OutfitNumber(song, "get_UnitSize") > 0 || Flag(masterSong, "get_Is2D")) addSong(masterSong);
+					}
 				}
 				for (int i = 0; i < idols.count; ++i) {
 					auto* idol = il2cpp_symbols::array_get_value(idols.data, i);
