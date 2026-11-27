@@ -5,7 +5,9 @@
 #include <rapidjson/document.h>
 #include <rapidjson/writer.h>
 #include <rapidjson/stringbuffer.h>
+#include <array>
 #include <cmath>
+#include <unordered_map>
 #include <d3d11.h>
 #include <d3dcompiler.h>
 #include <dxgi1_2.h>
@@ -46,8 +48,10 @@ extern void SetMvSplitActor(int panel, int actor);
 extern int GetMvSplitPreviewPane(int preview);
 extern void SetMvSplitPreviewPane(int preview, int pane);
 extern void RequestMvFormationTool(int action);
-extern void RequestRandomMv(std::string songs, std::string actors, int mode, int parts, int count, int interval);
+extern void RequestRandomMv(std::vector<int> songs, std::vector<int> actors, int mode, int parts, int count, int interval);
 extern std::string GetMvFormationToolStatus();
+extern std::array<std::string, 3> GetMvOutfitSources();
+extern std::vector<std::pair<int, std::string>> GetMvPlaylistGroups(bool songs);
 
 
 #define INPUT_AND_SLIDER_FLOAT(label, data, min, max) \
@@ -781,26 +785,55 @@ namespace SCGUILoop {
 					static int outfitSource = 0;
 					static int outfitStyle = 0;
 					static int hairStyle = 0;
-					ImGui::Combo("Outfit source", &outfitSource, "MV center\0Saved wardrobe preview\0");
-					if (ImGui::Button("Read wardrobe preview")) RequestMvFormationTool(1);
-					ImGui::Combo("Costume", &outfitStyle, "Own same-name outfit first\0Borrow the source outfit when allowed\0");
-					ImGui::Combo("Hair and accessories", &hairStyle, "Matching set when available\0Idol's default\0");
-					if (ImGui::Button("Apply outfit to all MV slots"))
+					const auto sources = GetMvOutfitSources();
+					ImGui::Combo("换装来源", &outfitSource, "MV 首位\0已保存的服装预览\0");
+					if (!sources[1].empty()) ImGui::TextWrapped("当前预览　%s", sources[1].c_str());
+					if (ImGui::Button("保存当前预览服装")) RequestMvFormationTool(1);
+					const auto& source = sources[outfitSource ? 2 : 0];
+					ImGui::TextWrapped("已选来源　%s", source.empty() ? "请先选择服装" : source.c_str());
+					ImGui::Combo("服装", &outfitStyle, "优先同系列本人款\0可借穿时用来源款\0");
+					ImGui::Combo("发型与配饰", &hairStyle, "优先使用该套服装的搭配\0使用偶像默认搭配\0");
+					if (ImGui::Button("全员换装"))
 						RequestMvFormationTool(16 + outfitSource + (outfitStyle ? 2 : 0) + (hairStyle ? 0 : 4));
 
 					ImGui::Separator();
-					static char songs[128]{}, actors[128]{};
+					static std::unordered_map<int, bool> songs, idols;
+					const auto groupPicker = [](const char* label, bool isSong, auto& checked) {
+						std::vector<int> selected;
+						const auto groups = GetMvPlaylistGroups(isSong);
+						if (groups.empty()) return selected;
+						if (ImGui::TreeNodeEx(label, ImGuiTreeNodeFlags_DefaultOpen)) {
+							if (ImGui::Button("全选")) {
+								for (const auto& group : groups) checked[group.first] = true;
+							}
+							ImGui::SameLine();
+							if (ImGui::Button("清空")) {
+								for (const auto& group : groups) checked[group.first] = false;
+							}
+							for (const auto& [id, name] : groups) {
+								ImGui::PushID(id);
+								ImGui::Checkbox(name.c_str(), &checked.try_emplace(id, true).first->second);
+								ImGui::PopID();
+							}
+							ImGui::TreePop();
+						}
+						for (const auto& group : groups) {
+							if (checked.try_emplace(group.first, true).first->second)
+								selected.push_back(group.first);
+						}
+						return selected;
+					};
+					auto songGroups = groupPicker("歌曲组合", true, songs);
+					auto idolGroups = groupPicker("偶像组合", false, idols);
 					static int vocals = 0, parts = 0, count = 3, interval = 5;
-					ImGui::InputTextWithHint("Song IDs", "All, or 5,41,146-148", songs, sizeof(songs));
-					ImGui::InputTextWithHint("Idol IDs", "All, or 1,15,78-89", actors, sizeof(actors));
-					ImGui::Combo("Playback", &vocals, "Automatic\0Full chorus\0Solo\0");
-					ImGui::Combo("Vocal parts", &parts, "Any\0Require an available part\0Without available parts\0");
-					ImGui::InputInt("Number of distinct songs", &count);
-					ImGui::InputInt("Seconds between songs", &interval);
-					if (ImGui::Button("Start random MV playlist"))
-						RequestRandomMv(songs, actors, vocals, parts, count, interval);
+					ImGui::Combo("播放方式", &vocals, "自动\0全唱\0独唱\0");
+					ImGui::Combo("分唱筛选", &parts, "不限\0所选偶像有可用分唱\0所选偶像无可用分唱\0");
+					ImGui::InputInt("不重复歌曲数量", &count);
+					ImGui::InputInt("每首间隔（秒）", &interval);
+					if (ImGui::Button("开始随机播放"))
+						RequestRandomMv(std::move(songGroups), std::move(idolGroups), vocals, parts, count, interval);
 					ImGui::SameLine();
-					if (ImGui::Button("Stop playlist")) RequestMvFormationTool(3);
+					if (ImGui::Button("停止队列")) RequestMvFormationTool(3);
 					const auto status = GetMvFormationToolStatus();
 					if (!status.empty()) ImGui::TextWrapped("%s", status.c_str());
 				}
