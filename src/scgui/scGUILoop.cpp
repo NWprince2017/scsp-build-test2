@@ -7,6 +7,8 @@
 #include <rapidjson/stringbuffer.h>
 #include <array>
 #include <cmath>
+#include <memory>
+#include <tuple>
 #include <unordered_map>
 #include <d3d11.h>
 #include <d3dcompiler.h>
@@ -51,7 +53,9 @@ extern void RequestMvFormationTool(int action);
 extern void RequestRandomMv(std::vector<int> songs, std::vector<int> actors, int mode, int parts, int count, int interval);
 extern std::string GetMvFormationToolStatus();
 extern std::array<std::string, 3> GetMvOutfitSources();
-extern std::vector<std::pair<int, std::string>> GetMvPlaylistGroups(bool songs);
+using MvPlaylistEntries = std::vector<std::pair<int, std::string>>;
+using MvPlaylistGroups = std::vector<std::tuple<int, std::string, MvPlaylistEntries>>;
+extern std::shared_ptr<const MvPlaylistGroups> GetMvPlaylistGroups(bool songs);
 
 
 #define INPUT_AND_SLIDER_FLOAT(label, data, min, max) \
@@ -786,10 +790,10 @@ namespace SCGUILoop {
 					static int outfitStyle = 0;
 					static int hairStyle = 0;
 					const auto sources = GetMvOutfitSources();
-					ImGui::Combo("换装来源", &outfitSource, "MV 首位\0已保存的服装预览\0");
+					ImGui::Combo("换装来源", &outfitSource, "MV 首位\0服装预览\0");
 					if (!sources[1].empty()) ImGui::TextWrapped("当前预览　%s", sources[1].c_str());
 					if (ImGui::Button("保存当前预览服装")) RequestMvFormationTool(1);
-					const auto& source = sources[outfitSource ? 2 : 0];
+					const auto& source = outfitSource ? (sources[1].empty() ? sources[2] : sources[1]) : sources[0];
 					ImGui::TextWrapped("已选来源　%s", source.empty() ? "请先选择服装" : source.c_str());
 					ImGui::Combo("服装", &outfitStyle, "优先同系列本人款\0可借穿时用来源款\0");
 					ImGui::Combo("发型与配饰", &hairStyle, "优先使用该套服装的搭配\0使用偶像默认搭配\0");
@@ -801,37 +805,56 @@ namespace SCGUILoop {
 					const auto groupPicker = [](const char* label, bool isSong, auto& checked) {
 						std::vector<int> selected;
 						const auto groups = GetMvPlaylistGroups(isSong);
-						if (groups.empty()) return selected;
+						if (!groups || groups->empty()) {
+							ImGui::TextDisabled("%s", isSong ? "打开 MV 歌曲列表后可选歌曲" : "正在读取偶像");
+							return selected;
+						}
 						if (ImGui::TreeNodeEx(label, ImGuiTreeNodeFlags_DefaultOpen)) {
 							if (ImGui::Button("全选")) {
-								for (const auto& group : groups) checked[group.first] = true;
+								for (const auto& group : *groups)
+									for (const auto& item : std::get<2>(group)) checked[item.first] = true;
 							}
 							ImGui::SameLine();
 							if (ImGui::Button("清空")) {
-								for (const auto& group : groups) checked[group.first] = false;
+								for (const auto& group : *groups)
+									for (const auto& item : std::get<2>(group)) checked[item.first] = false;
 							}
-							for (const auto& [id, name] : groups) {
-								ImGui::PushID(id);
-								ImGui::Checkbox(name.c_str(), &checked.try_emplace(id, true).first->second);
+							for (const auto& [group, name, items] : *groups) {
+								ImGui::PushID(group);
+								const auto selectedCount = std::count_if(items.begin(), items.end(), [&](const auto& item) {
+									return checked.try_emplace(item.first, true).first->second;
+								});
+								bool entireGroup = static_cast<size_t>(selectedCount) == items.size();
+								if (ImGui::Checkbox("##select-group", &entireGroup))
+									for (const auto& item : items) checked[item.first] = entireGroup;
+								ImGui::SameLine();
+								if (ImGui::TreeNodeEx("##group-entries", ImGuiTreeNodeFlags_SpanAvailWidth, "%s (%d/%d)",
+									name.c_str(), static_cast<int>(selectedCount), static_cast<int>(items.size()))) {
+									for (const auto& [id, item] : items) {
+										ImGui::PushID(id);
+										ImGui::Checkbox(item.c_str(), &checked.at(id));
+										ImGui::PopID();
+									}
+									ImGui::TreePop();
+								}
 								ImGui::PopID();
 							}
 							ImGui::TreePop();
 						}
-						for (const auto& group : groups) {
-							if (checked.try_emplace(group.first, true).first->second)
-								selected.push_back(group.first);
-						}
+						for (const auto& group : *groups)
+							for (const auto& [id, name] : std::get<2>(group))
+								if (checked.try_emplace(id, true).first->second) selected.push_back(id);
 						return selected;
 					};
-					auto songGroups = groupPicker("歌曲组合", true, songs);
-					auto idolGroups = groupPicker("偶像组合", false, idols);
+					auto selectedSongs = groupPicker("歌曲", true, songs);
+					auto selectedIdols = groupPicker("偶像", false, idols);
 					static int vocals = 0, parts = 0, count = 3, interval = 5;
 					ImGui::Combo("播放方式", &vocals, "自动\0全唱\0独唱\0");
 					ImGui::Combo("分唱筛选", &parts, "不限\0所选偶像有可用分唱\0所选偶像无可用分唱\0");
 					ImGui::InputInt("不重复歌曲数量", &count);
 					ImGui::InputInt("每首间隔（秒）", &interval);
 					if (ImGui::Button("开始随机播放"))
-						RequestRandomMv(std::move(songGroups), std::move(idolGroups), vocals, parts, count, interval);
+						RequestRandomMv(std::move(selectedSongs), std::move(selectedIdols), vocals, parts, count, interval);
 					ImGui::SameLine();
 					if (ImGui::Button("停止队列")) RequestMvFormationTool(3);
 					const auto status = GetMvFormationToolStatus();

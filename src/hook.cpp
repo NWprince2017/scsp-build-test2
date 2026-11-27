@@ -8,7 +8,9 @@
 #include <cctype>
 #include <cmath>
 #include <cstring>
+#include <memory>
 #include <random>
+#include <tuple>
 #include <sstream>
 #include <cstdint>
 #include <cstdlib>
@@ -9756,13 +9758,15 @@ namespace
 			void* previewHandle = nullptr;
 			void* selectionHandle = nullptr;
 			void* savedCostume = nullptr;
+			int savedActor = 0;
 			std::atomic_int request{0};
 			std::mutex queueMutex;
 			std::string status;
 			std::array<std::string, 3> outfitSources;
-			using GroupList = std::vector<std::pair<int, std::string>>;
-			GroupList songGroups, idolGroups;
-			std::vector<int> chosenSongGroups, chosenIdolGroups;
+			using NamedEntries = std::vector<std::pair<int, std::string>>;
+			using GroupList = std::vector<std::tuple<int, std::string, NamedEntries>>;
+			std::shared_ptr<const GroupList> songGroups, idolGroups;
+			std::vector<int> chosenSongs, chosenIdols;
 			std::atomic_bool readToolData{false};
 			int randomMode = 0, partsFilter = 0, requestedCount = 3, requestedInterval = 5;
 			int pendingSong = 0, pendingMode = 0;
@@ -9848,7 +9852,8 @@ namespace
 				}
 
 				Il2CppObject* Default(int actor) const {
-					int best = 0, priority = -1;
+					int best = 0;
+					std::unordered_map<int, bool> defaultHair;
 					for (int i = 0; i < rows.count; ++i) {
 						void* row = il2cpp_symbols::array_get_value(rows.data, i);
 						void* costume = OutfitCall(row, "get_Costume");
@@ -9856,12 +9861,16 @@ namespace
 							!Flag(costume, "get_IsWearableLive")) continue;
 						void* hair = OutfitCall(row, "get_Hairstyle");
 						if (OutfitNumber(hair, "get_MstCharacterInfoId") != actor) continue;
-						const int rank = (OutfitNumber(hair, "get_HairResourceIdForClient") == 1 ? 2 : 0) +
-							(OutfitNumber(costume, "get_ResourceId") == 1 ? 1 : 0);
-						if (rank <= priority) continue;
-						best = OutfitNumber(row, "get_Id");
-						priority = rank;
-						if (rank == 3) break;
+						const int hairId = OutfitNumber(hair, "get_Id");
+						auto [known, added] = defaultHair.try_emplace(hairId, false);
+						if (added) {
+							const auto name = String(hair, "get_Name");
+							known->second = name.ends_with("デフォルト髪型") || name.ends_with("默认发型") || name.ends_with("預設髮型");
+						}
+						if (!known->second) continue;
+						const int id = OutfitNumber(row, "get_Id");
+						if (OutfitNumber(costume, "get_ResourceId") == 1) return Get(id);
+						if (!best) best = id;
 					}
 					return Get(best);
 				}
@@ -9944,9 +9953,10 @@ namespace
 				if (CostumeId(copy) != costumeId) { SetStatus("无法保存当前预览服装。"); return; }
 				if (savedCostume) il2cpp_gchandle_free(savedCostume);
 				savedCostume = il2cpp_gchandle_new(copy, false);
+				savedActor = RunwayDump::ReadInt(wardrobe, "CharacterId");
 				{
 					std::lock_guard lock(queueMutex);
-					outfitSources[2] = DescribeOutfit(TryMasterData(), RunwayDump::ReadInt(wardrobe, "CharacterId"), costumeId);
+					outfitSources[2] = DescribeOutfit(TryMasterData(), savedActor, costumeId);
 				}
 				SetStatus("已保存当前预览服装。");
 			}
@@ -9959,8 +9969,15 @@ namespace
 				const auto idols = OutfitList(OutfitCall(unit, "get_Idols"));
 				if (idols.count <= 0) { SetStatus("请先打开 MV 编队。"); return; }
 				auto* first = il2cpp_symbols::array_get_value(idols.data, 0);
-				auto* source = fromPreview ? static_cast<Il2CppObject*>(Target(savedCostume)) :
-					OutfitCall(first, "get_CostumeSet");
+				auto* wardrobe = Target(previewHandle);
+				auto* livePreview = OutfitCall(wardrobe, "get_PreviewCostumeSet");
+				int sourceActor = OutfitNumber(first, "get_CharacterId");
+				auto* source = OutfitCall(first, "get_CostumeSet");
+				if (fromPreview) {
+					const bool open = CostumeId(livePreview) > 0;
+					source = open ? livePreview : static_cast<Il2CppObject*>(Target(savedCostume));
+					sourceActor = open ? RunwayDump::ReadInt(wardrobe, "CharacterId") : savedActor;
+				}
 				auto* sourceStatus = OutfitCall(source, "get_Costume");
 				const int sourceId = OutfitNumber(sourceStatus, "get_MstCostumeId");
 				if (!sourceId) { SetStatus("请先选定一套来源服装。"); return; }
@@ -9978,12 +9995,13 @@ namespace
 				const int owner = OutfitNumber(sourceCostume, "get_MstCharacterInfoId");
 				struct Dressing { Il2CppObject* outfit; Il2CppObject* style; Il2CppObject* costume; };
 				std::vector<Dressing> changes;
-				int changed = 0;
+				int changed = 0, targetCount = 0;
 				for (int i = 0; i < idols.count; ++i) {
 					auto* idol = il2cpp_symbols::array_get_value(idols.data, i);
 					const int actor = OutfitNumber(idol, "get_CharacterId");
 					auto* current = OutfitCall(idol, "get_CostumeSet");
-					if (actor <= 0 || !current) continue;
+					if (actor <= 0 || actor == sourceActor || !current) continue;
+					++targetCount;
 					auto* own = sets.Match(actor, family, sourceCostume);
 					Il2CppObject* costume = OutfitCall(own, "get_Costume");
 					if ((borrow || !costume) && (actor == owner || CanBorrow(sourceStatus, actor, family))) costume = sourceStatus;
@@ -10001,7 +10019,7 @@ namespace
 					if (CostumeId(change.outfit) == OutfitNumber(change.costume, "get_MstCostumeId")) ++changed;
 				}
 				if (changed) RefreshFormation(model, unit, presenter);
-				SetStatus(std::format("已给 {} / {} 个 MV 站位应用服装。", changed, idols.count));
+				SetStatus(std::format("已给 {} / {} 个其他 MV 站位应用服装。", changed, targetCount));
 			}
 
 			int SongGroup(void* song) { return std::max(0, OutfitNumber(song, "get_MstUnitId")); }
@@ -10015,13 +10033,16 @@ namespace
 				return (actor > 0 && actor <= 28) || IsCollaborationWardrobeActor(actor);
 			}
 
+			std::vector<Il2CppObject*> MusicCatalog(void* model);
+
 			void RefreshGroupLists(void* master) {
 				static void* lastMaster = nullptr;
-				if (!master || master == lastMaster) return;
+				static void* lastMusicModel = nullptr;
+				auto* model = RunwayDump::ReadPtr(Target(selectionHandle), "model");
+				if (!master || (master == lastMaster && (!model || model == lastMusicModel))) return;
 				const auto units = OutfitList(CenterCutSceneTableRows(master, "Units"));
-				const auto songs = OutfitList(CenterCutSceneTableRows(master, "Songs"));
 				const auto idols = OutfitList(CenterCutSceneTableRows(master, "CharacterInfos"));
-				if (!units.count || !songs.count || !idols.count) return;
+				if (!units.count || !idols.count) return;
 
 				std::unordered_map<int, std::string> labels;
 				for (int i = 0; i < units.count; ++i) {
@@ -10037,30 +10058,49 @@ namespace
 					if (!song && id == -1) return "联动偶像";
 					return song ? "其他歌曲" : "其他偶像";
 				};
-				std::unordered_set<int> songIds, idolIds;
-				for (int i = 0; i < songs.count; ++i) {
-					auto* song = il2cpp_symbols::array_get_value(songs.data, i);
-					if (Flag(song, "get_Is3D") || Flag(song, "get_Is2D") || !String(song, "get_MvScene").empty())
-						songIds.insert(SongGroup(song));
+				std::map<int, NamedEntries> perGroupSongs, perGroupIdols;
+				const auto music = MusicCatalog(model);
+				std::unordered_set<int> includedSongs;
+				const auto addSong = [&](void* row) {
+					const int id = OutfitNumber(row, "get_Id");
+					if (id <= 0 || includedSongs.contains(id)) return;
+					if (!Flag(row, "get_Is3D") && !Flag(row, "get_Is2D") && String(row, "get_MvScene").empty()) return;
+					auto name = String(row, "get_Name");
+					if (name.empty()) name = String(row, "get_ReadName");
+					if (name.empty()) return;
+					perGroupSongs[SongGroup(row)].emplace_back(id, std::move(name));
+					includedSongs.insert(id);
+				};
+				if (music.empty() && master != lastMaster) {
+					const auto songs = OutfitList(CenterCutSceneTableRows(master, "Songs"));
+					for (int i = 0; i < songs.count; ++i) addSong(il2cpp_symbols::array_get_value(songs.data, i));
+				} else {
+					for (auto* song : music)
+						if (OutfitNumber(song, "get_UnitSize") > 0) addSong(OutfitCall(song, "get_Master"));
 				}
 				for (int i = 0; i < idols.count; ++i) {
 					auto* idol = il2cpp_symbols::array_get_value(idols.data, i);
 					const int actor = OutfitNumber(idol, "get_Id");
-					if (SupportedActor(actor)) idolIds.insert(IdolGroup(idol, actor));
+					if (!SupportedActor(actor)) continue;
+					auto name = IdolName(master, actor);
+					if (!name.empty()) perGroupIdols[IdolGroup(idol, actor)].emplace_back(actor, std::move(name));
 				}
-				const auto makeGroups = [&](const auto& ids, bool song) {
-					GroupList groups;
-					for (int id : ids) groups.emplace_back(id, groupName(id, song));
-					std::sort(groups.begin(), groups.end());
+				const auto makeGroups = [&](auto& entries, bool song) {
+					auto groups = std::make_shared<GroupList>();
+					for (auto& [id, items] : entries)
+						groups->emplace_back(id, groupName(id, song), std::move(items));
 					return groups;
 				};
 				{
 					std::lock_guard lock(queueMutex);
-					songGroups = makeGroups(songIds, true);
-					idolGroups = makeGroups(idolIds, false);
+					if (!music.empty() || master != lastMaster) songGroups = makeGroups(perGroupSongs, true);
+					idolGroups = makeGroups(perGroupIdols, false);
 				}
 				lastMaster = master;
-				Log(std::format("[mv-tools] catalog song groups={} idol groups={}", songIds.size(), idolIds.size()));
+				lastMusicModel = music.empty() ? nullptr : model;
+				if (!music.empty())
+					Log(std::format("[mv-tools] catalog songs={} song groups={} idol groups={}",
+						includedSongs.size(), perGroupSongs.size(), perGroupIdols.size()));
 			}
 
 			void RefreshToolData() {
@@ -10169,19 +10209,19 @@ namespace
 			}
 
 			void ChooseRandomMv() {
-				std::vector<int> songUnits, idolUnits;
+				std::vector<int> songIds, selectedIdols;
 				int mode, filter, count, gap;
 				{
 					std::lock_guard lock(queueMutex);
-					songUnits = chosenSongGroups; idolUnits = chosenIdolGroups; mode = randomMode; filter = partsFilter;
+					songIds = chosenSongs; selectedIdols = chosenIdols; mode = randomMode; filter = partsFilter;
 					count = requestedCount; gap = requestedInterval;
 				}
 				if (count < 1 || count > 300 || gap < 0 || gap > 3600) {
 					SetStatus("歌曲数量须为 1–300，播放间隔须为 0–3600 秒。");
 					return;
 				}
-				if (songUnits.empty() || idolUnits.empty()) {
-					SetStatus("请分别勾选至少一个歌曲组合和一个偶像组合。");
+				if (songIds.empty() || selectedIdols.empty()) {
+					SetStatus("请勾选至少一首歌和一位偶像。");
 					return;
 				}
 				void* presenter = Target(selectionHandle);
@@ -10196,10 +10236,10 @@ namespace
 				for (int i = 0; i < rows.count; ++i) {
 					auto* idol = il2cpp_symbols::array_get_value(rows.data, i);
 					const int actor = OutfitNumber(idol, "get_Id");
-					if (SupportedActor(actor) && isSelected(idolUnits, IdolGroup(idol, actor))) actorIds.push_back(actor);
+					if (SupportedActor(actor) && isSelected(selectedIdols, actor)) actorIds.push_back(actor);
 				}
 				if (actorIds.empty()) {
-					SetStatus("所选组合没有可用偶像。");
+					SetStatus("没有可用的已选偶像。");
 					return;
 				}
 				std::vector<SongChoice> candidates;
@@ -10207,7 +10247,7 @@ namespace
 				for (auto* music : musicList) {
 					auto* master = OutfitCall(music, "get_Master");
 					const int id = OutfitNumber(master, "get_Id");
-					if (id <= 0 || !isSelected(songUnits, SongGroup(master)) || seen.contains(id)) continue;
+					if (id <= 0 || !isSelected(songIds, id) || seen.contains(id)) continue;
 					const int seats = OutfitNumber(music, "get_UnitSize");
 					if (seats <= 0 ||
 						(!Flag(master, "get_Is3D") && !Flag(master, "get_Is2D") && String(master, "get_MvScene").empty())) continue;
@@ -10347,10 +10387,26 @@ namespace
 				HOOK_CAST_CALL(void, Preview_Dispose)(self, method);
 			}
 
+			HOOK_ORIG_TYPE Preview_Refresh_orig;
+			void Preview_Refresh_hook(void* self, const MethodInfo* method) {
+				HOOK_CAST_CALL(void, Preview_Refresh)(self, method);
+				if (Target(previewHandle) != self) Remember(previewHandle, self);
+			}
+
+			HOOK_ORIG_TYPE Preview_Modify_orig;
+			void Preview_Modify_hook(void* self, void* action, const MethodInfo* method) {
+				HOOK_CAST_CALL(void, Preview_Modify)(self, action, method);
+				if (Target(previewHandle) != self) Remember(previewHandle, self);
+			}
+
 			void Install() {
-				auto* closePreview = ExtraSpreadVocals::Method("PRISM.Adapters.CostumeChange", "CostumeChangeViewModel", "Dispose", 0);
-				if (closePreview && closePreview->methodPointer)
-					HookAt("MV tools wardrobe closed", (void*)closePreview->methodPointer, (void*)Preview_Dispose_hook, Preview_Dispose_orig);
+				const auto capturePreview = [](const char* name, int arity, void* detour, HOOK_ORIG_TYPE& original) {
+					const auto* method = ExtraSpreadVocals::Method("PRISM.Adapters.CostumeChange", "CostumeChangeViewModel", name, arity);
+					if (method && method->methodPointer) HookAt(name, (void*)method->methodPointer, detour, original);
+				};
+				capturePreview("Dispose", 0, (void*)Preview_Dispose_hook, Preview_Dispose_orig);
+				capturePreview("RefreshViewModels", 0, (void*)Preview_Refresh_hook, Preview_Refresh_orig);
+				capturePreview("ModifyPreview", 1, (void*)Preview_Modify_hook, Preview_Modify_orig);
 				auto* dispose = ExtraSpreadVocals::Method("PRISM.Adapters.Live", "LiveMVOverlaySequencer", "Dispose", 0);
 				if (dispose && dispose->methodPointer)
 					HookAt("MV tools playlist finished", (void*)dispose->methodPointer, (void*)Overlay_Dispose_hook, Overlay_Dispose_orig);
@@ -15590,8 +15646,8 @@ void RequestMvFormationTool(int action) {
 
 void RequestRandomMv(std::vector<int> songs, std::vector<int> actors, int mode, int parts, int count, int interval) {
 	std::lock_guard lock(SoloUnlock::MvTools::queueMutex);
-	SoloUnlock::MvTools::chosenSongGroups = std::move(songs);
-	SoloUnlock::MvTools::chosenIdolGroups = std::move(actors);
+	SoloUnlock::MvTools::chosenSongs = std::move(songs);
+	SoloUnlock::MvTools::chosenIdols = std::move(actors);
 	SoloUnlock::MvTools::randomMode = mode;
 	SoloUnlock::MvTools::partsFilter = parts;
 	SoloUnlock::MvTools::requestedCount = count;
@@ -15605,7 +15661,7 @@ std::array<std::string, 3> GetMvOutfitSources() {
 	return SoloUnlock::MvTools::outfitSources;
 }
 
-std::vector<std::pair<int, std::string>> GetMvPlaylistGroups(bool songs) {
+std::shared_ptr<const SoloUnlock::MvTools::GroupList> GetMvPlaylistGroups(bool songs) {
 	std::lock_guard lock(SoloUnlock::MvTools::queueMutex);
 	return songs ? SoloUnlock::MvTools::songGroups : SoloUnlock::MvTools::idolGroups;
 }
