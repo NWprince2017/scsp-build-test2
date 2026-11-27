@@ -9988,8 +9988,7 @@ namespace
 					Il2CppObject* costume = OutfitCall(own, "get_Costume");
 					if ((borrow || !costume) && (actor == owner || CanBorrow(sourceStatus, actor, family))) costume = sourceStatus;
 					if (!costume) continue;
-					auto* style = matching && costume == sourceStatus && actor == owner ? source :
-						matching && costume == OutfitCall(own, "get_Costume") ? own : nullptr;
+					auto* style = matching ? (actor == owner ? source : own) : nullptr;
 					auto* hair = OutfitCall(style, "get_Hairstyle");
 					if (!hair || OutfitNumber(hair, "get_MstCharacterInfoId") != actor)
 						style = sets.Default(actor);
@@ -10342,12 +10341,6 @@ namespace
 				}
 			}
 
-			HOOK_ORIG_TYPE Confirm_ctor_orig;
-			void Confirm_ctor_hook(void* self, void* arg, void* view, void* loader, const MethodInfo* method) {
-				HOOK_CAST_CALL(void, Confirm_ctor)(self, arg, view, loader, method);
-				Remember(confirmHandle, self);
-			}
-
 			HOOK_ORIG_TYPE Preview_Dispose_orig;
 			void Preview_Dispose_hook(void* self, const MethodInfo* method) {
 				if (self == Target(previewHandle)) Remember(previewHandle, nullptr);
@@ -10355,9 +10348,6 @@ namespace
 			}
 
 			void Install() {
-				auto* ctor = ExtraSpreadVocals::Method("PRISM.Adapters", "LiveMvUnitConfirmationPresenter", ".ctor", 3);
-				if (ctor && ctor->methodPointer) HookAt("MV tools formation", (void*)ctor->methodPointer,
-					(void*)Confirm_ctor_hook, Confirm_ctor_orig);
 				auto* closePreview = ExtraSpreadVocals::Method("PRISM.Adapters.CostumeChange", "CostumeChangeViewModel", "Dispose", 0);
 				if (closePreview && closePreview->methodPointer)
 					HookAt("MV tools wardrobe closed", (void*)closePreview->methodPointer, (void*)Preview_Dispose_hook, Preview_Dispose_orig);
@@ -13048,6 +13038,7 @@ namespace
 		void LiveMvPresenter_ctor_hook(void* _this, void* a1, void* a2, void* a3, void* mtd) {
 			HOOK_CAST_CALL(void, LiveMvPresenter_ctor)(_this, a1, a2, a3, mtd);
 			g_livePresenter = _this;
+			MvTools::Remember(MvTools::confirmHandle, _this);
 			Log(std::format("[v42] presenter captured {}", ViewDiag::ptr_str(_this)));
 		}
 
@@ -13102,16 +13093,22 @@ namespace
 		}
 
 		void InstallLiveAutoHooks(int& installed) {
+			const auto capture = [&](const char* ns, const char* name, int count, void* hook, HOOK_ORIG_TYPE& original) {
+				const auto* ctor = ExtraSpreadVocals::Method(ns, name, ".ctor", count);
+				if (ctor && HookAt(name, (void*)ctor->methodPointer, hook, original)) ++installed;
+			};
+			capture("PRISM.Adapters", "LiveMvUnitConfirmationPresenter", 3,
+				(void*)LiveMvPresenter_ctor_hook, LiveMvPresenter_ctor_orig);
+			capture("PRISM.Adapters", "LiveMusicSelectionPresenter", 3,
+				(void*)LiveMusicSelectionPresenter_ctor_hook, LiveMusicSelectionPresenter_ctor_orig);
+			capture("PRISM.Adapters.Live", "LiveMVOverlaySequencer", 4,
+				(void*)LiveOverlay_ctor_hook, LiveOverlay_ctor_orig);
 			if (GetFileAttributesA("auto-live.txt") == INVALID_FILE_ATTRIBUTES) {
 				Log("[v42] live auto off (auto-live.txt missing)");
 				return;
 			}
 			auto pk = LiveClass("LiveMvUnitConfirmationPresenter");
 			if (pk) {
-				auto ctor = il2cpp_class_get_method_from_name(pk, ".ctor", 3);
-				if (ctor && HookAt("LiveMvUnitConfirmationPresenter.ctor",
-					(void*)ctor->methodPointer, (void*)LiveMvPresenter_ctor_hook, LiveMvPresenter_ctor_orig))
-					++installed;
 				g_liveStart2 = il2cpp_class_get_method_from_name(pk, "_startLiveAsync", 2);
 				g_liveInvoke1 = il2cpp_class_get_method_from_name(pk, "_invokeStartLiveAsync", 1);
 				auto logm = [&](const char* n, MethodInfo* m) {
@@ -13168,11 +13165,6 @@ namespace
 					(void*)init->methodPointer, (void*)LiveVocalPresenter_Initialize_hook, LiveVocalPresenter_Initialize_orig))
 					++installed;
 			}
-			auto mk = LiveClass("LiveMusicSelectionPresenter");
-			if (mk) {
-				auto ctor = il2cpp_class_get_method_from_name(mk, ".ctor", 3);
-				if (ctor && HookAt("LiveMusicSelectionPresenter.ctor", (void*)ctor->methodPointer, (void*)LiveMusicSelectionPresenter_ctor_hook, LiveMusicSelectionPresenter_ctor_orig)) ++installed;
-			}
 			auto tk = LiveClassNs("PRISM.Adapters.Title", "TitlePresenter");
 			if (tk) {
 				auto ctor = il2cpp_class_get_method_from_name(tk, ".ctor", 5);
@@ -13185,10 +13177,6 @@ namespace
 			}
 			auto ok = LiveClassNs("PRISM.Adapters.Live", "LiveMVOverlaySequencer");
 			if (ok) {
-				auto ctor = il2cpp_class_get_method_from_name(ok, ".ctor", 4);
-				if (ctor && HookAt("LiveMVOverlaySequencer.ctor",
-					(void*)ctor->methodPointer, (void*)LiveOverlay_ctor_hook, LiveOverlay_ctor_orig))
-					++installed;
 				g_liveSkipMethod = il2cpp_class_get_method_from_name(ok, "_skip", 0);
 				Log(std::format("[v43] overlay class found, _skip={}",
 					g_liveSkipMethod ? ViewDiag::ptr_str((void*)g_liveSkipMethod->methodPointer) : "(null)"));
