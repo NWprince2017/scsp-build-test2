@@ -197,6 +197,16 @@ void SetMvNormalFocusFraming(float yaw, float pitch, float roll, float horizonta
 	mvSplitStates[SplitFocusPortrait].framing[0] = {BoundFraming(yaw, 180.0f), BoundFraming(pitch, 180.0f),
 		BoundFraming(roll, 180.0f), BoundFraming(horizontal, 3.0f), BoundFraming(vertical, 3.0f), BoundFraming(zoom, 3.0f)};
 }
+void NudgeMvNormalFocusFraming(float yaw, float pitch, float roll, float horizontal, float vertical, float zoom) {
+	std::lock_guard lock(mvFixedFramingMutex);
+	auto& framing = mvSplitStates[SplitFocusPortrait].framing[0];
+	framing.yaw = BoundFraming(std::remainder(framing.yaw + yaw, 360.0f), 180.0f);
+	framing.pitch = BoundFraming(std::remainder(framing.pitch + pitch, 360.0f), 180.0f);
+	framing.roll = BoundFraming(std::remainder(framing.roll + roll, 360.0f), 180.0f);
+	framing.horizontal = BoundFraming(framing.horizontal + horizontal, 3.0f);
+	framing.vertical = BoundFraming(framing.vertical + vertical, 3.0f);
+	framing.zoom = BoundFraming(framing.zoom + zoom, 3.0f);
+}
 void ResetMvNormalFocusFraming() { SetMvNormalFocusFraming(0, 0, 0, 0, 0, 0); }
 bool GetMvNormalFocusWindow() { return mvNormalFocusWindowEnabled.load(std::memory_order_relaxed); }
 void SetMvNormalFocusWindow(bool enabled) {
@@ -9283,6 +9293,8 @@ namespace
 				void Stop();
 				void Install();
 				void SyncControlButtons(void* view, void* owner);
+				HWND NormalFocusPreviewWindow();
+				float TakeNormalFocusWheelDelta();
 			}
 
 			namespace FramingInput {
@@ -9290,8 +9302,10 @@ namespace
 					int frame = -1;
 					void* camera = nullptr;
 					HWND window = nullptr;
+					HWND cursorWindow = nullptr;
 					CameraMode mode = CameraMode::Normal;
 					int panel = -1;
+					int clientHeight = 0;
 					POINT cursor{};
 					bool dragging = false;
 					bool resetHeld = false;
@@ -9314,7 +9328,7 @@ namespace
 					if (active && !std::exchange(logged, true)) Log(std::format("[mv-camera-input] applied {}", action));
 				}
 
-				void Poll(void* camera, CameraPath source, CameraMode mode, int panel = -1) {
+				void Poll(void* camera, CameraPath source, CameraMode mode, int panel = -1, bool normalFocus = false) {
 					if (g_enable_free_camera) return;
 					static const auto* getFrame = il2cpp_symbols_logged::get_method("UnityEngine.CoreModule.dll", "UnityEngine", "Time", "get_frameCount", 0);
 					static const auto* getTime = il2cpp_symbols_logged::get_method("UnityEngine.CoreModule.dll", "UnityEngine", "Time", "get_unscaledDeltaTime", 0);
@@ -9332,13 +9346,28 @@ namespace
 						previous = current;
 						return;
 					}
+					current.cursorWindow = current.window;
+					POINT screenCursor{};
+					RECT client{};
+					bool cursorValid = GetCursorPos(&screenCursor) != FALSE;
+					if (normalFocus && cursorValid) {
+						HWND preview = SplitScreen::NormalFocusPreviewWindow();
+						RECT previewRect{};
+						if (preview && GetWindowRect(preview, &previewRect) && PtInRect(&previewRect, screenCursor))
+							current.cursorWindow = preview;
+					}
+					current.cursor = screenCursor;
+					const bool overGame = cursorValid && ScreenToClient(current.cursorWindow, &current.cursor) &&
+						GetClientRect(current.cursorWindow, &client) && PtInRect(&client, current.cursor);
+					if (overGame) current.clientHeight = client.bottom;
+					current.dragging = overGame && Held(VK_RBUTTON);
 
 					const float rawTime = reinterpret_cast<float(*)(const MethodInfo*)>(getTime->methodPointer)(getTime);
 					const float seconds = std::isfinite(rawTime) ? std::clamp(rawTime, 0.0f, 0.1f) : 0.0f;
 					const float moveX = static_cast<float>(Held('L')) - static_cast<float>(Held('J'));
 					const float moveY = static_cast<float>(Held('I')) - static_cast<float>(Held('K'));
 					const float moveStep = 1.5f * seconds / std::max(1.0f, std::hypot(moveX, moveY));
-					if (mode == CameraMode::Focus) {
+					if (mode == CameraMode::Focus && !normalFocus) {
 						previous = current;
 						if (moveStep && (moveX || moveY)) {
 							NudgeMvFocusFraming(moveX * moveStep, moveY * moveStep);
@@ -9350,21 +9379,17 @@ namespace
 
 					static bool running[2]{};
 					bool& logged = running[static_cast<int>(source)];
-					if (!std::exchange(logged, true)) Log(std::format("[fixed-input] sampling path={} scroll={}",
+					if (!std::exchange(logged, true)) Log(std::format("[mv-camera-input] sampling path={} scroll={}",
 						source == CameraPath::Legacy ? "legacy" : "cinemachine", scroll && scroll->methodPointer));
-
-					RECT client{};
-					const bool overGame = GetCursorPos(&current.cursor) && ScreenToClient(current.window, &current.cursor) &&
-						GetClientRect(current.window, &client) && PtInRect(&client, current.cursor);
-					current.dragging = overGame && Held(VK_RBUTTON);
 					current.resetHeld = Held('R');
 					const State last = std::exchange(previous, current);
 					const bool continuous = last.camera == current.camera && last.window == current.window &&
-						last.mode == current.mode && frame - last.frame <= 3;
+						last.cursorWindow == current.cursorWindow && last.mode == current.mode && frame - last.frame <= 3;
 					if (current.resetHeld && (!continuous || !last.resetHeld)) {
-						ResetMvFixedPanel(panel);
+						if (normalFocus) ResetMvNormalFocusFraming();
+						else ResetMvFixedPanel(panel);
 						static bool reported = false;
-						LogOnce(true, reported, "reset");
+						LogOnce(true, reported, normalFocus ? "normal focus reset" : "reset");
 						return;
 					}
 
@@ -9374,17 +9399,26 @@ namespace
 					const float roll = 75 * seconds * (static_cast<float>(Held('E')) - static_cast<float>(Held('Q')));
 					const float keyboardZoom = 3 * seconds * (static_cast<float>(Held('X')) - static_cast<float>(Held('Z')));
 					float wheelZoom = 0;
-					if (overGame && scroll && scroll->methodPointer) {
-						auto* value = scroll->Invoke<Il2CppObject*>(nullptr, {});
-						if (value) {
-							const float wheel = value->unbox_value<Vector2_t>().y;
+					if (overGame) {
+						if (normalFocus && current.cursorWindow != current.window) {
+							float wheel = SplitScreen::TakeNormalFocusWheelDelta();
+							if (wheel == 0 && scroll && scroll->methodPointer) {
+								auto* value = scroll->Invoke<Il2CppObject*>(nullptr, {});
+								if (value) wheel = value->unbox_value<Vector2_t>().y;
+							}
 							if (std::isfinite(wheel)) wheelZoom = std::clamp(wheel, -4.0f, 4.0f) * 0.25f;
+						} else if (scroll && scroll->methodPointer) {
+							auto* value = scroll->Invoke<Il2CppObject*>(nullptr, {});
+							if (value) {
+								const float wheel = value->unbox_value<Vector2_t>().y;
+								if (std::isfinite(wheel)) wheelZoom = std::clamp(wheel, -4.0f, 4.0f) * 0.25f;
+							}
 						}
 					}
 
 					float dragX = 0, dragY = 0;
-					if (current.dragging && continuous && last.panel == panel && last.dragging && client.bottom > 0) {
-						const float scale = 50.0f / client.bottom;
+					if (current.dragging && continuous && last.panel == panel && last.dragging && current.clientHeight > 0) {
+						const float scale = 50.0f / current.clientHeight;
 						dragX = (current.cursor.x - last.cursor.x) * scale;
 						dragY = (last.cursor.y - current.cursor.y) * scale;
 					}
@@ -9394,16 +9428,24 @@ namespace
 					const float panX = moveX * moveStep + (shift ? 1.5f * x * step + 0.03f * dragX : 0);
 					const float panY = moveY * moveStep + (shift ? 1.5f * y * step + 0.03f * dragY : 0);
 					const float zoom = keyboardZoom + wheelZoom;
-					if (yaw || pitch || roll || panX || panY || zoom) NudgeMvFixedFraming(yaw, pitch, roll, panX, panY, zoom, panel);
+					if (yaw || pitch || roll || panX || panY || zoom) {
+						if (normalFocus) NudgeMvNormalFocusFraming(yaw, pitch, roll, panX, panY, zoom);
+						else NudgeMvFixedFraming(yaw, pitch, roll, panX, panY, zoom, panel);
+					}
 
 					static bool keyboardTurnLogged, keyboardPanLogged, keyboardZoomLogged, mouseTurnLogged, mousePanLogged, wheelLogged, rollLogged;
-					LogOnce(!shift && (x || y), keyboardTurnLogged, "keyboard turn");
-					LogOnce(moveX || moveY || (shift && (x || y)), keyboardPanLogged, "fixed keyboard pan");
-					LogOnce(keyboardZoom != 0, keyboardZoomLogged, "keyboard zoom");
-					LogOnce(!shift && (dragX || dragY), mouseTurnLogged, "mouse turn");
-					LogOnce(shift && (dragX || dragY), mousePanLogged, "mouse pan");
-					LogOnce(wheelZoom != 0, wheelLogged, "mouse zoom");
-					LogOnce(roll != 0, rollLogged, "keyboard roll");
+					const char* prefix = normalFocus ? "normal focus " : "fixed ";
+					auto logAction = [&](bool active, bool& loggedAction, const char* action) {
+						if (active && !std::exchange(loggedAction, true))
+							Log(std::format("[mv-camera-input] applied {}{}", prefix, action));
+					};
+					logAction(!shift && (x || y), keyboardTurnLogged, "keyboard turn");
+					logAction(moveX || moveY || (shift && (x || y)), keyboardPanLogged, "keyboard pan");
+					logAction(keyboardZoom != 0, keyboardZoomLogged, "keyboard zoom");
+					logAction(!shift && (dragX || dragY), mouseTurnLogged, "mouse turn");
+					logAction(shift && (dragX || dragY), mousePanLogged, "mouse pan");
+					logAction(wheelZoom != 0, wheelLogged, "mouse zoom");
+					logAction(roll != 0, rollLogged, "keyboard roll");
 				}
 			}
 
@@ -10896,6 +10938,7 @@ namespace
 				HWND window = nullptr;
 				bool displayed = false;
 				bool useLinearReadback = false;
+				std::atomic<float> pendingWheel{0};
 				int lastFrame = -1, errors = 0;
 				unsigned mvFrames = 0, readbacks = 0, presented = 0;
 				ULONGLONG sampleStart = 0;
@@ -10908,6 +10951,11 @@ namespace
 					}
 					auto* self = reinterpret_cast<SplitPreview*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
 					if (message == WM_MOUSEACTIVATE) return MA_NOACTIVATE;
+					if (message == WM_MOUSEWHEEL && self && self->id == 0 && GetMvNormalFocusWindow()) {
+						self->pendingWheel.fetch_add(static_cast<float>(GET_WHEEL_DELTA_WPARAM(wParam)) / WHEEL_DELTA,
+							std::memory_order_relaxed);
+						return 0;
+					}
 					if (message == WM_CLOSE && self) {
 						SetMvSplitPreviewPane(self->id, -1);
 						DestroyWindow(hwnd);
@@ -10926,6 +10974,7 @@ namespace
 
 				bool Open(int preview) {
 					id = preview;
+					pendingWheel.store(0, std::memory_order_relaxed);
 					lastFrame = -1;
 					errors = 0;
 					useLinearReadback = false;
@@ -10962,6 +11011,14 @@ namespace
 				}
 			};
 			SplitPreview splitPreviews[2];
+
+			HWND NormalFocusPreviewWindow() {
+				return GetMvNormalFocusWindow() ? splitPreviews[0].window : nullptr;
+			}
+
+			float TakeNormalFocusWheelDelta() {
+				return splitPreviews[0].pendingWheel.exchange(0, std::memory_order_relaxed);
+			}
 
 			struct AsyncTextureRequest {
 				void* ptr = nullptr;
@@ -11378,6 +11435,7 @@ namespace
 
 			bool Update(void* camera, void* owner, CameraPath source, CameraMode mode) {
 				const bool normalFocus = mode == CameraMode::Normal && GetMvNormalFocusWindow();
+				if (!normalFocus) TakeNormalFocusWheelDelta();
 				const bool fixedSplit = mode == CameraMode::Fixed && GetMvSplitEnabled();
 				if (!installed || (!fixedSplit && !normalFocus) || !camera || !owner ||
 					!portraitMask.viewHandle || g_enable_free_camera) {
@@ -11423,7 +11481,7 @@ namespace
 						renderer.fallbackCanvas.Get() ? "fallback" : "live"));
 				}
 				renderer.owner = owner;
-				if (!normalFocus) FramingInput::Poll(camera, source, mode, GetMvSplitPanelForLayout(layout));
+				FramingInput::Poll(camera, source, mode, normalFocus ? 0 : GetMvSplitPanelForLayout(layout), normalFocus);
 				const unsigned detachedPanels = UpdateSplitPreviews(renderer.panels, paneCount, frame);
 				const bool showOverlay = !normalFocus && detachedPanels == 0;
 				if (showOverlay != renderer.overlayVisible) {

@@ -748,6 +748,7 @@ namespace SCGUILoop {
 					ImGui::PopID();
 				}
 				if (ImGui::TreeNode("正常自动镜头：竖向聚焦窗")) {
+					HELP_TOOLTIP("窗口控制 (?)", "右键拖动 / WASD：环绕角色\n滚轮 / Z 和 X：缩放\nI / K / J / L：上下左右平移\nShift + 右键拖动 / Shift + WASD：平移\nQ 和 E：滚转\nR：重置");
 					bool enabled = GetMvNormalFocusWindow();
 					if (ImGui::Checkbox("单独打开竖向聚焦窗口", &enabled)) SetMvNormalFocusWindow(enabled);
 					if (enabled) {
